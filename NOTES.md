@@ -62,6 +62,7 @@ Known limitations and gaps:
 - **Moonlight's 1,392-byte video payloads** exceed the 1,372 bytes a 1,400-byte TUN carries whole, so each is sent as two fragments. They are delivered correctly; the cost is CPU.
 - **The mesh lane:** a full lane packet (1,461 bytes) exceeds Tailscale's 1,280-byte MTU, so the OS fragments it.
 - **Not done:** the six engine test vectors regenerated from Rust; the GPUI viewer (`crates/view`).
+- **Review of the install work:** an adversarial review (installers, the Rust changes, CI) found 18 defects, all fixed in the commits after 60d0088. Its docs-accuracy pass did not finish: README's Install and Set up, SPEC §19 and §22 and the installers' printed next steps are worth one more read against the code.
 - **Not yet run on real hardware:** macOS and Windows code has run only in CI (unit tests and the installers' service install); ICS on Windows with Wintun, pf on macOS and the field run (§23.1 tier 4) remain. The ARM builds (Linux aarch64, armv6/7; Windows ARM64) are built and linted but never run.
 - **Install, untested paths:** Windows's "changing wirebond needs an administrator PowerShell" (CI's runner is always an administrator); `install.ps1` on Windows Server 2016, which needs TLS 1.2 turned on before `irm` can fetch it; Linux without systemd is refused by the installer, but a manual `wirebond install` there leaves its files until `wirebond uninstall`. On Windows, if writing the machine PATH fails, install still says a new PowerShell will find `wirebond` (uninstall does name a PATH entry it could not remove).
 
