@@ -34,7 +34,8 @@ updates itself from GitHub releases, checking each download's hash and rolling b
 does not stay healthy; running the installer again also updates. `sudo wirebond uninstall`
 removes everything wirebond created.
 
-Linux needs systemd, `ip` and `nft` (the iproute2 and nftables packages), and `nmcli` for `support`.
+Linux needs systemd (the installer stops without it), `ip` and `nft` (the iproute2 and nftables
+packages), and `nmcli` for `support`.
 
 <details>
 <summary>Without the installer</summary>
@@ -79,7 +80,8 @@ administrator PowerShell). The assets are named as `uname -sm` prints the machin
 
 Commands that change something need `sudo`, or an administrator PowerShell on Windows, where the
 commands are the same without `sudo`. Reading the status needs nothing. `sudo wirebond client off`
-stops the bond, and traffic goes direct again.
+stops the bond, and traffic goes direct again. Fedora and RHEL leave `/usr/local/bin` off sudo's
+PATH: there, run `sudo /usr/local/bin/wirebond …`.
 
 ## What it does and does not promise
 

@@ -57,7 +57,8 @@ main() {
     fi
 
     if [ "$os" = Linux ]; then
-        [ -d /run/systemd/system ] || warn "wirebond runs as a systemd service, and systemd is not running here"
+        [ -d /run/systemd/system ] ||
+            die "wirebond runs as a systemd service, and systemd is not running here (on WSL, turn it on in /etc/wsl.conf)"
         have ip || warn "wirebond needs ip, from the iproute2 package (iproute on Fedora)"
         have nft || warn "wirebond needs nft, from the nftables package"
     fi
@@ -71,19 +72,29 @@ main() {
     want=$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/SHA256SUMS")
     [ -n "$want" ] || die "the release's SHA256SUMS does not list $asset"
     got=$(sha256 "$tmp/wirebond")
-    [ "$got" = "$want" ] || die "$asset does not match SHA256SUMS (got $got, want $want); nothing was installed"
+    [ "$got" = "$want" ] ||
+        die "$asset does not match SHA256SUMS (got $got, want $want); nothing was installed. If a release came out just now, run this again."
     chmod 755 "$tmp/wirebond"
+    # It runs here: the right build, and a folder that is not mounted noexec.
+    "$tmp/wirebond" version >/dev/null 2>&1 ||
+        die "the download does not run from $tmp (is it mounted noexec?): set TMPDIR to another folder and run this again"
 
     [ -z "$sudo" ] || say "installing as root with $sudo"
     $sudo "$tmp/wirebond" install
 
-    cat <<'EOF'
+    # How to run it as root: sudo's own PATH can leave out /usr/local/bin (Fedora, RHEL).
+    wb=wirebond
+    if [ -n "$sudo" ] && ! $sudo -n sh -c 'command -v wirebond' >/dev/null 2>&1; then
+        wb=/usr/local/bin/wirebond
+    fi
+    run=${sudo:+$sudo }$wb
+    cat <<EOF
 
 Next, on the device with the good connection, the anchor:
-    sudo wirebond anchor on
-    sudo wirebond anchor allow <client>
+    $run anchor on
+    $run anchor allow <client>
 and on the device on the poor connection, the client:
-    sudo wirebond client <anchor>
+    $run client <anchor>
 <client> and <anchor> are the devices' names on your mesh (tailscale status lists them).
 wirebond status shows the bond; wirebond help lists the rest.
 EOF
@@ -109,11 +120,12 @@ have() {
     command -v "$1" >/dev/null 2>&1 || [ -x "/usr/sbin/$1" ] || [ -x "/sbin/$1" ]
 }
 
+# Downloads $1 into the file $2, which the shell writes: a confined curl (a snap) may not see $TMPDIR.
 fetch() {
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 -o "$2" "$1" || die "could not download $1"
+        curl -fsSL --retry 3 "$1" >"$2" || die "could not download $1"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "$2" "$1" || die "could not download $1"
+        wget -q -O - "$1" >"$2" || die "could not download $1"
     else
         die "downloading needs curl or wget"
     fi

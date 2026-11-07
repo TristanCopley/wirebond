@@ -342,11 +342,12 @@ fn reg_string(key: &[u16], name: &[u16]) -> io::Result<String> {
 /// path, the CLI says how to run it.
 pub fn register(_: Scope, exe: &Path, _restart: bool) -> io::Result<bool> {
     let mut changed = netsh("show rule name=wirebond").is_err();
-    changed |= exe.parent().is_some_and(|d| machine_path(d, true).unwrap_or(false));
     if changed {
         let (rule, exe) = ("name=wirebond dir=in action=allow", exe.display());
         netsh(&format!(r#"add rule {rule} program="{exe}" enable=yes profile=any"#))?;
     }
+    // After the rule, whose absence alone decides whether to add it.
+    changed |= exe.parent().is_some_and(|d| machine_path(d, true).unwrap_or(false));
     // wintun.dll beside the executable (SPEC 2.0 §5.3), from the copy embedded in it.
     if v2::wintun_embedded() {
         changed |= v2::place_wintun(exe)?;

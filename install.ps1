@@ -14,16 +14,19 @@
 & {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue' # Windows PowerShell's progress bar slows downloads tenfold
-    # Windows PowerShell 5.1 may offer only TLS 1.0, which GitHub refuses.
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'wirebond installs a Windows service: run this in an administrator PowerShell (right-click PowerShell, then Run as administrator).'
     }
-    # A 32-bit PowerShell on 64-bit Windows names the machine's architecture in PROCESSOR_ARCHITEW6432.
-    $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    # The machine's own architecture, from its environment: a process's PROCESSOR_ARCHITECTURE is
+    # its own, and an x64 PowerShell emulated on ARM64 would fetch the AMD64 build.
+    $envKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+    $arch = (Get-ItemProperty -Path $envKey -Name PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue).PROCESSOR_ARCHITECTURE
+    if (-not $arch) { $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE } }
     if ($arch -notin 'AMD64', 'ARM64') { throw "There is no wirebond build for $arch Windows." }
+    # The 64-bit Program Files, where wirebond installs, even from a 32-bit PowerShell.
+    $programFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
     $asset = "wirebond-Windows-$arch.exe"
     $tag = if ($env:WIREBOND_TAG) { $env:WIREBOND_TAG } else { 'latest' }
     $url = if ($env:WIREBOND_URL) {
@@ -47,10 +50,12 @@
         }
         if (-not $want) { throw "The release's SHA256SUMS does not list $asset." }
         $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash
-        if ($got -ne $want) { throw "$asset does not match SHA256SUMS (got $got, want $want); nothing was installed." }
+        if ($got -ne $want) {
+            throw "$asset does not match SHA256SUMS (got $got, want $want); nothing was installed. If a release came out just now, run this again."
+        }
         # The folder wirebond installs into goes on this window's PATH as well as the system's, so
         # that `wirebond` works here at once.
-        $folder = Join-Path $env:ProgramFiles 'wirebond'
+        $folder = Join-Path $programFiles 'wirebond'
         if (($env:Path -split ';' | ForEach-Object { $_.TrimEnd('\') }) -notcontains $folder) {
             $env:Path = $env:Path.TrimEnd(';') + ";$folder"
         }
@@ -70,7 +75,7 @@ and on the device on the poor connection, the client:
 <client> and <anchor> are the devices' names on your mesh (tailscale status lists them).
 wirebond status shows the bond; wirebond help lists the rest.
 '@
-    if (-not (Get-Command tailscale -ErrorAction SilentlyContinue) -and -not (Test-Path (Join-Path $env:ProgramFiles 'Tailscale'))) {
+    if (-not (Get-Command tailscale -ErrorAction SilentlyContinue) -and -not (Test-Path (Join-Path $programFiles 'Tailscale'))) {
         Write-Warning 'Tailscale is not installed here: wirebond needs a mesh, such as Tailscale, joining the two devices.'
     }
 }
