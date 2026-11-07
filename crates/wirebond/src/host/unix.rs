@@ -278,7 +278,14 @@ pub(super) fn link(link: &Path, exe: &Path) -> io::Result<bool> {
     if link.symlink_metadata().is_ok() {
         return Ok(false);
     }
-    fs::create_dir_all(link.parent().unwrap_or(link))?;
+    // Folders it makes (/usr/local/bin on a new Mac) are 0755 whatever root's umask: everyone
+    // runs what is there.
+    let dir = link.parent().unwrap_or(link);
+    let missing: Vec<&Path> = dir.ancestors().take_while(|d| !d.exists()).collect();
+    fs::create_dir_all(dir)?;
+    for d in missing {
+        fs::set_permissions(d, Permissions::from_mode(0o755))?;
+    }
     std::os::unix::fs::symlink(exe, link).map(|()| true)
 }
 

@@ -677,6 +677,18 @@ mod on_linux {
         assert!(build.is_empty() || download != (m.dev(), m.ino()), "{name}: the download moved");
     }
 
+    /// The folders `link` makes (/usr/local/bin on a new Mac) are 0755 even under a root umask of
+    /// 077: everyone runs what is there.
+    #[test]
+    fn link_makes_folders_everyone_can_enter() {
+        let _umask = Umask::set(0o077);
+        let tmp = Tmp::new();
+        assert!(unix::link(&tmp.0.join("usr/local/bin/wirebond"), Path::new("/x/wirebond")).unwrap());
+        for d in ["usr", "usr/local", "usr/local/bin"] {
+            assert_eq!(mode(tmp.0.join(d)), 0o755, "{d}");
+        }
+    }
+
     #[test]
     fn install_and_uninstall() {
         let _umask = Umask::set(0o077); // modes do not depend on it

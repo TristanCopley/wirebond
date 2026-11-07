@@ -98,6 +98,12 @@ pub(super) fn register(s: Scope, exe: &Path, restart: bool) -> io::Result<bool> 
     run("launchctl", &["kickstart", flag, &format!("{dom}/com.wirebond")]).map(|_| changed || linked)
 }
 
+/// The system executable's LINK once more, after install removed the download, which may have
+/// stood where LINK goes; whether it made it.
+pub(super) fn relink(s: Scope, exe: &Path) -> bool {
+    s == Scope::System && link(Path::new(LINK), exe).unwrap_or(false)
+}
+
 /// Boots the job out and removes its plist, LINK, and the application firewall's entry for `exe`.
 /// That needs root; while the firewall still lists `exe`, the note is the command for the CLI to
 /// print (§15.6).

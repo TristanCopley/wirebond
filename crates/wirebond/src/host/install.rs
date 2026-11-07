@@ -26,14 +26,15 @@ pub(super) fn has(s: Scope) -> bool {
     s.paths().1.join(CONFIG_FILE).exists() && (s == Scope::System || cfg!(target_os = "macos"))
 }
 
-/// Whether `wirebond` on PATH is `s`'s executable: in its directory, or a link to it such as the
-/// one macOS's install makes in /usr/local/bin. While it is not, the CLI names the executable's
-/// full path (§15.2).
+/// Whether `wirebond` on PATH is `s`'s executable: the first `wirebond` along PATH is it, or a
+/// link to it such as the one macOS's install makes in /usr/local/bin; an older copy earlier on
+/// PATH would shadow it. While it is not, the CLI names the executable's full path (§15.2).
 pub fn on_path(s: Scope) -> bool {
     let exe = s.paths().0;
     let (Some(name), Ok(real)) = (exe.file_name(), fs::canonicalize(&exe)) else { return false };
     let dirs = env::var_os("PATH").unwrap_or_default();
-    env::split_paths(&dirs).any(|d| fs::canonicalize(d.join(name)).is_ok_and(|p| p == real))
+    let first = env::split_paths(&dirs).map(|d| d.join(name)).find(|p| p.is_file());
+    first.is_some_and(|p| fs::canonicalize(p).is_ok_and(|p| p == real))
 }
 
 /// `path`, a PATH value, with `dir` added at its end; None while it holds `dir` already. Entries
@@ -93,6 +94,12 @@ pub fn install(s: Scope) -> io::Result<bool> {
     changed |= os::register(s, &exe, changed)?;
     if let Some(d) = download {
         os::drop(&d);
+        // A download saved where the link goes, /usr/local/bin/wirebond, kept register from
+        // linking; it is gone now.
+        #[cfg(target_os = "macos")]
+        {
+            changed |= os::relink(s, &exe);
+        }
     }
     Ok(changed)
 }

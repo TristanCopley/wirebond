@@ -299,7 +299,12 @@ fn netsh(args: &str) -> io::Result<()> {
 /// `wirebond` there: Explorer, told of the change as setx tells it, passes the new PATH on.
 fn machine_path(dir: &Path, on: bool) -> io::Result<bool> {
     let (key, name) = (wide(ENVIRONMENT), wide("Path"));
-    let (old, dir) = (reg_string(&key, &name)?, dir.to_string_lossy());
+    // A machine without a PATH value has an empty one.
+    let old = match reg_string(&key, &name) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        r => r?,
+    };
+    let dir = dir.to_string_lossy();
     let new = if on { super::install::path_with(&old, &dir) } else { super::install::path_without(&old, &dir) };
     let Some(new) = new else { return Ok(false) };
     let data = wide(&new);
@@ -406,11 +411,18 @@ pub fn halt(_: Scope) {
     let _ = stop_service(false);
 }
 
-/// Removes the firewall rule and the PATH entry, then stops and deletes the service.
+/// Removes the firewall rule and the PATH entry, then stops and deletes the service. A PATH entry
+/// it cannot remove is the note, for the CLI to print.
 pub fn unregister(_: Scope, exe: &Path) -> io::Result<(bool, String)> {
     let mut changed = netsh("delete rule name=wirebond").is_ok();
-    changed |= exe.parent().is_some_and(|d| machine_path(d, false).unwrap_or(false));
-    Ok((stop_service(true)? || changed, String::new()))
+    let mut note = String::new();
+    if let Some(d) = exe.parent() {
+        match machine_path(d, false) {
+            Ok(c) => changed |= c,
+            Err(e) => note = format!("remove {} from the system PATH ({e})", d.display()),
+        }
+    }
+    Ok((stop_service(true)? || changed, note))
 }
 
 /// Stops the service, if there is one, waiting up to 10 s, then deletes it if del. Returns
