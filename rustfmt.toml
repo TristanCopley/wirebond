@@ -1,0 +1,3 @@
+# A line holds what fits in 120 columns, and a short item stays on one line.
+max_width = 120
+use_small_heuristics = "Max"

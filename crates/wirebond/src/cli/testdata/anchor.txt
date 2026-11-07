@@ -1,0 +1,26 @@
+xanth · anchor · wirebond 2.0.0
+
+links
+  1  eth  ethernet  group 1  up
+
+anchor · uplink eth · egress IPv4 and IPv6 · allows mac, tablet, pc
+  bond from mac · performance · up
+    addresses: 10.77.0.2 fd77:b0d::2 · egressed 2.4 GB · delivered here 18.0 GB
+    lane  links             group  state  rtt     dev    loss  rate   share  first  rescues
+    257   Wi-Fi → eth       1      up     61.0ms  0.9ms  0.0%  6Mbps  50%    64%    7/min
+    513   iPhone USB → eth  2      up     70.1ms  5.0ms  1.0%  6Mbps  50%    36%    19/min
+  bond from tablet · bandwidth · punching
+    addresses: 10.77.0.3 · egressed 0 B · delivered here 0 B
+    no lanes yet
+
+contribution · sent 20.4 GB · received 900 MB · since start
+
+mesh
+  mac     client  1 bond  reachable
+  tablet  client  1 bond  reachable
+
+problems: none
+
+events
+  2026-11-06T21:58:02Z: bond from mac up
+  2026-11-06T22:01:13Z: bond from tablet open

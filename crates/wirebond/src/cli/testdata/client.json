@@ -1,0 +1,31 @@
+{
+  "device": "mac", "role": "client", "version": "2.0.0",
+  "links": [
+    {"id": 1, "name": "Wi-Fi", "kind": "wifi", "group": 1, "metered": false, "up": true, "captive": false, "support": null},
+    {"id": 2, "name": "iPhone USB", "kind": "usb", "group": 2, "metered": true, "up": true, "captive": false, "support": null},
+    {"id": 3, "name": "en7", "kind": "ethernet", "group": 3, "metered": false, "up": true, "captive": false, "support": "pi"},
+    {"id": 4, "name": "hotel-eth", "kind": "ethernet", "group": 1, "metered": false, "up": true, "captive": true, "support": null}
+  ],
+  "bond": {"anchor": "xanth", "mode": "performance", "state": "up",
+           "addr4": "10.77.0.2", "addr6": "fd77:b0d::2", "anchor_addr4": "10.77.0.1", "anchor_addr6": "fd77:b0d::1",
+           "egress": "both",
+           "lanes": [
+             {"id": 0, "links": [], "group": 1, "state": "up", "rtt_ms": 64.2, "owd_ms": 31.9, "dev_ms": 1.4, "loss": 0.0,
+              "rate_mbps": 12.0, "tx_mbps": 0.1, "rx_mbps": 0.1, "share": 0.0, "first_arrivals": 0.02, "rescues_per_min": 0, "bytes_today": 120000},
+             {"id": 257, "links": ["Wi-Fi", "eth"], "group": 1, "state": "up", "rtt_ms": 61.0, "owd_ms": 30.2, "dev_ms": 1.1, "loss": 0.0,
+              "rate_mbps": 38.0, "tx_mbps": 30.1, "rx_mbps": 2.0, "share": 0.5, "first_arrivals": 0.71, "rescues_per_min": 12, "bytes_today": 1200000000},
+             {"id": 513, "links": ["iPhone USB", "eth"], "group": 2, "state": "suspect", "rtt_ms": 70.4, "owd_ms": 38.0, "dev_ms": 6.3, "loss": 0.005,
+              "rate_mbps": 80.0, "tx_mbps": 30.1, "rx_mbps": 2.0, "share": 0.5, "first_arrivals": 0.27, "rescues_per_min": 31, "bytes_today": 1200000000},
+             {"id": 769, "links": ["en7", "eth"], "group": 3, "state": "punching", "rtt_ms": 0.0, "owd_ms": 0.0, "dev_ms": 0.0, "loss": 0.0,
+              "rate_mbps": 0.0, "tx_mbps": 0.0, "rx_mbps": 0.0, "share": 0.0, "first_arrivals": 0.0, "rescues_per_min": 0, "bytes_today": 0}
+           ],
+           "flows": 143, "small_flows": 9},
+  "anchor": null,
+  "support": null,
+  "contribution": {"tx_bytes": 2400000000, "rx_bytes": 310000000, "since": "start"},
+  "mesh": [{"device": "xanth", "role": "anchor", "bonds": 1, "reachable": true},
+           {"device": "pi", "role": "support", "bonds": 0, "reachable": true},
+           {"device": "vps", "role": "anchor", "bonds": 2, "reachable": false}],
+  "problems": [{"code": "captive_portal", "link": "hotel-eth", "next": "wirebond client off"}],
+  "events": ["2026-11-06T21:58:02Z: bond to xanth up", "2026-11-06T21:59:40Z: lane 513 suspect"]
+}

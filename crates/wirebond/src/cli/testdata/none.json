@@ -1,0 +1,11 @@
+{
+  "device": "desk", "role": "none", "version": "2.0.0",
+  "links": [],
+  "bond": null,
+  "anchor": null,
+  "support": null,
+  "contribution": {"tx_bytes": 0, "rx_bytes": 0, "since": "start"},
+  "mesh": [],
+  "problems": [{"code": "config_invalid", "msg": "config.json: expected value at line 1 column 1; starting from the defaults"}],
+  "events": []
+}

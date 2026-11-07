@@ -1,0 +1,26 @@
+[package]
+name = "wirebond"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Bond extra network paths onto one Tailscale connection."
+
+[[bin]]
+name = "wirebond"
+path = "src/main.rs"
+
+[dependencies]
+getrandom = "0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+sha2 = "0.11.0"
+socket2 = { version = "0.6.5", features = ["all"] } # TcpKeepalive::with_retries (KEEP_COUNT, §7.1)
+wirebond-core = { path = "../core" }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Media", "Win32_Networking_WinSock", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_System_IO", "Win32_System_LibraryLoader","Win32_System_Services", "Win32_System_SystemInformation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_Storage_FileSystem"] }

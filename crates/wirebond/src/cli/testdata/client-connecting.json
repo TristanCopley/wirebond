@@ -1,0 +1,17 @@
+{
+  "device": "mac", "role": "client", "version": "2.0.0",
+  "links": [
+    {"id": 1, "name": "Wi-Fi", "kind": "wifi", "group": 1, "metered": false, "up": true, "captive": false, "support": null}
+  ],
+  "bond": {"anchor": "xanth", "mode": "performance", "state": "connecting",
+           "addr4": null, "anchor_addr4": null, "egress": "none", "lanes": [], "flows": 0, "small_flows": 0},
+  "anchor": null,
+  "support": null,
+  "contribution": {"tx_bytes": 0, "rx_bytes": 0, "since": "start"},
+  "mesh": [{"device": "xanth", "role": "none", "bonds": 0, "reachable": false}],
+  "problems": [{"code": "anchor_unreachable", "msg": "xanth did not answer on 100.64.0.1:7849; redialing in 8 s"},
+               {"code": "lanes_blocked"}, {"code": "mesh_only"}, {"code": "bond_down"}, {"code": "no_egress"},
+               {"code": "missing_tool", "msg": "ip is not installed"}, {"code": "mesh_captured"}, {"code": "config_invalid"},
+               {"code": "something_new"}],
+  "events": ["2026-11-06T22:10:00Z: dialing xanth"]
+}

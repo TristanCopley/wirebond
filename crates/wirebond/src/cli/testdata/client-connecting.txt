@@ -1,0 +1,36 @@
+mac · client · wirebond 2.0.0
+
+links
+  1  Wi-Fi  wifi  group 1  up
+
+bond to xanth · performance · connecting · egress none
+  flows: 0 live, 0 small
+  no lanes yet
+
+contribution · sent 0 B · received 0 B · since start
+
+mesh
+  xanth  none  0 bonds  unreachable
+
+problems
+  anchor_unreachable: xanth did not answer on 100.64.0.1:7849; redialing in 8 s
+    next: check xanth is on and on the mesh: wirebond status xanth
+  lanes_blocked: no lane validated: UDP may be blocked
+    next: allow UDP 7849 to and from both devices
+  mesh_only: only the mesh lane carries the bond, which gains nothing over the mesh alone
+    next: cable a phone or another network, or try another anchor: wirebond pick
+  bond_down: every lane and the channel are down; traffic goes direct
+    next: wait: capture returns when a lane validates
+  no_egress: the anchor offers no internet: only its own services go through the bond
+    next: check xanth's uplink: wirebond status xanth
+  missing_tool: ip is not installed
+    next: install it (ip: iproute2, nft: nftables, nmcli: NetworkManager), then restart wirebond
+  mesh_captured: the mesh's own traffic entered the bond, so capture is off
+    next: check the mesh binds its sockets to the physical interface
+  config_invalid: config.json does not read; the defaults are in use
+    next: set the role again: wirebond client <anchor>, anchor on or support on
+  something_new
+    next: wirebond status --json shows the details
+
+events
+  2026-11-06T22:10:00Z: dialing xanth

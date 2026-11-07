@@ -1,0 +1,26 @@
+laptop · client · wirebond 2.0.0
+
+links
+  1  wlan0  wifi  group 1  up
+  2  usb0   usb   group 2  up · metered
+
+bond to gamepc · bandwidth · up · egress IPv4
+  addresses: laptop 192.168.137.12 · gamepc 192.168.137.1
+  flows: 12 live, 3 small
+  lane  links             group  state  rtt     dev    loss  rate    share  reorder p50/p99
+  257   wlan0 → Ethernet  1      up     22.5ms  0.8ms  0.1%  42Mbps  36%    0.4/6.5ms
+  513   usb0 → Ethernet   2      up     41.0ms  3.2ms  0.4%  72Mbps  64%    0.0/2.1ms
+
+Moonlight: add the host 192.168.137.1 to stream from gamepc
+
+contribution · sent 51.0 MB · received 2.5 GB · since 2026-11-06T20:00:00Z
+
+mesh: none
+
+problems
+  dns_local: DNS stays with the local resolver
+    next: install and enable systemd-resolved
+  peer_newer: gamepc runs 3.0.0
+    next: wirebond update
+
+events: none

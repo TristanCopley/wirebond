@@ -1,0 +1,62 @@
+# wirebond's system harness (SPEC §23.1 tier 3): the daemon as released, as client and anchor, in
+# network namespaces, as root, with real TUN devices, nftables NAT, tc's tbf and netem; driven by
+# crates/load. tests/system/run.sh does it all; this job builds what it runs and installs the tools.
+# release.yml calls this workflow before it publishes.
+name: system
+
+on:
+  push:
+    branches: ['**'] # tags run release.yml, which calls this workflow
+  pull_request:
+  schedule:
+    - cron: '41 10 * * *'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: '1.99.1' # as in ci.yml
+
+concurrency:
+  # Literal: in a workflow_call github.workflow is the caller's name, and release.yml calls ci.yml and system.yml at once.
+  group: system-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal -t x86_64-unknown-linux-musl --no-self-update && rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - name: The daemon as released (static, musl), the load tool; tc's netem and tbf, nftables, jq
+        run: |
+          mkdir -p "$RUNNER_TEMP/system" && echo "TMPDIR=$RUNNER_TEMP/system" >> "$GITHUB_ENV"
+          cargo build --release -p wirebond --locked --target x86_64-unknown-linux-musl
+          cargo build --release -p load --locked
+          echo "WIREBOND_BIN=$PWD/target/x86_64-unknown-linux-musl/release/wirebond" >> "$GITHUB_ENV"
+          echo "LOAD_BIN=$PWD/target/release/load" >> "$GITHUB_ENV"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables jq
+          sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" || echo "no linux-modules-extra: netem may be skipped"
+          sudo modprobe -a sch_netem sch_tbf tun || true
+      - name: The namespaces and the load tool, with no daemon
+        run: sudo env PATH="$PATH" TMPDIR="$TMPDIR" LOAD_BIN="$LOAD_BIN" tests/system/run.sh net
+      - name: A7, A8, A9, A10, A12, and the shaped and netem runs against the mesh-lane baseline
+        run: |
+          {
+            echo '```'
+            sudo env PATH="$PATH" TMPDIR="$TMPDIR" WIREBOND_BIN="$WIREBOND_BIN" LOAD_BIN="$LOAD_BIN" tests/system/run.sh daemons
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        run: sudo chmod -R a+rX "$TMPDIR"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system
+          path: ${{ runner.temp }}/system

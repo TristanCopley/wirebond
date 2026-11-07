@@ -1,0 +1,20 @@
+xanth · client · wirebond 2.0.1 · remote view
+
+links
+  1  eth  ethernet  group 1  up
+
+bond to vps · performance · up · egress IPv4 and IPv6
+  addresses: xanth 10.77.0.5 · vps 10.77.0.1
+  flows: 0 live, 0 small
+  lane  links       group  state  rtt     dev    loss  rate     share  first  rescues
+  257   eth → ens3  1      up     18.0ms  0.3ms  0.0%  200Mbps  100%   100%   0/min
+
+contribution · sent 0 B · received 0 B · since start
+
+mesh: none
+
+problems
+  mesh_only: only the mesh lane carries the bond, which gains nothing over the mesh alone
+    next (on xanth): cable a phone or another network, or try another anchor: wirebond pick
+
+events: none

@@ -1,0 +1,14 @@
+{
+  "device": "pi", "role": "support", "version": "2.0.0",
+  "links": [
+    {"id": 1, "name": "eth0", "kind": "ethernet", "group": 1, "metered": false, "up": true, "captive": false, "support": null},
+    {"id": 2, "name": "usb0", "kind": "usb", "group": 2, "metered": false, "up": true, "captive": false, "support": null}
+  ],
+  "bond": null,
+  "anchor": null,
+  "support": {"uplink": "eth0", "cable": "usb0", "client": "mac", "carried_bytes": 4400000000},
+  "contribution": {"tx_bytes": 2200000000, "rx_bytes": 2200000000, "since": "start"},
+  "mesh": [{"device": "mac", "role": "client", "bonds": 1, "reachable": true}],
+  "problems": [],
+  "events": []
+}

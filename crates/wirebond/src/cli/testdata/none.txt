@@ -1,0 +1,14 @@
+desk · no role · wirebond 2.0.0
+  wirebond client <anchor>, anchor on, or support on <uplink> <cable> gives it one
+
+links: none
+
+contribution · sent 0 B · received 0 B · since start
+
+mesh: none
+
+problems
+  config_invalid: config.json: expected value at line 1 column 1; starting from the defaults
+    next: set the role again: wirebond client <anchor>, anchor on or support on
+
+events: none

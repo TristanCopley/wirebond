@@ -1,0 +1,7 @@
+pick · performance · lowest score wins
+  device  lanes  groups  score
+  xanth   3      2       34.2 ms
+  vps     2      2       51.0 ms
+  office  2      1       last: every lane in one group
+  nas     0      0       last: no validated lane
+winner: xanth, now the anchor; the bond reconnects, which breaks open connections

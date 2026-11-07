@@ -1,0 +1,14 @@
+{
+  "device": "evil\u001b[2J", "role": "client", "version": "2.0.0\u009b31m",
+  "links": [
+    {"id": 1, "name": "Wi‮iF-", "kind": "wifi", "group": 1, "metered": false, "up": true, "captive": false, "support": "ph\tone"}
+  ],
+  "bond": {"anchor": "x\nanth", "mode": "performance", "state": "up",
+           "addr4": "10.77.0.2", "anchor_addr4": "10.77.0.1\u0007", "egress": "both", "lanes": [], "flows": 0, "small_flows": 0},
+  "anchor": null,
+  "support": null,
+  "contribution": {"tx_bytes": 0, "rx_bytes": 0, "since": "start"},
+  "mesh": [{"device": "a​b", "role": "anchor", "bonds": 0, "reachable": true}],
+  "problems": [{"code": "captive_portal", "link": "Wi Fi", "next": "rm -rf /\u001b[8m"}],
+  "events": ["\u001b]0;owned\u0007"]
+}

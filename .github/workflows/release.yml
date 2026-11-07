@@ -1,0 +1,112 @@
+# Release (SPEC §15.1): on a tag vX.Y.Z, every check of ci.yml plus netsim's full acceptance set and
+# system.yml, then the executables, SHA256SUMS and a GitHub release. A manual run builds them and
+# keeps the assets as a workflow artifact, with no checks and no release.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: '1.99.1' # as in ci.yml
+
+jobs:
+  checks:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci.yml
+    with:
+      long: true
+
+  # The build is published only once its daemons pass tests/system (SPEC §17.1 tier 3).
+  system:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/system.yml
+
+  rust:
+    name: rust ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # A native runner wherever a linker is needed. The 32-bit ARM build is ARMv6 with VFP and
+          # serves both names; musl links it statically, so the linker that ships with Rust
+          # (rust-lld) needs no ARM C library.
+          - {os: macos-latest, target: aarch64-apple-darwin, assets: wirebond-Darwin-arm64, native: true}
+          - {os: macos-latest, target: x86_64-apple-darwin, assets: wirebond-Darwin-x86_64}
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-musl, assets: wirebond-Linux-x86_64, native: true}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, assets: wirebond-Linux-aarch64, native: true}
+          - {os: ubuntu-latest, target: arm-unknown-linux-musleabihf, assets: wirebond-Linux-armv7l wirebond-Linux-armv6l}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc, assets: wirebond-Windows-AMD64.exe, native: true}
+          - {os: windows-latest, target: aarch64-pc-windows-msvc, assets: wirebond-Windows-ARM64.exe}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      ASSETS: ${{ matrix.assets }}
+      EXE: target/${{ matrix.target }}/release/wirebond${{ startsWith(matrix.os, 'windows') && '.exe' || '' }}
+      WIREBOND_VERSION: ${{ github.ref_name }}
+      WIREBOND_COMMIT: ${{ github.sha }}
+      CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER: rust-lld
+      # The C runtime linked in, so the .exe needs no Visual C++ redistributable on the device.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal -t "$TARGET" --no-self-update && rustup default "$RUST_VERSION"
+      - name: Wintun 0.14.1, embedded in the Windows executable (SPEC 2.0 §5.3)
+        if: startsWith(matrix.os, 'windows')
+        shell: bash
+        run: .github/scripts/wintun.sh
+      - name: Build with the release profile, which strips (SPEC §15.1)
+        run: cargo build -p wirebond --release --locked --target "$TARGET"
+      - name: It runs and reports the tag, as an update's smoke test requires (SPEC §15.5 step 3)
+        if: matrix.native
+        run: |
+          out=$("$EXE" --version --json) || { echo "$EXE --version --json failed"; exit 1; }
+          echo "$out"
+          grep -qF "\"$WIREBOND_VERSION\"" <<< "$out" || { echo "it does not report $WIREBOND_VERSION"; exit 1; }
+      - name: Name it as uname -sm and PROCESSOR_ARCHITECTURE print
+        run: |
+          read -ra assets <<< "$ASSETS"
+          mkdir dist
+          for asset in "${assets[@]}"; do cp "$EXE" "dist/$asset"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: [checks, system, rust]
+    if: >-
+      always() && github.event_name == 'push' && needs.checks.result == 'success' &&
+      needs.rust.result == 'success' && needs.system.result == 'success' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: assets-*
+          merge-multiple: true
+          path: dist
+      - name: Every asset of SPEC §15.1 and nothing else, and SHA256SUMS
+        working-directory: dist
+        run: |
+          export LC_ALL=C # so * sorts as want is written
+          want=(wirebond-Darwin-arm64 wirebond-Darwin-x86_64 wirebond-Linux-aarch64 wirebond-Linux-armv6l
+            wirebond-Linux-armv7l wirebond-Linux-x86_64 wirebond-Windows-AMD64.exe wirebond-Windows-ARM64.exe)
+          have=(*)
+          [ "${have[*]}" = "${want[*]}" ] || { echo "the assets are not SPEC §15.1's: ${have[*]}"; exit 1; }
+          sha256sum wirebond-* > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/wirebond-* dist/SHA256SUMS --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"

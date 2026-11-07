@@ -1,0 +1,11 @@
+# Build outputs
+/bin/
+/dist/
+# netsim's downloaded traces (fetched by CI, checked by crates/netsim/traces.sum)
+/crates/netsim/testdata/traces/
+
+# Wintun, downloaded and checked by .github/scripts/wintun.sh (crates/wirebond/wintun.sum)
+/crates/wirebond/wintun/
+
+# Rust build output
+/target/

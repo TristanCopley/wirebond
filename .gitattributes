@@ -1,0 +1,3 @@
+# Scripts and checksum files keep LF on every checkout: a Windows runner converts to CRLF otherwise.
+*.sh text eol=lf
+*.sum text eol=lf

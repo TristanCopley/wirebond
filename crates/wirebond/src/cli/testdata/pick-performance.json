@@ -1,0 +1,6 @@
+{"mode": "performance",
+ "rows": [{"device": "xanth", "lanes": 3, "groups": 2, "score": 34.25, "reason": ""},
+          {"device": "vps", "lanes": 2, "groups": 2, "score": 51.0, "reason": ""},
+          {"device": "office", "lanes": 2, "groups": 1, "score": null, "reason": "every lane in one group"},
+          {"device": "nas", "lanes": 0, "groups": 0, "score": null, "reason": "no validated lane"}],
+ "winner": "xanth", "applied": true}

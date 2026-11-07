@@ -1,0 +1,33 @@
+mac · client · wirebond 2.0.0
+
+links
+  1  Wi-Fi       wifi      group 1  up
+  2  iPhone USB  usb       group 2  up · metered
+  3  en7         ethernet  group 3  up · from pi
+  4  hotel-eth   ethernet  group 1  up · captive portal: carries no lane
+
+bond to xanth · performance · up · egress IPv4 and IPv6
+  addresses: mac 10.77.0.2 fd77:b0d::2 · xanth 10.77.0.1 fd77:b0d::1
+  flows: 143 live, 9 small
+  lane  links             group  state     rtt     dev    loss  rate    share  first  rescues
+  0     mesh              1      up        64.2ms  1.4ms  0.0%  12Mbps  0%     2%     0/min
+  257   Wi-Fi → eth       1      up        61.0ms  1.1ms  0.0%  38Mbps  50%    71%    12/min
+  513   iPhone USB → eth  2      suspect   70.4ms  6.3ms  0.5%  80Mbps  50%    27%    31/min
+  769   en7 → eth         3      punching  -       -      -     -       -      -      0/min
+
+Moonlight: add the host 10.77.0.1 to stream from xanth
+
+contribution · sent 2.4 GB · received 310 MB · since start
+
+mesh
+  xanth  anchor   1 bond   reachable
+  pi     support  0 bonds  reachable
+  vps    anchor   2 bonds  unreachable
+
+problems
+  captive_portal on hotel-eth: this link wants a login, which would go through the anchor
+    next: wirebond client off
+
+events
+  2026-11-06T21:58:02Z: bond to xanth up
+  2026-11-06T21:59:40Z: lane 513 suspect

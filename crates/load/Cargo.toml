@@ -1,0 +1,12 @@
+[package]
+name = "load"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The load and echo tool of wirebond's system harness (SPEC §23.2). Standard library only."
+
+[[bin]]
+name = "load"
+path = "src/main.rs"

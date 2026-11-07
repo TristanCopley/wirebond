@@ -1,0 +1,4 @@
+{"mode": "bandwidth",
+ "rows": [{"device": "xanth", "lanes": 3, "groups": 2, "score": 112.4, "reason": ""},
+          {"device": "vps", "lanes": 2, "groups": 2, "score": 96.0, "reason": ""}],
+ "winner": "xanth", "applied": false}

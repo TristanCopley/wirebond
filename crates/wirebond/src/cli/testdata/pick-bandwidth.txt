@@ -1,0 +1,5 @@
+pick · bandwidth · highest score wins
+  device  lanes  groups  score
+  xanth   3      2       112.4 Mbps
+  vps     2      2       96.0 Mbps
+winner: xanth (nothing changed; wirebond client xanth makes it the anchor)

@@ -1,0 +1,25 @@
+{
+  "device": "laptop", "role": "client", "version": "2.0.0",
+  "links": [
+    {"id": 1, "name": "wlan0", "kind": "wifi", "group": 1, "metered": false, "up": true, "captive": false, "support": null},
+    {"id": 2, "name": "usb0", "kind": "usb", "group": 2, "metered": true, "up": true, "captive": false, "support": null}
+  ],
+  "bond": {"anchor": "gamepc", "mode": "bandwidth", "state": "up",
+           "addr4": "192.168.137.12", "anchor_addr4": "192.168.137.1",
+           "egress": "v4",
+           "lanes": [
+             {"id": 257, "links": ["wlan0", "Ethernet"], "group": 1, "state": "up", "rtt_ms": 22.5, "owd_ms": 11.0, "dev_ms": 0.8, "loss": 0.001,
+              "rate_mbps": 41.5, "tx_mbps": 1.2, "rx_mbps": 39.0, "share": 0.36, "first_arrivals": 0.0, "rescues_per_min": 0,
+              "reorder_p50_ms": 0.4, "reorder_p99_ms": 6.5, "bytes_today": 900000000},
+             {"id": 513, "links": ["usb0", "Ethernet"], "group": 2, "state": "up", "rtt_ms": 41.0, "owd_ms": 19.5, "dev_ms": 3.2, "loss": 0.004,
+              "rate_mbps": 72.0, "tx_mbps": 2.0, "rx_mbps": 68.0, "share": 0.64, "first_arrivals": 0.0, "rescues_per_min": 0,
+              "reorder_p50_ms": 0.0, "reorder_p99_ms": 2.1, "bytes_today": 1600000000}
+           ],
+           "flows": 12, "small_flows": 3},
+  "anchor": null,
+  "support": null,
+  "contribution": {"tx_bytes": 51000000, "rx_bytes": 2500000000, "since": "2026-11-06T20:00:00Z"},
+  "mesh": [],
+  "problems": [{"code": "dns_local"}, {"code": "peer_newer", "msg": "gamepc runs 3.0.0"}],
+  "events": []
+}

@@ -1,0 +1,191 @@
+# wirebond's checks (SPEC §23.1): format, clippy on every release target, core's purity, the
+# dependency allow-list, the tests on Linux (crates/load's among them), macOS and Windows, netsim's
+# PR seed set, and the static Linux release build. Nightly, and when release.yml calls it with
+# long: true, it also runs netsim's full acceptance set.
+name: ci
+
+on:
+  push:
+    branches: ['**'] # tags run release.yml, which calls this workflow
+  pull_request:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_call:
+    inputs:
+      long:
+        description: Also run netsim's full acceptance set
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Literal: in a workflow_call github.workflow is the caller's name, and release.yml calls ci.yml and system.yml at once.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: '1.99.1' # the toolchain every job installs; release.yml and system.yml name it too
+
+jobs:
+  # Lints and static checks, apart from the tests so that a lint failure still lets the tests run.
+  rust-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal -c clippy,rustfmt --no-self-update && rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: core does no I/O, takes no locks, reads no clock, draws no randomness and writes no JSON (SPEC §4.2, §15.1)
+        run: |
+          # Unsafe code is forbidden in every build of core but its unit tests, where lib.rs denies
+          # it and only pair.rs's counting allocator opts out.
+          grep -qxE '#!\[forbid\(unsafe_code\)\]|#!\[cfg_attr\(not\(test\), forbid\(unsafe_code\)\)\]' crates/core/src/lib.rs ||
+            { echo "core's lib.rs must keep #![cfg_attr(not(test), forbid(unsafe_code))]"; exit 1; }
+          # Shipped core code: each file up to its first #[cfg(test)] (a test-only file's
+          # #![cfg(test)]), comment lines dropped.
+          code=$(find crates/core/src -name '*.rs' ! -name tests.rs ! -path '*/tests/*' -exec awk '
+            FNR == 1 { tests = 0 }
+            /^[[:space:]]*#!?\[cfg\(test\)\]/ { tests = 1 }
+            !tests && !/^[[:space:]]*\/\// { print FILENAME ":" FNR ": " $0 }' {} +)
+          # Files, the environment, processes and sockets; threads, locks and atomics; the clock;
+          # randomness; JSON; printing.
+          if grep -E '\bstd::os\b|\b(fs|env|process|thread|sync)::|\b(UdpSocket|TcpStream|TcpListener|ToSocketAddrs|Unix(Stream|Listener|Datagram)|Mutex|RwLock|Condvar|OnceLock|LazyLock|Barrier|Atomic[A-Z][A-Za-z0-9]*|thread_local|Instant|SystemTime|UNIX_EPOCH|getrandom|OsRng|SysRng|thread_rng|generate_key|generate_nonce|serde_json)\b|\brand(_core)?::|\b(e?print(ln)?|dbg)!' <<< "$code"; then
+            echo "core must stay pure: the caller passes the time and the randomness, and node does the I/O"; exit 1
+          fi
+      - name: No crate but the workspace's and its dependencies when the port began (SPEC §15.1, R11)
+        env:
+          # Cargo.lock's crates at a78f983: what the three crates declared and what those pull in,
+          # for every target. A new crate is a decision, made by adding it here with the reason.
+          # zeroize (core, C1): superseded and dropped keys, the AES round keys, the GHASH key and
+          # the HMAC state are zeroed (SPEC §10.2).
+          ALLOWED: >-
+            aead aes aes-gcm block-buffer cfg-if cipher cmov const-oid cpubits cpufeatures
+            crypto-common ctr ctutils digest getrandom ghash hmac hybrid-array inout itoa libc
+            memchr polyval proc-macro2 quote r-efi rand_core serde serde_core serde_derive
+            serde_json sha2 socket2 syn typenum unicode-ident universal-hash windows-link
+            windows-sys zeroize zmij
+        run: |
+          export LC_ALL=C
+          names=$(cargo tree --workspace --locked --target all -e normal,build,dev --prefix none --format '{p}' | awk 'NF { print $1 }' | sort -u)
+          members=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name')
+          extra=$(comm -23 <(echo "$names") <({ tr ' ' '\n' <<< "$ALLOWED"; echo "$members"; } | sort -u))
+          if [ -n "$extra" ]; then
+            echo "crates outside the allow-list:"; echo "$extra"; exit 1
+          fi
+          echo "$(wc -l <<< "$names") crates, each a workspace member or allowed"
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  rust-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update && rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch netsim's Mahimahi traces (SPEC §17.2)
+        if: hashFiles('crates/netsim/traces.sum') != ''
+        run: |
+          # traces.sum: sha256sum lines ("<sha256>  <file>", the file named by itself or by a path
+          # or URL ending in it) and the pinned ravinet/mahimahi commit as a 40-hex word. The traces
+          # go to crates/netsim/testdata/traces/ (git-ignored).
+          sums=crates/netsim/traces.sum dir=crates/netsim/testdata/traces
+          commit=$(grep -oE '\b[0-9a-f]{40}\b' "$sums" | head -1 || true)
+          [ -n "$commit" ] || { echo "$sums names no mahimahi commit"; exit 1; }
+          entries=$(grep -E '^[0-9a-f]{64} ' "$sums") || { echo "$sums lists no traces"; exit 1; }
+          mkdir -p "$dir"
+          while read -r sum file; do
+            file=${file#\*}; file=${file##*/}
+            curl -fsSL --retry 3 -o "$dir/$file" \
+              "https://raw.githubusercontent.com/ravinet/mahimahi/$commit/traces/$file"
+            echo "$sum  $dir/$file" | sha256sum -c -
+          done <<< "$entries"
+      - name: cargo test, with crates/load's loopback tests of the echo, UDP, video and TCP
+        run: cargo test --workspace --exclude wirebond-netsim --locked
+      - name: cargo test netsim's PR seed set, in a release build since it is heavy
+        run: cargo test -p wirebond-netsim --release --locked
+      - name: netsim's full acceptance set (SPEC §17.3)
+        if: github.event_name == 'schedule' || inputs.long
+        env:
+          WIREBOND_LONG: '1' # netsim's long set
+        run: cargo test -p wirebond-netsim --release --locked
+
+  rust-targets:
+    runs-on: ubuntu-latest
+    env:
+      # SPEC §15.1's assets: Darwin arm64 and x86_64; Linux x86_64, aarch64 and ARMv6 (published
+      # as armv7l and armv6l), static with musl; Windows AMD64 and ARM64.
+      TARGETS: >-
+        aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+        arm-unknown-linux-musleabihf x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain with every release target
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal -c clippy -t "${TARGETS// /,}" --no-self-update && rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - name: Wintun 0.14.1 for the Windows targets, checked against crates/wirebond/wintun.sum (SPEC 2.0 §5.3)
+        run: .github/scripts/wintun.sh
+      - name: cargo clippy for every release target
+        run: |
+          # A cargo check that also lints: code behind cfg(windows) or cfg(target_os = "macos") is
+          # linted nowhere else.
+          read -ra targets <<< "$TARGETS"
+          failed=
+          for t in "${targets[@]}"; do
+            echo "::group::$t"
+            cargo clippy -p wirebond -p wirebond-core --all-targets --locked --target "$t" -- -D warnings || failed="$failed $t"
+            echo "::endgroup::"
+          done
+          [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
+      - name: Build the Linux x86_64 release binary
+        run: cargo build -p wirebond --release --locked --target x86_64-unknown-linux-musl
+      - name: Static and stripped (SPEC §15.1)
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/wirebond
+          echo "linux x86_64: $(stat -c %s "$bin") bytes"
+          kind=$(file -b "$bin") && echo "$kind"
+          grep -q 'static.*, stripped$' <<< "$kind" || { echo "not a static, stripped executable"; exit 1; }
+
+  rust-os:
+    name: rust ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # A hung test fails the job with its log (libtest names a test running over 60 s) instead of
+    # running for GitHub's default 6 hours.
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update && rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - name: Wintun 0.14.1, checked against crates/wirebond/wintun.sum (SPEC 2.0 §5.3)
+        if: runner.os == 'Windows'
+        run: .github/scripts/wintun.sh
+      - name: The loopback addresses the daemon's tests bind (macOS assigns only 127.0.0.1 itself)
+        if: runner.os == 'macOS'
+        run: |
+          sudo sh -c 'for n in $(seq 30 65); do for h in $(seq 1 99); do ifconfig lo0 alias 127.$n.0.$h up; done; done
+                      for n in 40 41 42; do for h in $(seq 1 99); do ifconfig lo0 alias 127.0.$n.$h up; done; done'
+      - name: cargo test
+        if: runner.os != 'macOS'
+        run: cargo test -p wirebond -p wirebond-core --locked
+      # macOS: one test at a time, its output kept in a file, under a step timeout: a step that
+      # times out fails and the job goes on, so the next step shows the last test started (a job
+      # cancelled at its own timeout keeps no log).
+      - name: cargo test (macOS, one test at a time)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: cargo test -p wirebond -p wirebond-core --locked -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/test.log"
+      - name: The last tests started (macOS)
+        if: always() && runner.os == 'macOS'
+        run: tail -n 60 "$RUNNER_TEMP/test.log" || true

@@ -1,0 +1,19 @@
+{
+  "device": "xanth", "role": "client", "version": "2.0.1",
+  "links": [
+    {"id": 1, "name": "eth", "kind": "ethernet", "group": 1, "metered": false, "up": true, "captive": false, "support": null}
+  ],
+  "bond": {"anchor": "vps", "mode": "performance", "state": "up",
+           "addr4": "10.77.0.5", "anchor_addr4": "10.77.0.1", "egress": "both",
+           "lanes": [
+             {"id": 257, "links": ["eth", "ens3"], "group": 1, "state": "up", "rtt_ms": 18.0, "owd_ms": 9.0, "dev_ms": 0.3, "loss": 0.0,
+              "rate_mbps": 200.0, "tx_mbps": 1.0, "rx_mbps": 1.0, "share": 1.0, "first_arrivals": 1.0, "rescues_per_min": 0, "bytes_today": 0}
+           ],
+           "flows": 0, "small_flows": 0},
+  "anchor": null,
+  "support": null,
+  "contribution": {"tx_bytes": 0, "rx_bytes": 0, "since": "start"},
+  "mesh": [],
+  "problems": [{"code": "mesh_only"}],
+  "events": []
+}

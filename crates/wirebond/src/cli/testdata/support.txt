@@ -1,0 +1,16 @@
+pi · support · wirebond 2.0.0
+
+links
+  1  eth0  ethernet  group 1  up
+  2  usb0  usb       group 2  up
+
+support · shares eth0 to usb0 for mac · carried 4.4 GB
+
+contribution · sent 2.2 GB · received 2.2 GB · since start
+
+mesh
+  mac  client  1 bond  reachable
+
+problems: none
+
+events: none

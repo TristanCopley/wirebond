@@ -1,0 +1,13 @@
+[package]
+name = "wirebond-netsim"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic network simulator for wirebond's acceptance tests (tests only)."
+
+[dependencies]
+serde_json = "1.0.154"
+sha2 = "0.11.0"
+wirebond-core = { path = "../core" }

@@ -1,0 +1,8 @@
+# Mahimahi traces netsim replays (SPEC §17.2). CI downloads each file from
+#   https://raw.githubusercontent.com/ravinet/mahimahi/<commit>/traces/<file>
+# into crates/netsim/testdata/traces/ (not committed) and checks it, as sha256sum prints:
+#   grep -v '^[#c]' crates/netsim/traces.sum | (cd crates/netsim/testdata/traces && sha256sum -c)
+# Tests that need a trace skip when the file is absent and fail when its hash differs.
+commit f1346c38c415abfc98626dd82450f49a57033603
+556620f1c11a61c7766678b08325ef4fc8d1bd774fbc98fb96854ae3d3795b61  TMobile-LTE-driving.up
+d48ff134fc29c36cc3c3dee203464246bd698f0faede42534a27b0cbe3057055  TMobile-LTE-driving.down

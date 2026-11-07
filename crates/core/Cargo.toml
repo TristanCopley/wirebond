@@ -1,0 +1,27 @@
+[package]
+name = "wirebond-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "wirebond's engine: wire format, keys, lanes, scheduling. Pure: no I/O, no threads, no clock."
+
+[dependencies]
+# zeroize: superseded and dropped keys are zeroed (§7.2), with the AES round keys and GHASH key, and
+# the HMAC state and output that derive the next epoch's key.
+aes-gcm = { version = "0.11.1", features = ["zeroize"] }
+hmac = { version = "0.13.0", features = ["zeroize"] }
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = { version = "0.11.0", features = ["zeroize"] }
+zeroize = { version = "1.9.1", default-features = false }
+
+[dev-dependencies]
+# tests/vectors.rs reads the vectors the Go implementation wrote and writes Msg as node does.
+# float_roundtrip: read every float Go writes as the double Go wrote (notes/rust.md).
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+
+# The engine on the scenarios of the Go implementation's benchmark (notes/rust.md, "Engine benchmarks").
+[[bench]]
+name = "engine"
+harness = false

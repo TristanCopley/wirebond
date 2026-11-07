@@ -1,0 +1,23 @@
+evil\u{1b}[2J · client · wirebond 2.0.0\u{9b}31m
+
+links
+  1  Wi\u{202e}iF-  wifi  group 1  up · from ph\u{9}one
+
+bond to x\u{a}anth · performance · up · egress IPv4 and IPv6
+  addresses: evil\u{1b}[2J 10.77.0.2 · x\u{a}anth 10.77.0.1\u{7}
+  flows: 0 live, 0 small
+  no lanes yet
+
+Moonlight: add the host 10.77.0.1\u{7} to stream from x\u{a}anth
+
+contribution · sent 0 B · received 0 B · since start
+
+mesh
+  a\u{200b}b  anchor  0 bonds  reachable
+
+problems
+  captive_portal on Wi\u{2028}Fi: this link wants a login, which would go through the anchor
+    next: rm -rf /\u{1b}[8m
+
+events
+  \u{1b}]0;owned\u{7}

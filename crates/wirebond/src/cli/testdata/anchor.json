@@ -1,0 +1,28 @@
+{
+  "device": "xanth", "role": "anchor", "version": "2.0.0",
+  "links": [
+    {"id": 1, "name": "eth", "kind": "ethernet", "group": 1, "metered": false, "up": true, "captive": false, "support": null}
+  ],
+  "bond": null,
+  "anchor": {
+    "bonds": [
+      {"client": "mac", "mode": "performance", "state": "up", "addr4": "10.77.0.2", "addr6": "fd77:b0d::2",
+       "egressed_bytes": 2400000000, "local_bytes": 18000000000,
+       "lanes": [
+         {"id": 257, "links": ["Wi-Fi", "eth"], "group": 1, "state": "up", "rtt_ms": 61.0, "owd_ms": 30.9, "dev_ms": 0.9, "loss": 0.0,
+          "rate_mbps": 6.0, "tx_mbps": 30.0, "rx_mbps": 2.0, "share": 0.5, "first_arrivals": 0.64, "rescues_per_min": 7, "bytes_today": 0},
+         {"id": 513, "links": ["iPhone USB", "eth"], "group": 2, "state": "up", "rtt_ms": 70.1, "owd_ms": 39.0, "dev_ms": 5.0, "loss": 0.01,
+          "rate_mbps": 6.0, "tx_mbps": 30.0, "rx_mbps": 2.0, "share": 0.5, "first_arrivals": 0.36, "rescues_per_min": 19, "bytes_today": 0}
+       ]},
+      {"client": "tablet", "mode": "bandwidth", "state": "punching", "addr4": "10.77.0.3", "addr6": null,
+       "egressed_bytes": 0, "local_bytes": 0, "lanes": []}
+    ],
+    "uplink": "eth", "egress": "both", "allow": ["mac", "tablet", "pc"]
+  },
+  "support": null,
+  "contribution": {"tx_bytes": 20400000000, "rx_bytes": 900000000, "since": "start"},
+  "mesh": [{"device": "mac", "role": "client", "bonds": 1, "reachable": true},
+           {"device": "tablet", "role": "client", "bonds": 1, "reachable": true}],
+  "problems": [],
+  "events": ["2026-11-06T21:58:02Z: bond from mac up", "2026-11-06T22:01:13Z: bond from tablet open"]
+}
