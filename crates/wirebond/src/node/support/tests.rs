@@ -142,8 +142,12 @@ fn the_cable_counters_are_the_bytes_carried() {
 fn a_registered_support_names_the_clients_link() {
     let (mut s, _) = node("pc", "cable0", ip(63, 1), ip(63, 10), false, Config::default());
     let (mut c, _) = node("mac", "eth1", ip(63, 2), ip(63, 20), false, Config::default());
-    assert!(ask(&mut s, on("cable0", Some(ip(63, 20).to_string()))).ok);
     let (mut ps, mut pc) = (host::Poll::default(), host::Poll::default());
+    // The client's first step opens its control listener: the support's first dial must find it,
+    // since a refused one is retried only after REDIAL (10 s), as long as this test waits. macOS's
+    // threads lost that race about one run in two.
+    c.step(&mut pc, Duration::from_millis(5)).unwrap();
+    assert!(ask(&mut s, on("cable0", Some(ip(63, 20).to_string()))).ok);
     let t = Instant::now();
     loop {
         s.step(&mut ps, Duration::from_millis(5)).unwrap();
