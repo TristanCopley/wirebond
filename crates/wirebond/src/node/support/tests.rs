@@ -153,6 +153,12 @@ fn a_registered_support_names_the_clients_link() {
             assert_eq!(c.offer().links[0].support.as_deref(), Some("pc"), "the anchor hears the name too");
             break;
         }
-        assert!(t.elapsed() < Duration::from_secs(10), "no registration: {:#?}", st.events);
+        let support = || s.status(false).events;
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "no registration: client {:#?}, support {:#?}",
+            st.events,
+            support()
+        );
     }
 }
