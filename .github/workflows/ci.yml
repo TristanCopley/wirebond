@@ -213,14 +213,14 @@ jobs:
               tail -n 40 "$log"
               for p in $(pgrep -f 'target/debug/deps/'); do
                 echo "--- stacks of $(ps -o command= -p "$p")"
-                sample "$p" 2 2>&1 | head -n 250
+                sample "$p" 2 2>&1 | head -n 250 || true
               done
               pkill -9 -f 'target/debug/deps/' || true
               exit 1
             fi
           done
           code=0 && wait "$pid" || code=$?
-          if [ "$code" != 0 ]; then sed -n '/^failures:$/,$p' "$log" | head -n 300; fi
+          if [ "$code" != 0 ]; then sed -n '/^failures:$/,$p' "$log" | head -n 300 || true; fi
           tail -n 30 "$log"
           exit "$code"
       - name: The tests that ran long, and the log's end (macOS, also after a timeout)
@@ -268,17 +268,27 @@ jobs:
         run: |
           python3 -m http.server 8000 --bind 127.0.0.1 --directory rel >/dev/null 2>&1 &
           server=$! && trap 'kill $server' EXIT && sleep 2
+          # One check a line: bash -e stops only at the last command of an && list.
           WIREBOND_URL=http://127.0.0.1:8000 sh install.sh
           hash -r
           test "$(wirebond version)" = "wirebond v0.0.0-ci"
           wirebond status --json >/dev/null
-          sudo wirebond install | tee out && grep -q 'installed already' out
-          code=0 && wirebond anchor on 2>err || code=$?
-          cat err && test "$code" = 4 && grep -q 'changing wirebond needs sudo' err
+          sudo wirebond install | tee out
+          grep -q 'installed already' out
+          code=0
+          wirebond anchor on 2>err || code=$?
+          cat err
+          test "$code" = 4
+          grep -q 'changing wirebond needs sudo' err
           sudo wirebond uninstall
-          hash -r && if command -v wirebond; then echo 'wirebond is still on PATH'; exit 1; fi
-          test ! -e /usr/local/bin/wirebond && test ! -L /usr/local/bin/wirebond
-          test ! -e /var/lib/wirebond && test ! -e "/Library/Application Support/wirebond"
+          hash -r
+          if command -v wirebond; then echo 'wirebond is still on PATH'; exit 1; fi
+          if pgrep -f 'wirebond run'; then echo 'the daemon still runs'; exit 1; fi
+          for p in /usr/local/bin/wirebond /var/lib/wirebond /etc/systemd/system/wirebond.service \
+                   /etc/systemd/system/multi-user.target.wants/wirebond.service \
+                   "/Library/Application Support/wirebond" /Library/LaunchDaemons/com.wirebond.plist; do
+            if [ -e "$p" ] || [ -L "$p" ]; then echo "$p remains"; exit 1; fi
+          done
       - name: install.ps1 in Windows PowerShell 5.1, then the daemon, PATH, a second install and uninstall
         if: runner.os == 'Windows'
         shell: powershell
@@ -303,6 +313,8 @@ jobs:
             if (Test-Path $folder) { throw "$folder remains" }
             if (Test-Path (Join-Path $env:ProgramData 'wirebond')) { throw 'the state folder remains' }
             if ((& $path) -contains $folder) { throw "$folder is still on the machine's PATH" }
+            if (Get-Service wirebond -ErrorAction SilentlyContinue) { throw 'the wirebond service remains' }
+            if (Get-Process wirebond -ErrorAction SilentlyContinue) { throw 'a wirebond process still runs' }
           } finally {
             Stop-Process $server -ErrorAction SilentlyContinue
           }
