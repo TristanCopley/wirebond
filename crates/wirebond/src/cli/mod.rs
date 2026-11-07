@@ -1,8 +1,8 @@
 //! The CLI (SPEC 2.0 §19): the verbs parsed into the local API's [`Request`] (§20.1), sent to the
 //! daemon, and the [`Reply`] printed for people (render.rs) or as JSON: `status --json` prints the
-//! §20.2 status itself, any other verb the reply line. `run` is the daemon itself; `version` and
-//! `uninstall` never reach it. The first changing verb installs and starts the service, as 1.x
-//! did. Owner: cli and api rendering.
+//! §20.2 status itself, any other verb the reply line. `run` is the daemon itself; `version`,
+//! `install` and `uninstall` ask it nothing. The first changing verb installs and starts the
+//! service, as 1.x did; `install` does only that. Owner: cli and api rendering.
 
 mod render;
 #[cfg(test)]
@@ -41,6 +41,7 @@ wirebond anchor allow <device>... | deny <device>...
 wirebond support on <uplink> <cable> [--for <client>]
 wirebond support off
 wirebond update                            update now
+wirebond install                           install or mend the service; changes no role
 wirebond uninstall                         remove everything wirebond created
 wirebond version [--json]
 wirebond run                               the daemon (started by the service manager)
@@ -55,6 +56,7 @@ pub enum Cmd {
     /// A verb the daemon answers.
     Api(Request),
     Version,
+    Install,
     Uninstall,
     Run,
     Help,
@@ -146,6 +148,7 @@ fn cli(args: &[String], version: &str, commit: &str, h: &dyn Host) -> (i32, Stri
                 Err(e) => (FAILED, String::new(), format!("wirebond: {e}\n")),
             };
         }
+        Cmd::Install => return output(None, &install(args, h), json),
         Cmd::Uninstall => return output(None, &uninstall(args, h), json),
         Cmd::Api(req) => req,
     };
@@ -226,7 +229,7 @@ pub fn parse(args: &[String]) -> Result<(Cmd, bool), String> {
     }
     let usage = |v: &str| Err(format!("usage: {}", form(v)));
     let owned = |ws: &[&str]| ws.iter().map(|w| w.to_string()).collect::<Vec<_>>();
-    // uninstall, version and run take no flag but --json.
+    // install, uninstall, version and run take no flag but --json.
     let flags = mode.is_some() || seconds.is_some() || for_client.is_some() || add.is_some() || remove.is_some();
     let bare =
         |cmd: Cmd| if flags || dry_run { Err("this command takes no flag but --json".into()) } else { Ok((cmd, json)) };
@@ -255,6 +258,7 @@ pub fn parse(args: &[String]) -> Result<(Cmd, bool), String> {
         }
         ["support", "off"] => Request::SupportOff,
         ["update"] => Request::Update,
+        ["install"] => return bare(Cmd::Install),
         ["uninstall"] => return bare(Cmd::Uninstall),
         ["version"] => return bare(Cmd::Version),
         ["run"] => return bare(Cmd::Run),
@@ -287,6 +291,7 @@ fn form(verb: &str) -> &'static str {
         "anchor" => "wirebond anchor on|off | anchor allow <device>... | anchor deny <device>...",
         "support" => "wirebond support on <uplink> <cable> [--for <client>] | wirebond support off",
         "update" => "wirebond update",
+        "install" => "wirebond install",
         "uninstall" => "wirebond uninstall",
         "version" => "wirebond version [--json]",
         "run" => "wirebond run",
@@ -323,7 +328,7 @@ fn ask(req: &Request, args: &[String], h: &dyn Host) -> Reply {
             Ok(c) => exchange(c, req),
             Err(_) => Reply::fail(
                 "no_daemon",
-                "no wirebond daemon answers here; wirebond client <anchor> or wirebond anchor on, as an administrator, installs and starts it",
+                "no wirebond daemon answers here; wirebond install, as an administrator, installs and starts it",
             ),
         };
     }
@@ -336,36 +341,83 @@ fn ask(req: &Request, args: &[String], h: &dyn Host) -> Reply {
         return exchange(c, req);
     }
     if !h.admin() {
-        let how = if h.windows() { "an administrator PowerShell" } else { "sudo" };
-        return Reply {
-            message: format!("run: {}", again(h, &h.current_exe(), args)),
-            ..Reply::fail("admin", format!("wirebond is not running here, and installing it needs {how} once"))
+        // A daemon that answers on status.sock is running: only the rights to change it are missing.
+        let why = if h.dial(s, host::STATUS_SOCK).is_ok() {
+            format!("changing wirebond needs {}", admin_shell(h))
+        } else {
+            format!("wirebond is not running here, and installing it needs {} once", admin_shell(h))
         };
+        return Reply { message: format!("run: {}", again(h, &h.current_exe(), args)), ..Reply::fail("admin", why) };
     }
     let installed = match h.install(s) {
         Ok(changed) => changed,
         Err(e) => return Reply::fail("failed", format!("installing wirebond failed: {e}")),
     };
-    let end = Instant::now() + h.start_wait();
-    let c = loop {
-        match h.dial(s, host::CTL_SOCK) {
-            Ok(c) => break c,
-            Err(_) if Instant::now() < end => thread::sleep(Duration::from_millis(50)),
-            Err(e) => {
-                return Reply::fail("no_daemon", format!("wirebond is installed but its daemon does not answer: {e}"));
-            }
-        }
+    let c = match started(h, s) {
+        Ok(c) => c,
+        Err(e) => return silent(&e),
     };
     let mut r = exchange(c, req);
     if installed {
         // What only the CLI knows: that it installed, and where wirebond is now.
         r.changed |= r.ok;
-        let path =
-            if h.on_path(s) { String::new() } else { format!("; it is not on PATH: run it as {}", invoke(h, &exe)) };
-        let line = format!("wirebond is installed as a system service at {}{path}", exe.display());
+        let line = format!("wirebond is installed {}", installed_at(h, s));
         r.message = if r.message.is_empty() { line } else { format!("{}\n{line}", r.message) };
     }
     r
+}
+
+/// `wirebond install` (§19): installs and starts the service as the first changing verb does, and
+/// changes no role; idempotent, so it also mends an install. Needs administrator rights.
+fn install(args: &[String], h: &dyn Host) -> Reply {
+    let s = h.scope();
+    if !h.admin() {
+        let msg = format!("run: {}", again(h, &h.current_exe(), args));
+        return Reply { message: msg, ..Reply::fail("admin", format!("installing wirebond needs {}", admin_shell(h))) };
+    }
+    let changed = match h.install(s) {
+        Ok(changed) => changed,
+        Err(e) => return Reply::fail("failed", format!("installing wirebond failed: {e}")),
+    };
+    if let Err(e) = started(h, s) {
+        return silent(&e);
+    }
+    let what = if changed { "wirebond is installed" } else { "wirebond was installed already" };
+    Reply { changed, ..Reply::ok(format!("{what} {}", installed_at(h, s))) }
+}
+
+/// Where administrator rights come from on this OS.
+fn admin_shell(h: &dyn Host) -> &'static str {
+    if h.windows() { "an administrator PowerShell" } else { "sudo" }
+}
+
+/// The daemon an install has just started, once it answers on ctl.sock within the start wait;
+/// else the last dial's error.
+fn started(h: &dyn Host, s: Scope) -> io::Result<Box<dyn LocalStream>> {
+    let end = Instant::now() + h.start_wait();
+    loop {
+        match h.dial(s, host::CTL_SOCK) {
+            Err(_) if Instant::now() < end => thread::sleep(Duration::from_millis(50)),
+            r => return r,
+        }
+    }
+}
+
+/// The reply for a daemon that was installed but does not answer.
+fn silent(e: &io::Error) -> Reply {
+    Reply::fail("no_daemon", format!("wirebond is installed but its daemon does not answer: {e}"))
+}
+
+/// "as a system service at <exe>", and how to run it while `wirebond` on PATH is not it. On
+/// Windows the install put its folder on the machine's PATH, which this shell read before.
+fn installed_at(h: &dyn Host, s: Scope) -> String {
+    let (exe, here) = (h.exe(s), invoke(h, &h.exe(s)));
+    let path = match (h.on_path(s), h.windows()) {
+        (true, _) => String::new(),
+        (false, true) => format!("; open a new PowerShell to run it as wirebond, or here as {here}"),
+        (false, false) => format!("; it is not on PATH: run it as {here}"),
+    };
+    format!("as a system service at {}{path}", exe.display())
 }
 
 /// One request line out, one reply line back (§20.1), within the verb's wait.

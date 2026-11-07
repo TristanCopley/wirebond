@@ -26,7 +26,7 @@ The owner judges the design on six axes:
 
 By default (`stable`), the lowest-delay path that carries the stream carries it; the others protect it. `combine` adds capacity. This changes the earlier rule "the connection with the most capacity carries the traffic" (SPEC R7); the owner confirmed it on 2026-11-05.
 
-The repository is <https://github.com/TristanCopley/wirebond>. `main` holds the first spec; work happens on `spec/next` and branches from it.
+The repository is <https://github.com/TristanCopley/wirebond>, public. `main` holds the build; work happens on branches from it, and a tag `v*.*.*` publishes a release.
 
 ## The devices
 

@@ -270,6 +270,25 @@ pub(super) fn write(path: &Path, body: &str) -> io::Result<bool> {
     super::install::put(path, body.as_bytes(), 0o644).map(|()| true)
 }
 
+/// Makes `link` a symbolic link to `exe`, the name people type for an executable that sits off
+/// PATH (macOS's system one, §22.2), unless something else is there already: that is someone
+/// else's, and stays. Returns whether it made the link.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn link(link: &Path, exe: &Path) -> io::Result<bool> {
+    if link.symlink_metadata().is_ok() {
+        return Ok(false);
+    }
+    fs::create_dir_all(link.parent().unwrap_or(link))?;
+    std::os::unix::fs::symlink(exe, link).map(|()| true)
+}
+
+/// Removes `link` if it is a symbolic link to `exe`, as [`link`] makes it, and reports whether it
+/// did; anything else there stays.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn unlink(link: &Path, exe: &Path) -> io::Result<bool> {
+    if fs::read_link(link).is_ok_and(|to| to == exe) { remove([link]) } else { Ok(false) }
+}
+
 /// Deletes the files that exist and reports whether it deleted any.
 pub(super) fn remove<P: AsRef<Path>>(paths: impl IntoIterator<Item = P>) -> io::Result<bool> {
     paths.into_iter().try_fold(false, |changed, p| match fs::remove_file(p) {

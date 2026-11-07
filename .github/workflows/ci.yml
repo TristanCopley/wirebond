@@ -1,7 +1,7 @@
 # wirebond's checks (SPEC §23.1): format, clippy on every release target, core's purity, the
 # dependency allow-list, the tests on Linux (crates/load's among them), macOS and Windows, netsim's
-# PR seed set, and the static Linux release build. Nightly, and when release.yml calls it with
-# long: true, it also runs netsim's full acceptance set.
+# PR seed set, the static Linux release build, and the installers end to end. Nightly, and when
+# release.yml calls it with long: true, it also runs netsim's full acceptance set.
 name: ci
 
 on:
@@ -159,7 +159,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # A hung test fails the job with its log (libtest names a test running over 60 s) instead of
     # running for GitHub's default 6 hours.
-    timeout-minutes: 30
+    timeout-minutes: 40
     defaults:
       run:
         shell: bash
@@ -179,13 +179,110 @@ jobs:
       - name: cargo test
         if: runner.os != 'macOS'
         run: cargo test -p wirebond -p wirebond-core --locked
-      # macOS: one test at a time, its output kept in a file, under a step timeout: a step that
-      # times out fails and the job goes on, so the next step shows the last test started (a job
-      # cancelled at its own timeout keeps no log).
-      - name: cargo test (macOS, one test at a time)
+      # macOS: one test at a time, the output in a file, so a test that hangs cannot hold the step
+      # open as it held the terminal before. A log that stops growing for 3 minutes is a hang: the
+      # step prints the last tests started and the test process's stacks (sample), then ends it.
+      - name: cargo test (macOS, one test at a time; a hang prints its stacks)
         if: runner.os == 'macOS'
-        timeout-minutes: 15
-        run: cargo test -p wirebond -p wirebond-core --locked -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/test.log"
-      - name: The last tests started (macOS)
-        if: always() && runner.os == 'macOS'
-        run: tail -n 60 "$RUNNER_TEMP/test.log" || true
+        timeout-minutes: 25
+        run: |
+          cargo test -p wirebond -p wirebond-core --locked --no-run
+          log="$RUNNER_TEMP/test.log"
+          cargo test -p wirebond -p wirebond-core --locked -- --test-threads=1 >"$log" 2>&1 &
+          pid=$! size=-1 still=0
+          while kill -0 "$pid" 2>/dev/null; do
+            sleep 5
+            now=$(wc -c <"$log")
+            if [ "$now" = "$size" ]; then still=$((still + 5)); else size=$now still=0; fi
+            if [ "$still" -ge 180 ]; then
+              echo "::error::no test output for 3 minutes; the last tests started:"
+              tail -n 40 "$log"
+              for p in $(pgrep -f 'target/debug/deps/'); do
+                echo "--- stacks of $(ps -o command= -p "$p")"
+                sample "$p" 2 2>&1 | head -n 250
+              done
+              pkill -9 -f 'target/debug/deps/' || true
+              exit 1
+            fi
+          done
+          code=0 && wait "$pid" || code=$?
+          if [ "$code" != 0 ]; then sed -n '/^failures:$/,$p' "$log" | head -n 300; fi
+          tail -n 30 "$log"
+          exit "$code"
+
+  # The installers end to end on each OS (SPEC 2.0 §22.1), against an executable built here and
+  # served on 127.0.0.1 as a release folder: install, the daemon answering, `wirebond` on PATH,
+  # rights, a second install changing nothing, and an uninstall that leaves nothing behind.
+  installers:
+    name: installers ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        shell: bash
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update && rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - name: Wintun 0.14.1, checked against crates/wirebond/wintun.sum (SPEC 2.0 §5.3)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: .github/scripts/wintun.sh
+      - name: A release folder, with this machine's asset named as a release names it, and SHA256SUMS
+        shell: bash
+        run: |
+          WIREBOND_VERSION=v0.0.0-ci cargo build -p wirebond --locked
+          mkdir rel
+          if [ "$RUNNER_OS" = Windows ]; then
+            asset=wirebond-Windows-$PROCESSOR_ARCHITECTURE.exe && cp target/debug/wirebond.exe "rel/$asset"
+          else
+            asset=wirebond-$(uname -s)-$(uname -m) && cp target/debug/wirebond "rel/$asset"
+          fi
+          cd rel && { sha256sum "$asset" 2>/dev/null || shasum -a 256 "$asset"; } > SHA256SUMS && cat SHA256SUMS
+      - name: install.sh, then the daemon, rights, a second install and uninstall
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          python3 -m http.server 8000 --bind 127.0.0.1 --directory rel >/dev/null 2>&1 &
+          server=$! && trap 'kill $server' EXIT && sleep 2
+          WIREBOND_URL=http://127.0.0.1:8000 sh install.sh
+          hash -r
+          test "$(wirebond version)" = "wirebond v0.0.0-ci"
+          wirebond status --json >/dev/null
+          sudo wirebond install | tee out && grep -q 'installed already' out
+          code=0 && wirebond anchor on 2>err || code=$?
+          cat err && test "$code" = 4 && grep -q 'changing wirebond needs sudo' err
+          sudo wirebond uninstall
+          hash -r && if command -v wirebond; then echo 'wirebond is still on PATH'; exit 1; fi
+          test ! -e /usr/local/bin/wirebond && test ! -L /usr/local/bin/wirebond
+          test ! -e /var/lib/wirebond && test ! -e "/Library/Application Support/wirebond"
+      - name: install.ps1 in Windows PowerShell 5.1, then the daemon, PATH, a second install and uninstall
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8000', '--bind', '127.0.0.1', '--directory', 'rel' -PassThru -WindowStyle Hidden
+          Start-Sleep 2
+          try {
+            $env:WIREBOND_URL = 'http://127.0.0.1:8000'
+            Get-Content -Raw install.ps1 | Invoke-Expression
+            if ((wirebond version) -ne 'wirebond v0.0.0-ci') { throw 'wirebond is not on this window''s PATH' }
+            wirebond status --json | Out-Null
+            if ($LASTEXITCODE) { throw "status: exit code $LASTEXITCODE" }
+            $folder = Join-Path $env:ProgramFiles 'wirebond'
+            $path = { [Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' }
+            if ((& $path) -notcontains $folder) { throw "$folder is not on the machine's PATH" }
+            $again = wirebond install
+            if ($again -notmatch 'installed already') { throw "a second install: $again" }
+            wirebond uninstall
+            if ($LASTEXITCODE) { throw "uninstall: exit code $LASTEXITCODE" }
+            Start-Sleep 6 # the folder goes about 2 s after the CLI has exited
+            if (Test-Path $folder) { throw "$folder remains" }
+            if (Test-Path (Join-Path $env:ProgramData 'wirebond')) { throw 'the state folder remains' }
+            if ((& $path) -contains $folder) { throw "$folder is still on the machine's PATH" }
+          } finally {
+            Stop-Process $server -ErrorAction SilentlyContinue
+          }

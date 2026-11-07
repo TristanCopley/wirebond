@@ -14,8 +14,11 @@ type Daemon = Arc<dyn Fn(&Request) -> Reply + Send + Sync>;
 struct Fake {
     admin: bool,
     running: Cell<bool>,
-    /// Whether install starts a daemon.
+    /// Whether ctl.sock refuses this user while the daemon runs (it is the service's owner's).
+    ctl_denied: bool,
+    /// Whether install starts a daemon, and whether it changes anything.
     starts: bool,
+    fresh: bool,
     install_err: Option<&'static str>,
     installs: Cell<u32>,
     uninstalls: Cell<u32>,
@@ -32,7 +35,9 @@ impl Fake {
         Fake {
             admin: false,
             running: Cell::new(true),
+            ctl_denied: false,
             starts: true,
+            fresh: true,
             install_err: None,
             installs: Cell::new(0),
             uninstalls: Cell::new(0),
@@ -67,6 +72,9 @@ impl Host for Fake {
         if !self.running.get() {
             return Err(io::ErrorKind::ConnectionRefused.into());
         }
+        if self.ctl_denied && !self.admin && sock == host::CTL_SOCK {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
         Ok(Box::new(Conn { wrote: Vec::new(), back: None, daemon: self.daemon.clone(), asked: self.asked.clone() }))
     }
     fn install(&self, _: Scope) -> io::Result<bool> {
@@ -75,7 +83,7 @@ impl Host for Fake {
             return Err(io::Error::other(e));
         }
         self.running.set(self.starts);
-        Ok(true)
+        Ok(self.fresh)
     }
     fn uninstall(&self, _: Scope) -> io::Result<(bool, String)> {
         self.uninstalls.set(self.uninstalls.get() + 1);
@@ -209,6 +217,8 @@ fn every_verb_and_flag_of_section_19_parses() {
     );
     assert_eq!(api("support off"), Request::SupportOff);
     assert_eq!(api("update"), Request::Update);
+    assert_eq!(p("install").unwrap(), (Cmd::Install, false));
+    assert_eq!(p("install --json").unwrap(), (Cmd::Install, true));
     assert_eq!(p("uninstall").unwrap().0, Cmd::Uninstall);
     assert_eq!(p("version").unwrap(), (Cmd::Version, false));
     assert_eq!(p("version --json").unwrap(), (Cmd::Version, true));
@@ -239,6 +249,8 @@ fn usage_errors() {
         "support",
         "status a b",
         "update now",
+        "install now",
+        "install --mode bandwidth",
         "uninstall all",
         "version 2",
         "connect x",
@@ -363,6 +375,7 @@ fn the_first_changing_verb_installs_once_as_an_administrator() {
     assert_eq!(f.asked(), vec![Request::Client { anchor: "xanth".into(), mode: Some(Mode::Bandwidth) }]);
     // From the installed executable with the daemon answering, nothing is installed again.
     f.current = "/usr/local/bin/wirebond".into();
+    f.socks.borrow_mut().clear();
     let (code, out, _) = f.run("anchor allow mac");
     assert_eq!((code, out.as_str()), (OK, "allowed: mac\n(no change)\n"));
     assert_eq!(f.installs.get(), 1);
@@ -418,6 +431,70 @@ fn uninstall_needs_an_administrator() {
     let (code, out, _) = f.run("uninstall --json");
     assert_eq!((code, out.as_str()), (OK, "{\"ok\":true,\"changed\":true,\"message\":\"wirebond is uninstalled\"}\n"));
     assert_eq!(f.uninstalls.get(), 2);
+}
+
+#[test]
+fn a_running_daemon_takes_changes_from_an_administrator() {
+    // The daemon answers status.sock but ctl.sock is root's: say so, not that it is not running.
+    let mut f = Fake::new(|_| unreachable!("nothing reaches the daemon"));
+    f.ctl_denied = true;
+    let (code, out, err) = f.run("anchor on");
+    assert_eq!((code, out.as_str()), (NEEDS_ADMIN, ""));
+    assert_eq!(err, "wirebond: changing wirebond needs sudo\n  run: sudo '/usr/local/bin/wirebond' anchor on\n");
+    assert_eq!(f.installs.get(), 0);
+    f.windows = true;
+    let (code, _, err) = f.run("client xanth");
+    assert_eq!(code, NEEDS_ADMIN);
+    assert!(err.starts_with("wirebond: changing wirebond needs an administrator PowerShell\n"), "{err}");
+    // Reads need no rights.
+    let status = |_: &Request| Reply { status: Some(Box::default()), ..Reply::ok("") };
+    let f = Fake { ctl_denied: true, ..Fake::new(status) };
+    assert_eq!(f.run("status --json").0, OK);
+}
+
+#[test]
+fn install_installs_and_changes_no_role() {
+    let mut f = Fake::new(|_| unreachable!("install asks the daemon nothing"));
+    f.running.set(false);
+    f.current = "/tmp/dl/wirebond".into();
+    let (code, out, err) = f.run("install");
+    assert_eq!((code, out.as_str()), (NEEDS_ADMIN, ""));
+    assert_eq!(err, "wirebond: installing wirebond needs sudo\n  run: sudo '/tmp/dl/wirebond' install\n");
+    assert_eq!(f.installs.get(), 0);
+    // As an administrator: installed and started, and the daemon answered.
+    f.admin = true;
+    let (code, out, err) = f.run("install");
+    assert_eq!((code, err.as_str()), (OK, ""));
+    assert_eq!(out, "wirebond is installed as a system service at /usr/local/bin/wirebond\n");
+    assert_eq!((f.installs.get(), f.asked()), (1, vec![]));
+    assert_eq!(f.socks.borrow().last().map(String::as_str), Some(host::CTL_SOCK), "it waits for the daemon");
+    // Again: nothing to change; as JSON, the reply line.
+    f.fresh = false;
+    let (code, out, _) = f.run("install --json");
+    let want = "{\"ok\":true,\"changed\":false,\"message\":\"wirebond was installed already as a system service at /usr/local/bin/wirebond\"}\n";
+    assert_eq!((code, out.as_str()), (OK, want));
+    // Off PATH: how to run it; on Windows, whose install put it on the PATH of new shells, also how
+    // to get there.
+    (f.fresh, f.on_path) = (true, false);
+    assert!(f.run("install").1.ends_with("; it is not on PATH: run it as '/usr/local/bin/wirebond'\n"));
+    f.windows = true;
+    let out = f.run("install").1;
+    assert!(
+        out.ends_with("; open a new PowerShell to run it as wirebond, or here as & '/usr/local/bin/wirebond'\n"),
+        "{out}"
+    );
+    // A failed install, and a daemon that does not start.
+    let f = Fake { admin: true, install_err: Some("launchctl: bootstrap failed"), ..Fake::new(|_| Reply::ok("")) };
+    f.running.set(false);
+    assert_eq!(
+        f.run("install"),
+        (FAILED, String::new(), "wirebond: installing wirebond failed: launchctl: bootstrap failed\n".into())
+    );
+    let f = Fake { admin: true, starts: false, ..Fake::new(|_| Reply::ok("")) };
+    f.running.set(false);
+    let (code, _, err) = f.run("install");
+    assert_eq!(code, NO_DAEMON);
+    assert!(err.starts_with("wirebond: wirebond is installed but its daemon does not answer"), "{err}");
 }
 
 #[test]

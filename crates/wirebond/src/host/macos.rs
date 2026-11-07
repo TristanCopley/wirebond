@@ -16,6 +16,10 @@ pub(super) const BOOT_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 /// The application firewall's tool, which is not on PATH: uninstall's note names it in full, as
 /// node's tailscale_only fix does (R1-05).
 const FW: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
+/// The command people type: a link to the system executable, which sits off PATH in the state
+/// directory (layout). /usr/local/bin is on macOS's default PATH, and the link is only a name, so
+/// it may sit where the user can write (§22.2).
+const LINK: &str = "/usr/local/bin/wirebond";
 
 /// Whether interface `name` is Wi-Fi: its functional type is IFRTYPE_FUNCTIONAL_WIFI_INFRA (3); its
 /// media type would also say so, but macOS calls both Wi-Fi and Ethernet IFT_ETHER.
@@ -78,9 +82,12 @@ fn home(uid: libc::uid_t) -> Option<(PathBuf, libc::uid_t)> {
 }
 
 /// Writes the plist and bootstraps the job, which RunAtLoad starts. A job that is loaded already
-/// is kickstarted instead: started if it is not running, restarted on a new executable.
+/// is kickstarted instead: started if it is not running, restarted on a new executable. The
+/// system executable also gets its name on PATH, LINK; without it, which only costs the full
+/// path, the CLI says how to run it.
 pub(super) fn register(s: Scope, exe: &Path, restart: bool) -> io::Result<bool> {
     let (_, job, dom) = layout(s);
+    let linked = s == Scope::System && link(Path::new(LINK), exe).unwrap_or(false);
     let changed = write(&job, &plist(exe))?;
     let boot = [OsStr::new("bootstrap"), dom.as_ref(), job.as_ref()];
     if run("launchctl", &boot).is_ok() {
@@ -88,16 +95,17 @@ pub(super) fn register(s: Scope, exe: &Path, restart: bool) -> io::Result<bool> 
     }
     // -k restarts a running job on the new executable; -p only prints its pid.
     let flag = if changed || restart { "-k" } else { "-p" };
-    run("launchctl", &["kickstart", flag, &format!("{dom}/com.wirebond")]).map(|_| changed)
+    run("launchctl", &["kickstart", flag, &format!("{dom}/com.wirebond")]).map(|_| changed || linked)
 }
 
-/// Boots the job out and removes its plist and the application firewall's entry for `exe`. That
-/// needs root; while the firewall still lists `exe`, the note is the command for the CLI to print
-/// (§15.6).
+/// Boots the job out and removes its plist, LINK, and the application firewall's entry for `exe`.
+/// That needs root; while the firewall still lists `exe`, the note is the command for the CLI to
+/// print (§15.6).
 pub(super) fn unregister(s: Scope, exe: &Path) -> io::Result<(bool, String)> {
     let (_, job, dom) = layout(s);
     let _ = run("launchctl", &["bootout", &format!("{dom}/com.wirebond")]);
-    let changed = remove([&job])?;
+    let unlinked = s == Scope::System && unlink(Path::new(LINK), exe)?;
+    let changed = remove([&job])? || unlinked;
     let _ = run(FW, &[OsStr::new("--remove"), exe.as_ref()]); // fails without root, or when not listed
     let path = exe.as_os_str().as_bytes();
     let listed = run(FW, &["--listapps"]).is_ok_and(|out| out.windows(path.len()).any(|w| w == path));

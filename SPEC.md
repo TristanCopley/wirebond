@@ -552,13 +552,15 @@ wirebond anchor allow <device>... | deny <device>...
 wirebond support on <uplink> <cable> [--for <client>]
 wirebond support off
 wirebond update                            update now
+wirebond install                           install or mend the service; changes no role
 wirebond uninstall                         remove everything wirebond created
 wirebond version [--json]
 wirebond run                               the daemon (started by the service manager)
 ```
 
 - **Output:** human-readable by default; `--json` gives the §20.2 schema.
-- **Installation:** the first command that changes anything installs and starts the service, which needs administrator rights once.
+- **Installation:** `wirebond install`, or the first command that changes anything, installs and starts the service (§22.2). A new download run that way as an administrator replaces the installed executable.
+- **Rights:** a command that changes anything needs administrator rights (sudo, or an administrator PowerShell), since only the service's owner may connect to `ctl.sock`; reading needs none. Without them the CLI prints the exact command to run, and says whether the daemon is running.
 
 **Exit codes**
 
@@ -692,6 +694,7 @@ Durations are monotonic. All constants live in `crates/core/src/consts.rs`.
 
 - **Viewer assets:** `wirebond-view-Darwin-arm64`, `-Darwin-x86_64`, `-Linux-x86_64` and `-Windows-AMD64.exe`.
 - **Every release** carries `SHA256SUMS`.
+- **Installers:** `install.sh` (macOS, Linux) and `install.ps1` (Windows), served from the repository's `main`, download this machine's asset from the latest release (or a named one), check it against `SHA256SUMS`, and run `wirebond install` as an administrator. CI runs both against freshly built executables.
 
 ### 22.2 Service
 
@@ -700,11 +703,12 @@ Every role runs as a system service:
 | OS | Service | Binary |
 | --- | --- | --- |
 | Linux | systemd unit `wirebond.service` | `/usr/local/bin/wirebond` |
-| macOS | LaunchDaemon `com.wirebond` | `/Library/Application Support/wirebond/wirebond`: root-owned, because Homebrew can make `/usr/local/bin` writable by the user, and a root service must never run a file its user can replace |
-| Windows | service `wirebond`, plus a firewall rule for its executable | `%ProgramFiles%\wirebond\wirebond.exe` |
+| macOS | LaunchDaemon `com.wirebond` | `/Library/Application Support/wirebond/wirebond`: root-owned, because Homebrew can make `/usr/local/bin` writable by the user, and a root service must never run a file its user can replace. `/usr/local/bin/wirebond` is a link to it, the name people type; the service never runs the link |
+| Windows | service `wirebond`, plus a firewall rule for its executable | `%ProgramFiles%\wirebond\wirebond.exe`, its folder on the machine's PATH |
 
 - **Requirements checked at install:** Linux needs `ip` and `nft`, and `nmcli` for `support`. macOS needs nothing extra.
-- **`wirebond uninstall`** removes the service, binary, config, routes, rules, NAT, DNS settings and the Wintun adapter.
+- **On PATH:** the link and the PATH entry are made only where nothing of someone else's is; without them the CLI names the executable's full path.
+- **`wirebond uninstall`** removes the service, binary, its link or PATH entry, config, routes, rules, NAT, DNS settings and the Wintun adapter.
 
 ### 22.3 Update
 

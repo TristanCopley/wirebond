@@ -320,6 +320,50 @@ fn plist_text() {
     assert!(p.ends_with("</dict></plist>\n") && !p.contains("Path"), "{p}");
 }
 
+/// Windows's PATH entry for the executable's folder: added once at the end, matched in any case
+/// and with or without a trailing backslash, removed alone; every other entry kept as stored.
+#[test]
+fn path_entries() {
+    let dir = r"C:\Program Files\wirebond";
+    let sys = r"%SystemRoot%\system32;%SystemRoot%;C:\Tools\";
+    assert_eq!(install::path_with(sys, dir).unwrap(), format!("{sys};{dir}"));
+    assert_eq!(install::path_with(&format!("{sys};"), dir).unwrap(), format!("{sys};{dir}"), "no empty entry");
+    assert_eq!(install::path_with("", dir).unwrap(), dir);
+    for there in [format!("{sys};{dir}"), format!(r"c:\program files\WIREBOND\;{sys}")] {
+        assert_eq!(install::path_with(&there, dir), None, "{there}");
+        assert_eq!(install::path_without(&there, dir).unwrap(), sys, "{there}");
+    }
+    assert_eq!(install::path_without(sys, dir), None);
+    let twice = format!(r"{dir};{sys};{dir}\");
+    assert_eq!(install::path_without(&twice, dir).unwrap(), sys, "every copy");
+    assert_eq!(
+        install::path_with(r"C:\Program Files\wirebond2", dir).unwrap(),
+        format!(r"C:\Program Files\wirebond2;{dir}")
+    );
+}
+
+/// macOS's name on PATH for the system executable: made where nothing is (its directory too),
+/// left alone where something is, and removed only while it is wirebond's link.
+#[cfg(unix)]
+#[test]
+fn link_and_unlink() {
+    let tmp = Tmp::new();
+    let (exe, link) = (tmp.0.join("state/wirebond"), tmp.0.join("usr/local/bin/wirebond"));
+    assert!(unix::link(&link, &exe).unwrap(), "made, with its directory");
+    assert_eq!(fs::read_link(&link).unwrap(), exe);
+    assert!(!unix::link(&link, &exe).unwrap(), "made already");
+    assert!(unix::unlink(&link, &exe).unwrap() && link.symlink_metadata().is_err());
+    assert!(!unix::unlink(&link, &exe).unwrap(), "gone already");
+    // Someone else's file, or a link of theirs, stays.
+    fs::write(&link, "theirs").unwrap();
+    assert!(!unix::link(&link, &exe).unwrap() && !unix::unlink(&link, &exe).unwrap());
+    assert_eq!(fs::read_to_string(&link).unwrap(), "theirs");
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("/opt/homebrew/bin/wirebond", &link).unwrap();
+    assert!(!unix::link(&link, &exe).unwrap() && !unix::unlink(&link, &exe).unwrap());
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new("/opt/homebrew/bin/wirebond"));
+}
+
 #[cfg(target_os = "linux")]
 mod on_linux {
     use super::*;

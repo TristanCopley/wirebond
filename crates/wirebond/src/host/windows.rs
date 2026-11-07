@@ -22,7 +22,12 @@ use socket2::{SockRef, Socket};
 use windows_sys::Win32::Media::{TIMERR_NOERROR, timeBeginPeriod, timeEndPeriod};
 use windows_sys::Win32::NetworkManagement::{IpHelper::*, Ndis::IfOperStatusUp};
 use windows_sys::Win32::Security::{Authorization::*, *};
+use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, RegGetValueW, RegSetKeyValueW};
+use windows_sys::Win32::System::Registry::{RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
 use windows_sys::Win32::System::{Services::*, SystemInformation::*, Threading::CREATE_NO_WINDOW};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+};
 use windows_sys::Win32::{Foundation::*, Networking::WinSock::*, Storage::FileSystem::*};
 use windows_sys::core::{BOOL, PWSTR};
 
@@ -37,6 +42,8 @@ const STATE_SD: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 const PUBLIC_SD: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFW;;;AU)";
 /// The service's and the firewall rule's name.
 const NAME: &str = "wirebond";
+/// Where the registry keeps the machine's environment, PATH among it.
+const ENVIRONMENT: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
 /// The interfaces as GetAdaptersAddresses lists them, read as Go's net.Interfaces reads them on
 /// Windows: the friendly name ("Wi-Fi", "Ethernet 2", "vEthernet (WSL)", "Tailscale"), up when
@@ -287,10 +294,55 @@ fn netsh(args: &str) -> io::Result<()> {
     if out.status.success() { Ok(()) } else { Err(io::Error::other(format!("netsh {line}: {}", msg.trim()))) }
 }
 
+/// Puts `dir` on the machine's PATH (`on`) or takes it off, every other entry kept as stored,
+/// %SystemRoot% unexpanded; whether that changed it. Programs started from then on find
+/// `wirebond` there: Explorer, told of the change as setx tells it, passes the new PATH on.
+fn machine_path(dir: &Path, on: bool) -> io::Result<bool> {
+    let (key, name) = (wide(ENVIRONMENT), wide("Path"));
+    let (old, dir) = (reg_string(&key, &name)?, dir.to_string_lossy());
+    let new = if on { super::install::path_with(&old, &dir) } else { super::install::path_without(&old, &dir) };
+    let Some(new) = new else { return Ok(false) };
+    let data = wide(&new);
+    let len = u32::try_from(data.len() * 2).map_err(io::Error::other)?;
+    // SAFETY: key and name are NUL-terminated, and data holds len bytes.
+    win32(unsafe {
+        RegSetKeyValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), REG_EXPAND_SZ, data.as_ptr().cast(), len)
+    })?;
+    let what = wide("Environment");
+    // SAFETY: what is NUL-terminated and outlives the call, which gives each window at most 1 s.
+    unsafe {
+        let lparam = what.as_ptr() as isize;
+        SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, lparam, SMTO_ABORTIFHUNG, 1000, null_mut())
+    };
+    Ok(true)
+}
+
+/// The string value `name` of the key HKLM\`key`, unexpanded.
+fn reg_string(key: &[u16], name: &[u16]) -> io::Result<String> {
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+    let (mut buf, mut len) = (Vec::<u16>::new(), 0u32);
+    loop {
+        let p = if buf.is_empty() { null_mut() } else { buf.as_mut_ptr().cast() };
+        // SAFETY: key and name are NUL-terminated; p is null, which asks for the size alone, or
+        // holds len bytes; len is in and out.
+        match unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), flags, null_mut(), p, &mut len) } {
+            ERROR_MORE_DATA => {} // it grew since the size was asked
+            0 if !buf.is_empty() => break,
+            r => win32(r)?,
+        }
+        buf.resize((len as usize).div_ceil(2).max(1), 0);
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Ok(String::from_utf16_lossy(&buf[..n]))
+}
+
 /// Adds the firewall rule and the service (automatic, LocalSystem, restarted 1 s after each
-/// failure, the count reset after a day, an error exit counting as a failure) and starts it.
+/// failure, the count reset after a day, an error exit counting as a failure) and starts it, and
+/// puts the executable's folder on the machine's PATH; without that, which only costs the full
+/// path, the CLI says how to run it.
 pub fn register(_: Scope, exe: &Path, _restart: bool) -> io::Result<bool> {
     let mut changed = netsh("show rule name=wirebond").is_err();
+    changed |= exe.parent().is_some_and(|d| machine_path(d, true).unwrap_or(false));
     if changed {
         let (rule, exe) = ("name=wirebond dir=in action=allow", exe.display());
         netsh(&format!(r#"add rule {rule} program="{exe}" enable=yes profile=any"#))?;
@@ -353,9 +405,10 @@ pub fn halt(_: Scope) {
     let _ = stop_service(false);
 }
 
-/// Removes the firewall rule, then stops and deletes the service.
-pub fn unregister(_: Scope, _exe: &Path) -> io::Result<(bool, String)> {
-    let changed = netsh("delete rule name=wirebond").is_ok();
+/// Removes the firewall rule and the PATH entry, then stops and deletes the service.
+pub fn unregister(_: Scope, exe: &Path) -> io::Result<(bool, String)> {
+    let mut changed = netsh("delete rule name=wirebond").is_ok();
+    changed |= exe.parent().is_some_and(|d| machine_path(d, false).unwrap_or(false));
     Ok((stop_service(true)? || changed, String::new()))
 }
 

@@ -26,11 +26,40 @@ pub(super) fn has(s: Scope) -> bool {
     s.paths().1.join(CONFIG_FILE).exists() && (s == Scope::System || cfg!(target_os = "macos"))
 }
 
-/// Whether the directory of `s`'s executable is on PATH. While it is not, the CLI names the
-/// executable's full path, and for ~/.local/bin gives the line that adds it (§15.2).
+/// Whether `wirebond` on PATH is `s`'s executable: in its directory, or a link to it such as the
+/// one macOS's install makes in /usr/local/bin. While it is not, the CLI names the executable's
+/// full path (§15.2).
 pub fn on_path(s: Scope) -> bool {
     let exe = s.paths().0;
-    env::split_paths(&env::var_os("PATH").unwrap_or_default()).any(|d| Some(&*d) == exe.parent())
+    let (Some(name), Ok(real)) = (exe.file_name(), fs::canonicalize(&exe)) else { return false };
+    let dirs = env::var_os("PATH").unwrap_or_default();
+    env::split_paths(&dirs).any(|d| fs::canonicalize(d.join(name)).is_ok_and(|p| p == real))
+}
+
+/// `path`, a PATH value, with `dir` added at its end; None while it holds `dir` already. Entries
+/// match as Windows matches them, in any case and with or without a trailing backslash, and every
+/// other entry stays as it is.
+#[cfg(any(windows, test))]
+pub(super) fn path_with(path: &str, dir: &str) -> Option<String> {
+    if path.split(';').any(|e| same_dir(e, dir)) {
+        return None;
+    }
+    let path = path.trim_end_matches(';');
+    Some(if path.is_empty() { dir.to_owned() } else { format!("{path};{dir}") })
+}
+
+/// `path` without `dir`, as [`path_with`] matches it; None while it does not hold `dir`.
+#[cfg(any(windows, test))]
+pub(super) fn path_without(path: &str, dir: &str) -> Option<String> {
+    if !path.split(';').any(|e| same_dir(e, dir)) {
+        return None;
+    }
+    Some(path.split(';').filter(|e| !same_dir(e, dir)).collect::<Vec<_>>().join(";"))
+}
+
+#[cfg(any(windows, test))]
+fn same_dir(a: &str, b: &str) -> bool {
+    a.trim_end_matches('\\').eq_ignore_ascii_case(b.trim_end_matches('\\'))
 }
 
 /// Puts wirebond in place for scope `s` and starts it (§15.2, §15.3); idempotent. Returns whether
