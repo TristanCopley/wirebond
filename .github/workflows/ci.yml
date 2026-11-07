@@ -171,11 +171,18 @@ jobs:
       - name: Wintun 0.14.1, checked against crates/wirebond/wintun.sum (SPEC 2.0 §5.3)
         if: runner.os == 'Windows'
         run: .github/scripts/wintun.sh
+      # macOS assigns only 127.0.0.1 on lo0. The tests' other loopback addresses, as their sources name
+      # them (ip(net, host), Ipv4Addr::new(127, net, 0, host) and "127.x.y.z"), are aliased, and no
+      # more: a few thousand aliases made every link scan (getifaddrs, netstat) slow.
       - name: The loopback addresses the daemon's tests bind (macOS assigns only 127.0.0.1 itself)
         if: runner.os == 'macOS'
         run: |
-          sudo sh -c 'for n in $(seq 30 65); do for h in $(seq 1 99); do ifconfig lo0 alias 127.$n.0.$h up; done; done
-                      for n in 40 41 42; do for h in $(seq 1 99); do ifconfig lo0 alias 127.0.$n.$h up; done; done'
+          src=crates/wirebond/src
+          addrs=$( { grep -rhoE 'ip\([0-9]+, *[0-9]+\)' "$src" | sed -E 's/ip\(([0-9]+), *([0-9]+)\)/127.\1.0.\2/'
+                     grep -rhoE 'Ipv4Addr::new\(127, *[0-9]+, *0, *[0-9]+\)' "$src" | sed -E 's/.*\(127, *([0-9]+), *0, *([0-9]+)\)/127.\1.0.\2/'
+                     grep -rhoE '"127\.[0-9]+\.[0-9]+\.[0-9]+' "$src" | tr -d '"'; } | grep -vx '127.0.0.1' | sort -u)
+          echo "aliasing $(echo "$addrs" | wc -l | tr -d ' ') addresses on lo0"
+          echo "$addrs" | sudo sh -c 'while read -r a; do ifconfig lo0 alias "$a" up; done'
       - name: cargo test
         if: runner.os != 'macOS'
         run: cargo test -p wirebond -p wirebond-core --locked
@@ -189,11 +196,14 @@ jobs:
           cargo test -p wirebond -p wirebond-core --locked --no-run
           log="$RUNNER_TEMP/test.log"
           cargo test -p wirebond -p wirebond-core --locked -- --test-threads=1 >"$log" 2>&1 &
-          pid=$! size=-1 still=0
+          pid=$! size=-1 still=0 last=
           while kill -0 "$pid" 2>/dev/null; do
             sleep 5
             now=$(wc -c <"$log")
             if [ "$now" = "$size" ]; then still=$((still + 5)); else size=$now still=0; fi
+            # Each test as it starts, with the time: the job log shows how long each one took.
+            cur=$(grep -E '^test ' "$log" | tail -n 1 || true)
+            if [ -n "$cur" ] && [ "$cur" != "$last" ]; then echo "$(date -u +%T) $cur"; last=$cur; fi
             if [ "$still" -ge 180 ]; then
               echo "::error::no test output for 3 minutes; the last tests started:"
               tail -n 40 "$log"
@@ -209,6 +219,12 @@ jobs:
           if [ "$code" != 0 ]; then sed -n '/^failures:$/,$p' "$log" | head -n 300; fi
           tail -n 30 "$log"
           exit "$code"
+      - name: The tests that ran long, and the log's end (macOS, also after a timeout)
+        if: always() && runner.os == 'macOS'
+        run: |
+          log="$RUNNER_TEMP/test.log"
+          grep -E 'has been running for over|^test .*(FAILED|ignored)' "$log" || echo "no test ran over 60 s"
+          tail -n 40 "$log" || true
 
   # The installers end to end on each OS (SPEC 2.0 §22.1), against an executable built here and
   # served on 127.0.0.1 as a release folder: install, the daemon answering, `wirebond` on PATH,
