@@ -19,6 +19,9 @@ struct Knobs {
     /// Why enabling egress fails, when it does, and why it enables none, when it does that.
     egress_err: Option<String>,
     egress_why: Option<String>,
+    /// Why capture cannot be installed, when it cannot, and how often it was tried.
+    capture_err: Option<String>,
+    captures: usize,
     /// The label of every link, where the links are not labelled after their interfaces.
     label: Option<String>,
     /// Why the TUN device does not open, when it does not, and how often it opened.
@@ -71,6 +74,11 @@ impl Platform for Host {
     }
 
     fn capture_install(&mut self, _: &host::Capture) -> io::Result<()> {
+        let mut k = self.knobs.lock().unwrap();
+        k.captures += 1;
+        if let Some(e) = k.capture_err.clone() {
+            return Err(io::Error::other(e));
+        }
         self.calls.lock().unwrap().push("capture on".into());
         Ok(())
     }
@@ -511,7 +519,7 @@ fn an_anchor_without_a_device_refuses_bonds_and_opens_it_again() {
     let r = a.d.answer(Request::AnchorOn);
     assert!(!r.ok && r.error.as_ref().is_some_and(|e| e.msg == p.msg), "{r:?}");
     let said = |n: &Node| n.d.logs.iter().filter(|l| l.contains("the driver is not loaded")).count();
-    let until = Instant::now() + Duration::from_nanos(ANCHOR_RETRY as u64) + Duration::from_secs(1);
+    let until = Instant::now() + Duration::from_nanos(HOST_RETRY as u64) + Duration::from_secs(1);
     run(&mut [&mut a, &mut c], "a retry later", |_| Instant::now() >= until);
     assert_eq!((said(&a), a.d.tun.is_none()), (1, true), "tried again, said once: {:?}", a.d.logs);
     // The device opens on the next try, and the client's next dial bonds.
@@ -551,6 +559,36 @@ fn status_lanes_name_links_by_label_and_count_first_arrivals() {
     );
     // The client received none: no fraction to show.
     assert!(cl.iter().all(|l| l.first_arrivals == 0.0), "{cl:?}");
+}
+
+/// A capture the host refuses (a route another VPN owns) is tried again every HOST_RETRY, not at
+/// every look at the lanes; what it did install is removed; the reason is logged once and status
+/// shows it in place of "no lane validated".
+#[test]
+fn a_refused_capture_is_tried_again_at_intervals_and_shown() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(74, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(74, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(74, 2))], ip(74, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(74, 1))], ip(74, 10), ccfg);
+    c.knobs.lock().unwrap().capture_err = Some("route: File exists on utun3".into());
+    run(&mut [&mut a, &mut c], "refused", |n| n[1].d.capture_fault.is_some());
+    // Well past LANES_BLOCKED_AFTER and many looks at the lanes, short of the next try.
+    let until = Instant::now() + Duration::from_nanos((HOST_RETRY - SEC) as u64);
+    run(&mut [&mut a, &mut c], "a while", |_| Instant::now() >= until);
+    let said = c.d.logs.iter().filter(|l| l.contains("File exists on utun3")).count();
+    assert_eq!((c.knobs.lock().unwrap().captures, said), (1, 1), "one try, said once: {:?}", c.d.logs);
+    assert_eq!(c.calls(), vec!["capture off".to_string()], "what a failed install left is removed");
+    let st = c.d.status(false);
+    let p = st.problems.iter().find(|p| p.code == problem::LANES_BLOCKED).unwrap_or_else(|| panic!("{st:?}"));
+    assert_eq!(p.msg, "capture failed (route: File exists on utun3): traffic goes direct");
+    assert!(st.bond.unwrap().lanes.iter().any(|l| l.state == api::LaneState::Up), "the lanes are up");
+    // The other VPN lets go: the next try installs capture, and the bond is up.
+    c.knobs.lock().unwrap().capture_err = None;
+    run(&mut [&mut a, &mut c], "capture", |n| n[1].d.capture.is_some());
+    let st = c.d.status(false);
+    assert_eq!(st.bond.as_ref().unwrap().state, BondState::Up);
+    assert!(st.problems.iter().all(|p| p.code != problem::LANES_BLOCKED), "{st:?}");
+    assert_eq!(c.knobs.lock().unwrap().captures, 2);
 }
 
 #[test]

@@ -59,8 +59,8 @@ const IDLE_WAIT: Duration = Duration::from_millis(500);
 const LIFE_EVERY: Mono = 20 * MS;
 /// How often an anchor resolves the names on its allow-list again.
 const RESOLVE_EVERY: Mono = 30 * SEC;
-/// How often an anchor whose TUN device did not open tries again.
-const ANCHOR_RETRY: Mono = 5 * SEC;
+/// How often a host call that failed is tried again: an anchor's TUN device, a client's capture.
+const HOST_RETRY: Mono = 5 * SEC;
 /// ICMPv6 unreachables a client writes a second at most (§5.5).
 const ICMP6_RATE: u32 = 100;
 /// Packets read from one source per loop turn at most, so no source starves the others.
@@ -276,6 +276,8 @@ pub struct Daemon {
     tun: Option<Box<dyn TunDev>>,
     /// A client's capture while installed.
     capture: Option<host::Capture>,
+    /// Why a client's capture could not be installed, and when it is tried again.
+    capture_fault: Option<(String, Mono)>,
     /// A client's resolver at the anchor (`bond ok`'s dns).
     dns: Option<IpAddr>,
     /// An anchor's egress: what was asked and what it achieved.
@@ -551,6 +553,7 @@ impl Daemon {
             unreachable: None,
             tun: None,
             capture: None,
+            capture_fault: None,
             dns: None,
             egress: None,
             anchor_fault: None,
@@ -1487,7 +1490,11 @@ impl Daemon {
             };
             match self.plat.open_tun(&cfg) {
                 Ok(t) => self.tun = Some(t),
-                Err(e) => self.host_failed("TUN device", &e),
+                Err(e) => {
+                    // No device, no capture for this bond: status says so (`lanes_blocked`).
+                    self.host_failed("TUN device", &e);
+                    self.capture_fault = Some((format!("no TUN device: {e}"), Mono::MAX));
+                }
             }
         }
         let b = &mut self.bonds[0];
@@ -1843,10 +1850,10 @@ impl Daemon {
 
     /// Opens the anchor's TUN device with its bond addresses, enables egress (§6) and starts the
     /// DNS relay (§7). Called again, it keeps the device it has and does the rest anew: when the
-    /// uplink appears or moves, and every ANCHOR_RETRY while the device does not open.
+    /// uplink appears or moves, and every HOST_RETRY while the device does not open.
     fn anchor_on(&mut self) {
         let first = self.egress.is_none();
-        self.anchor_retry = self.now() + ANCHOR_RETRY;
+        self.anchor_retry = self.now() + HOST_RETRY;
         let net4 = self.cfg.bond_nets().0.and_then(|(a, b)| match network(a, b) {
             IpAddr::V4(n) => Some((n, b)),
             IpAddr::V6(_) => None,
@@ -1978,6 +1985,10 @@ impl Daemon {
         if self.mesh_captured.is_some() {
             return false; // §5.3: off for this bond
         }
+        let now = self.now();
+        if self.capture_fault.as_ref().is_some_and(|(_, again)| now < *again) {
+            return false;
+        }
         let Some(b) = self.bonds.first() else { return false };
         let Some(tun) = self.tun.as_ref().map(|t| t.name().to_string()) else { return false };
         let c = host::Capture {
@@ -1995,7 +2006,7 @@ impl Daemon {
             Ok(()) => {
                 // §7: without a way to point the resolver at the anchor, DNS stays local.
                 self.dns_local = c.dns.is_some() && self.plat.dns_local();
-                self.capture = Some(c);
+                (self.capture, self.capture_fault) = (Some(c), None);
                 self.log("capture installed".into());
                 if self.dns_local {
                     self.log("DNS left alone: queries go to the local resolver".into());
@@ -2003,7 +2014,14 @@ impl Daemon {
                 true
             }
             Err(e) => {
-                self.host_failed("capture", &e);
+                // What it did install goes; it is tried again every HOST_RETRY, not at every look
+                // at the lanes (LIFE_EVERY), and said once.
+                let _ = self.plat.capture_remove(&c);
+                let why = e.to_string();
+                if self.capture_fault.as_ref().is_none_or(|(w, _)| *w != why) {
+                    self.host_failed("capture", &e);
+                }
+                self.capture_fault = Some((why, now + HOST_RETRY));
                 false
             }
         }
@@ -2011,7 +2029,7 @@ impl Daemon {
 
     /// Removes the client's capture, if installed (§5.4).
     fn capture_off(&mut self) {
-        self.dns_local = false;
+        (self.dns_local, self.capture_fault) = (false, None);
         if let Some(c) = self.capture.take() {
             match self.plat.capture_remove(&c) {
                 Ok(()) => self.log("capture removed".into()),
@@ -2359,7 +2377,18 @@ impl Daemon {
                     v.push(p(problem::BOND_DOWN, None, "every lane and the channel down: traffic goes direct".into()));
                 }
                 if b.state == BondState::Punching && now - b.since >= LANES_BLOCKED_AFTER {
-                    v.push(p(problem::LANES_BLOCKED, None, "no lane validated".into()));
+                    v.push(match &self.capture_fault {
+                        // The lanes may well be up: what holds the bond back is this device.
+                        Some((why, _)) => {
+                            let next = "mend what the message names: capture is tried again every few seconds";
+                            p(
+                                problem::LANES_BLOCKED,
+                                Some(next),
+                                format!("capture failed ({why}): traffic goes direct"),
+                            )
+                        }
+                        None => p(problem::LANES_BLOCKED, None, "no lane validated".into()),
+                    });
                 }
                 if b.mesh_only.is_some_and(|t| now - t >= MESH_ONLY_AFTER) {
                     v.push(p(problem::MESH_ONLY, None, "only the mesh lane is up".into()));
