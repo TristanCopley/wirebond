@@ -28,24 +28,42 @@ irm https://raw.githubusercontent.com/TristanCopley/wirebond/main/install.ps1 | 
 
 Either downloads this machine's executable from the latest release, checks it against the
 release's `SHA256SUMS`, and runs `wirebond install`, which sets wirebond up as a system service and
-puts `wirebond` on PATH. Nothing changes on the network until you give the device a role. Install it
-on the client and on the anchor; a phone used as a support needs nothing. From then on the daemon
-updates itself from GitHub releases, checking each download's hash and rolling back a version that
-does not stay healthy; running the installer again also updates. `sudo wirebond uninstall`
-removes everything wirebond created.
+puts `wirebond` on PATH (on Windows it also adds a firewall rule for the executable). No traffic is
+captured or rerouted until you give the device a role: until then the daemon only watches the
+device's links (a UDP socket on each, and a STUN request and a captive-portal check when one
+appears) and listens on its mesh address. Install it on the client and on the anchor; a phone used
+as a support needs nothing. From then on the daemon updates itself from GitHub releases, checking
+each download's hash and rolling back a version that does not stay healthy; running the installer
+again also updates.
+
+`sudo wirebond uninstall` removes the service, the executable, its PATH entry and its settings.
+Turn the role off first (`wirebond client off`, `anchor off` or `support off`): on macOS and Linux,
+uninstalling while a role is on leaves that role's routing rules, NAT rules or sharing in place
+(NOTES.md, known limitations).
 
 Linux needs systemd (the installer stops without it), `ip` and `nft` (the iproute2 and nftables
-packages), and `nmcli` for `support`.
+packages), `curl` for the daemon's self-update (the installer can download with `wget`; the daemon
+cannot), and `nmcli` (NetworkManager) for `support`. With systemd-resolved a client's DNS goes to
+the anchor; without it DNS stays with the local resolver, and status says `dns_local`.
 
 <details>
 <summary>Without the installer</summary>
 
 Download your machine's asset and `SHA256SUMS` from the
-[latest release](https://github.com/TristanCopley/wirebond/releases/latest), check the hash, and
-run `sudo ./wirebond-<OS>-<arch> install` (on Windows, `.\wirebond-Windows-AMD64.exe install` in an
-administrator PowerShell). The assets are named as `uname -sm` prints the machine:
-`wirebond-Linux-x86_64`, `-aarch64`, `-armv7l`, `-armv6l` (static), `wirebond-Darwin-arm64`,
-`-x86_64`, `wirebond-Windows-AMD64.exe`, `-ARM64.exe` (Wintun inside).
+[latest release](https://github.com/TristanCopley/wirebond/releases/latest) into one folder. There,
+check the hash, make the file executable (a download is not) and install:
+
+```sh
+grep " wirebond-Linux-x86_64$" SHA256SUMS | sha256sum -c -    # on macOS: shasum -a 256 -c -
+chmod +x wirebond-Linux-x86_64
+sudo ./wirebond-Linux-x86_64 install
+```
+
+On Windows, in an administrator PowerShell, compare `(Get-FileHash .\wirebond-Windows-AMD64.exe).Hash`
+with the asset's line in `SHA256SUMS`, then run `.\wirebond-Windows-AMD64.exe install`. The assets
+are named as `uname -sm` prints the machine: `wirebond-Linux-x86_64`, `-aarch64`, `-armv7l`,
+`-armv6l` (static), `wirebond-Darwin-arm64`, `-x86_64`, `wirebond-Windows-AMD64.exe`, `-ARM64.exe`
+(Wintun inside).
 
 | OS | Service | Executable |
 | --- | --- | --- |
@@ -113,7 +131,8 @@ performance|bandwidth` changes it later.
 
 ## Commands
 
-`wirebond help` lists them: `wirebond [status [<device>]]`, `client <anchor> [mode] | off`, `mode
+`wirebond help` lists them: `wirebond [status [<device>] [--watch]]` (`--watch` shows it again every
+second: lanes, delay, loss and each link's share, live while you play), `client <anchor> [mode] | off`, `mode
 performance|bandwidth`, `pick [<device>...] [--mode M] [--seconds N] [--dry-run]` to measure
 candidate anchors and choose the best (`pick --add|--remove <device>` keeps the list), `anchor
 on|off`, `anchor allow|deny <device>...`, `support on <uplink> <cable> [--for <client>] | off`,
@@ -130,8 +149,10 @@ cargo test -p wirebond-netsim --release       # the simulator's acceptance set (
 sudo tests/system/run.sh                      # the system harness in network namespaces (Linux)
 ```
 
-Rust 1.99.1. The crates: `crates/core` (the pure engine), `crates/wirebond` (daemon, OS layer,
-CLI), `crates/netsim` (simulator and acceptance), `crates/load` (the harness's load and echo tool).
-A tag `v*.*.*` builds, tests and publishes a release (`.github/workflows/release.yml`). A manual
-run of that workflow given a tag publishes one too, after the same checks less the simulator's
-full set: how a release candidate goes out.
+Rust 1.99.1, the toolchain CI pins. On Linux the tests run `ip`, so they need iproute2; a Windows
+build embeds Wintun, which `.github/scripts/wintun.sh` downloads and checks first. The crates:
+`crates/core` (the pure engine), `crates/wirebond` (daemon, OS layer, CLI), `crates/netsim`
+(simulator and acceptance), `crates/load` (the harness's load and echo tool). A tag `v*.*.*`
+builds, tests and publishes a release (`.github/workflows/release.yml`). A manual run of that
+workflow given a tag publishes one too, after the same checks less the simulator's full set: how a
+release candidate goes out.

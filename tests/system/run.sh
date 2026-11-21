@@ -55,12 +55,12 @@ ANCHOR4=203.0.113.2 ANCHOR6=2001:db8:a::2
 MESH_C=100.64.0.1 MESH_A=100.64.0.2 MESH_B=100.64.0.3
 BOND_A4=10.77.0.1 BOND_A6=fd77:b0d::1
 HOTEL4=192.168.1.2 CELL4=172.20.10.2
-# The largest UDP payloads the bond carries whole: its MTU is TUN_MTU, 1400 (SPEC §5.3), less the
+# The largest UDP payloads the bond carries whole: its MTU is TUN_MTU, 1400 (SPEC §5.1), less the
 # IPv4 or IPv6 and UDP headers. A larger datagram leaves the client's kernel as two IP fragments,
-# so every one is two packets through the bond, and the engine keys the fragments after the first
-# apart from the first (§13): reordered against each other by more than the kernel's
-# ipfrag_max_dist (64) fragments, the datagram fails reassembly (Ip.ReasmFails in drops.txt). The
-# bond's checks send these; a8 measures a fragmented stream beside them, informative.
+# so every one is two packets through the bond, which keeps a datagram's fragments in one flow
+# and in order (§13); a datagram whose fragments still arrive more than the kernel's
+# ipfrag_max_dist (64) fragments apart fails reassembly (Ip.ReasmFails in drops.txt). The bond's
+# checks send payloads that fit; a8 measures a fragmented stream beside them, informative.
 FIT4=1372 FIT6=1352
 # IPv6 everywhere when the kernel has it; without it, the IPv6 halves of the checks are skipped.
 v6=0
@@ -271,8 +271,11 @@ dir=$1
 shift
 target=$(readlink -f /etc/resolv.conf || echo /etc/resolv.conf)
 case $target in /run/*)
+	# By rename, which cannot find the file there: the start of a daemon and a status poll both
+	# come here.
 	mkdir -p "$dir/run/$(dirname "${target#/run/}")"
-	cp "$dir/resolv.conf" "$dir/run/${target#/run/}" ;;
+	cp "$dir/resolv.conf" "$dir/run/${target#/run/}.$$"
+	mv -f "$dir/run/${target#/run/}.$$" "$dir/run/${target#/run/}" ;;
 esac
 mount --bind "$dir/run" /var/run
 case $target in /run/*) ;; *) mount --bind "$dir/resolv.conf" /etc/resolv.conf ;; esac

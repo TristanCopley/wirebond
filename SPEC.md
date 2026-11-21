@@ -540,7 +540,9 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 
 ```
 wirebond                                   same as: wirebond status
-wirebond status [<device>] [--json]        this node, or another node's read-only view over the mesh
+wirebond status [<device>] [--json] [--watch]
+                                           this node, or another node's read-only view over the mesh;
+                                           --watch shows it again every second
 wirebond client <anchor> [performance|bandwidth]
                                            make this node a client of <anchor> and start its bond
 wirebond client off                        stop the bond; traffic goes direct
@@ -559,6 +561,7 @@ wirebond run                               the daemon (started by the service ma
 ```
 
 - **Output:** human-readable by default; `--json` gives the §20.2 schema.
+- **Watching:** `status --watch` asks again every second until interrupted, or until a status fails, whose exit code it then returns. On a terminal each status is drawn over the last; with `--json`, or into a pipe, they follow one another, one status a line with `--json`.
 - **Installation:** `wirebond install`, or the first command that changes anything, installs and starts the service (§22.2). A new download run that way as an administrator replaces the installed executable.
 - **Rights:** a command that changes anything needs administrator rights (sudo, or an administrator PowerShell), since only the service's owner may connect to `ctl.sock`; reading needs none. Without them the CLI prints the exact command to run, and says whether the daemon is running.
 

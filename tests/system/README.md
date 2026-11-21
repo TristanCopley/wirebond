@@ -21,9 +21,10 @@ sudo tests/system/run.sh [net|a7|a8|a9|a10|a12|shaped|netem|daemons|all|clean]..
 
 The bond's checks send UDP datagrams the bond carries whole: 1372 bytes over IPv4 and 1352 over
 IPv6, its MTU (`TUN_MTU`, 1400) less the headers. A 1400-byte datagram leaves the client's kernel
-as two IP fragments, two packets through the bond; the engine keys the fragments after the first
-apart from the first (SPEC §13), and fragments reordered by more than the kernel's
-`ipfrag_max_dist` (64) fail reassembly. a8 measures such a stream beside its check, informative.
+as two IP fragments, two packets through the bond; the engine keeps every fragment of a datagram
+in one flow, in order (SPEC §13), since fragments that arrive more than the kernel's
+`ipfrag_max_dist` (64) apart fail reassembly. a8 measures such a stream beside its check,
+informative.
 
 Every measurement records the kernel's counters before and after it in `drops.txt`, which a
 diagnosis prints: UDP receive-buffer and send errors, IP discards, failed reassemblies and

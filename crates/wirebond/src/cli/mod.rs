@@ -29,7 +29,9 @@ pub const REFUSED: i32 = 5;
 
 const HELP: &str = "\
 wirebond                                   same as: wirebond status
-wirebond status [<device>] [--json]        this node, or another node's read-only view over the mesh
+wirebond status [<device>] [--json] [--watch]
+                                           this node, or another node's read-only view over the mesh;
+                                           --watch shows it again every second
 wirebond client <anchor> [performance|bandwidth]
                                            make this node a client of <anchor> and start its bond
 wirebond client off                        stop the bond; traffic goes direct
@@ -49,6 +51,8 @@ wirebond run                               the daemon (started by the service ma
 
 /// How long a service the CLI just installed has to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
+/// How often `status --watch` asks again (§20.4: once a second).
+const WATCH_EVERY: Duration = Duration::from_secs(1);
 
 /// What a command line asks for.
 #[derive(Clone, Debug, PartialEq)]
@@ -120,11 +124,63 @@ impl Host for System {
 
 /// Runs the CLI with the process's arguments and returns the exit code.
 pub fn main(version: &str, commit: &str) -> i32 {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    if let Some(i) = args.iter().position(|a| a == "--watch") {
+        args.remove(i);
+        return watch(&args, version, commit, &System);
+    }
     let (code, out, err) = cli(&args, version, commit, &System);
     let _ = io::stdout().write_all(out.as_bytes());
     let _ = io::stderr().write_all(err.as_bytes());
     code
+}
+
+/// `status --watch` (§19): the status again every WATCH_EVERY, until interrupted or until a status
+/// fails, whose exit code is then the command's. On a terminal each is drawn over the last; with
+/// --json, or into a pipe, they follow one another.
+fn watch(args: &[String], version: &str, commit: &str, h: &dyn Host) -> i32 {
+    let json = match watched(args) {
+        Ok(json) => json,
+        Err(why) => {
+            let _ = io::stderr().write_all(format!("wirebond: {why}\n").as_bytes());
+            return USAGE;
+        }
+    };
+    let over = !json && host::terminal();
+    let mut stdout = io::stdout();
+    if over {
+        let _ = stdout.write_all(b"\x1b[2J"); // a clear screen to draw on
+    }
+    loop {
+        let (code, out, err) = cli(args, version, commit, h);
+        let out = if over && code == OK { screen(&out) } else { out };
+        let wrote = stdout.write_all(out.as_bytes()).and_then(|()| stdout.flush());
+        let _ = io::stderr().write_all(err.as_bytes());
+        if code != OK || wrote.is_err() {
+            return code; // the status failed, or whoever read the output is gone
+        }
+        thread::sleep(WATCH_EVERY);
+    }
+}
+
+/// Whether `args`, --watch taken out, ask for a status, which is what --watch shows; and whether
+/// as JSON.
+fn watched(args: &[String]) -> Result<bool, String> {
+    match parse(args)? {
+        (Cmd::Api(Request::Status { .. }), json) => Ok(json),
+        _ => Err("--watch belongs to status".into()),
+    }
+}
+
+/// `text` drawn over what the terminal shows: from its top-left corner, each line cleared to its
+/// end, then everything below.
+fn screen(text: &str) -> String {
+    let mut s = String::from("\x1b[H");
+    for line in text.lines() {
+        s += line;
+        s += "\x1b[K\n";
+    }
+    s + "\x1b[J"
 }
 
 /// One command line: its exit code, stdout and stderr.
@@ -282,7 +338,7 @@ pub fn parse(args: &[String]) -> Result<(Cmd, bool), String> {
 /// A verb's forms, as `wirebond help` gives them; "" for no verb.
 fn form(verb: &str) -> &'static str {
     match verb {
-        "status" => "wirebond status [<device>] [--json]",
+        "status" => "wirebond status [<device>] [--json] [--watch]",
         "client" => "wirebond client <anchor> [performance|bandwidth] | wirebond client off",
         "mode" => "wirebond mode performance|bandwidth",
         "pick" => {

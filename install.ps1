@@ -4,10 +4,10 @@
 #
 # It downloads this machine's executable from the latest GitHub release, or from the release that
 # $env:WIREBOND_TAG names, checks it against the release's SHA256SUMS, and runs `wirebond install`,
-# which puts wirebond in place as a Windows service and its folder on the system PATH. Nothing
-# changes on the network until you give the device a role. Running it again updates or mends the
-# install. $env:WIREBOND_URL, a folder holding a release's assets and SHA256SUMS, replaces
-# GitHub's (a mirror, or a test).
+# which puts wirebond in place as a Windows service, with a firewall rule for its executable, and
+# its folder on the system PATH. No traffic is captured or rerouted until you give the device a
+# role. Running it again updates or mends the install. $env:WIREBOND_URL, a folder holding a
+# release's assets and SHA256SUMS, replaces GitHub's (a mirror, or a test).
 #
 # It runs in a script block, so iex leaves no variables behind, and it throws rather than exits,
 # which would close the window.
