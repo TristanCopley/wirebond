@@ -19,6 +19,12 @@ permissions:
 env:
   RUST_VERSION: '1.99.1' # as in ci.yml
 
+defaults:
+  run:
+    # bash -eo pipefail, as in ci.yml. Left to GitHub's default, bash -e, a pipeline ends as its last
+    # command does: the harness piped into tee could not fail its step.
+    shell: bash
+
 concurrency:
   # Literal: in a workflow_call github.workflow is the caller's name, and release.yml calls ci.yml and system.yml at once.
   group: system-${{ github.event_name }}-${{ github.ref }}
@@ -48,11 +54,14 @@ jobs:
         run: sudo env PATH="$PATH" TMPDIR="$TMPDIR" LOAD_BIN="$LOAD_BIN" tests/system/run.sh net
       - name: A7, A8, A9, A10, A12, and the shaped and netem runs against the mesh-lane baseline
         run: |
-          {
-            echo '```'
-            sudo env PATH="$PATH" TMPDIR="$TMPDIR" WIREBOND_BIN="$WIREBOND_BIN" LOAD_BIN="$LOAD_BIN" tests/system/run.sh daemons
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          # The harness's tables, and its diagnosis of a failed scenario, as one code block in the
+          # job's summary. The block is closed however the harness ends, and the step ends as it did.
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          sudo env PATH="$PATH" TMPDIR="$TMPDIR" WIREBOND_BIN="$WIREBOND_BIN" LOAD_BIN="$LOAD_BIN" tests/system/run.sh daemons |
+            tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
       - if: failure()
         run: sudo chmod -R a+rX "$TMPDIR"
       - if: failure()

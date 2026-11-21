@@ -28,6 +28,13 @@ concurrency:
 env:
   RUST_VERSION: '1.99.1' # the toolchain every job installs; release.yml and system.yml name it too
 
+defaults:
+  run:
+    # bash -eo pipefail in every job; the PowerShell step names its own shell. Left to GitHub's
+    # default, a Linux step runs bash -e, where a pipeline ends as its last command does: a
+    # `cargo tree` that failed would have passed the allow-list on an empty list.
+    shell: bash
+
 jobs:
   # Lints and static checks, apart from the tests so that a lint failure still lets the tests run.
   rust-lint:
@@ -112,7 +119,9 @@ jobs:
         if: github.event_name == 'schedule' || inputs.long
         env:
           WIREBOND_LONG: '1' # netsim's long set
-        run: cargo test -p wirebond-netsim --release --locked
+        # --no-fail-fast: every suite reports. Without it cargo test stops at the first test binary
+        # that fails, and the suites after it (accept is the first of seven) do not run.
+        run: cargo test -p wirebond-netsim --release --locked --no-fail-fast
 
   rust-targets:
     runs-on: ubuntu-latest
