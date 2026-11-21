@@ -16,7 +16,7 @@ sudo tests/system/run.sh [net|a7|a8|a9|a10|a12|shaped|netem|daemons|all|clean]..
 | `a9` | Client to a service on the anchor at 10.77.0.1: delivered locally, never NATed. |
 | `a10` | `pick` between two anchors: the better one wins in each mode; `--dry-run` changes nothing. Without netem the worse anchor is only narrower, so only bandwidth mode is checked. |
 | `a12` | At most 25% of one core per daemon at 100 Mbit/s in performance with two lanes (`WIREBOND_A12_CPU`). The harness bills a daemon for the kernel's work along the whole simulated path, so the figure is an upper bound on a device's. |
-| `shaped`, `netem` | 30 Mbit/s video at 120 fps on the shaped hotel and cell, against the mesh-lane baseline (A11), then UDP and TCP with CPU and RSS. |
+| `shaped`, `netem` | 30 Mbit/s video at 120 fps on the shaped hotel and cell with every lane up (its first 3 s reported, the next run judged), then UDP and TCP with CPU and RSS, then the mesh-lane baseline, which the bond is never worse than (A11). |
 | `daemons`, `all` | Every daemon scenario; `all` adds `net`. `clean` removes what dead runs left. |
 
 The bond's checks send UDP datagrams the bond carries whole: 1372 bytes over IPv4 and 1352 over
