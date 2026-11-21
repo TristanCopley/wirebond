@@ -471,6 +471,14 @@ fn an_anchor_started_before_the_network_enables_egress_when_the_uplink_appears()
     assert!(why(&a).contains("no egress: no default route"), "{}", why(&a));
     let r = a.d.answer(Request::AnchorOn);
     assert!(r.ok && !r.changed && r.message.contains("no default route"), "{r:?}");
+    // `anchor on` again is the problem's next step: it tries again, here once sharing works.
+    a.knobs.lock().unwrap().egress_why = None;
+    let r = a.d.answer(Request::AnchorOn);
+    assert!(r.ok && !r.message.contains("no egress") && a.calls() == ["egress on "], "{r:?} {:?}", a.calls());
+    assert_eq!(a.d.status(false).anchor.unwrap().egress, Egress::Both);
+    a.knobs.lock().unwrap().egress_why = Some("no default route".into());
+    a.d.anchor_on();
+    assert!(why(&a).contains("no egress: no default route"), "{}", why(&a));
     // The network comes up.
     {
         let mut k = a.knobs.lock().unwrap();
@@ -480,6 +488,7 @@ fn an_anchor_started_before_the_network_enables_egress_when_the_uplink_appears()
     let st = a.d.status(false).anchor.unwrap();
     assert_eq!((st.egress, st.uplink.as_deref()), (Egress::Both, Some("eth0")));
     assert_eq!(a.knobs.lock().unwrap().tuns, 1, "the device it had is kept");
+    assert_eq!(a.calls().len(), 2, "once by hand above, once when the uplink appeared");
     assert!(!why(&a).contains("no egress"), "{}", why(&a));
 }
 

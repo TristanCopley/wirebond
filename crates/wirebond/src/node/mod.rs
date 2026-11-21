@@ -1925,8 +1925,7 @@ impl Daemon {
         {
             self.log(format!("egress off: {err}"));
         }
-        self.dns_relay = None;
-        self.tun = None;
+        (self.dns_relay, self.tun, self.anchor_fault) = (None, None, None);
         self.log("anchor off".into());
     }
 
@@ -2259,6 +2258,9 @@ impl Daemon {
         }
         if changed {
             self.reconcile();
+        } else if anchor_on && self.cfg.role == Role::Anchor && self.anchor_fault.is_some() {
+            // `anchor on` again, on an anchor that lacks something: tried again now.
+            self.anchor_on();
         }
         // §8: when the OS refuses to share, the command prints the manual steps.
         if let Some(steps) = self.support.refused.clone().filter(|_| support_on) {
@@ -2346,7 +2348,7 @@ impl Daemon {
             v.push(p(problem::CONFIG_INVALID, None, e.clone()));
         }
         if let Some(why) = self.anchor_fault.as_ref().filter(|_| self.cfg.role == Role::Anchor) {
-            v.push(p(problem::NO_EGRESS, None, why.clone()));
+            v.push(p(problem::NO_EGRESS, Some("wirebond anchor on"), why.clone()));
         }
         if self.cfg.role == Role::Client {
             if let Some(e) = &self.unreachable {
