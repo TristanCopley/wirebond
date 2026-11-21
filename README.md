@@ -65,6 +65,11 @@ are named as `uname -sm` prints the machine: `wirebond-Linux-x86_64`, `-aarch64`
 `-armv6l` (static), `wirebond-Darwin-arm64`, `-x86_64`, `wirebond-Windows-AMD64.exe`, `-ARM64.exe`
 (Wintun inside).
 
+A file a browser downloaded on macOS is also quarantined: `xattr -d com.apple.quarantine
+wirebond-Darwin-arm64` lets it run (the installer's `curl` download is not). From 2.0.0-rc.2 on,
+each executable carries a signed record of the commit and the workflow run that built it, which
+GitHub's CLI checks: `gh attestation verify wirebond-Linux-x86_64 --repo TristanCopley/wirebond`.
+
 | OS | Service | Executable |
 | --- | --- | --- |
 | Linux | `wirebond.service` (systemd) | `/usr/local/bin/wirebond` |
