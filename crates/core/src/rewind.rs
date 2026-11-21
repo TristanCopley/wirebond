@@ -1,6 +1,7 @@
 //! Rewind (§14.2): when a lane turns suspect, its unacknowledged packets from the last
 //! REWIND_WINDOW (or its suspect timeout plus RTT if longer) are re-sent on the other eligible
-//! lanes. A packet's echoed `last_counter` marks it acknowledged.
+//! lanes. A packet's echoed `last_counter` marks it acknowledged. A lane still in startup that
+//! takes them adds the suspect lane's delivery rate to its own.
 
 use crate::lane::LaneIx;
 use crate::{Mono, Out, QUEUE_AGE, Session};
@@ -18,6 +19,16 @@ impl Session {
     /// REORDER_RESCUE for its gaps (§15).
     pub(crate) fn rewind(&mut self, out: &mut dyn Out, now: Mono, l: LaneIx, to: &[LaneIx]) {
         self.evict(now, l);
+        // What l delivered moves with its packets: a lane of `to` still in startup, whose own rate
+        // never bound, paces for it at once. At its own rate it aged the re-sent packets out in
+        // its pacer while it climbed (A5).
+        let moved = self.lanes[l].delivery;
+        for &t in to {
+            let x = &mut self.lanes[t];
+            if x.startup {
+                x.rate += moved;
+            }
+        }
         let x = &mut self.lanes[l];
         // The acked packet and those before it arrived.
         let acked = x.rw.iter().rposition(|p| p.c == x.acked).map_or(0, |i| i + 1);

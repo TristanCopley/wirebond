@@ -425,6 +425,22 @@ fn suspect_lane_leaves_with_rewind() {
     assert!(now < s.rewind_until, "in flight");
 }
 
+/// What a suspect lane delivered moves with its packets (§14.2): a lane still in startup that
+/// takes them adds it to its rate at once; a rate learned from overuse stays.
+#[test]
+fn rewind_moves_the_delivery_rate() {
+    let now = 30 * SEC;
+    let (wifi, phone) = (ix(1), ix(3));
+    for (startup, rate) in [(true, 42e6), (false, 12e6)] {
+        let mut s = spreading(now);
+        (s.lanes[wifi].state, s.lanes[wifi].delivery) = (State::Suspect, 30e6);
+        let p = &mut s.lanes[phone];
+        (p.rate, p.startup, p.bulk_at) = (12e6, startup, now);
+        s.schedule(&mut Acts::default(), now);
+        assert_eq!((spread_of(&s), s.lanes[phone].rate, s.lanes[phone].startup), (vec![2, 3], rate, startup));
+    }
+}
+
 /// While blind (§11.4) the spread is the blind pair, and a lane that leaves it takes its queue
 /// along, unrewound.
 #[test]
