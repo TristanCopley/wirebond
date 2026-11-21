@@ -241,6 +241,8 @@ pub struct Daemon {
     view_waiting: HashMap<u64, Sender<Reply>>,
     /// The links a captive portal answered on (§17): they carry no lane.
     captive: Vec<IpAddr>,
+    /// The links whose captive-portal check is in flight: one at a time each.
+    captive_checks: Vec<IpAddr>,
     /// Where the captive-portal check goes; None turns it off (tests).
     captive_url: Option<(String, u16, String)>,
     /// §5.5's rate limit: the current second's start and the unreachables sent in it.
@@ -491,6 +493,7 @@ impl Daemon {
             view_waiting: HashMap::new(),
             pick: None,
             captive: Vec::new(),
+            captive_checks: Vec::new(),
             captive_url: Some((link::CAPTIVE_URL.0.into(), link::CAPTIVE_URL.1, link::CAPTIVE_URL.2.into())),
             icmp6: (0, 0),
             host_problems: Vec::new(),
@@ -1093,12 +1096,14 @@ impl Daemon {
             ctl::Ev::Down { id } => self.chan_down(id),
             ctl::Ev::Egress { id, ms } => self.measure_egress(id, ms),
             ctl::Ev::Captive { addr, captive } => {
+                self.captive_checks.retain(|a| *a != addr);
                 let was = self.captive.contains(&addr);
                 if captive == Some(true) && !was {
                     self.captive.push(addr);
                     self.log(format!("captive portal on {addr}: the link carries no lane"));
                 } else if captive == Some(false) && was {
                     self.captive.retain(|a| *a != addr);
+                    self.log(format!("captive portal on {addr} passed: the link carries lanes"));
                 } else {
                     return;
                 }
@@ -1631,9 +1636,13 @@ impl Daemon {
         }
     }
 
-    /// Starts the captive-portal check over link `l` (§17), off the loop.
-    fn check_captive(&self, l: &host::Link) {
+    /// Starts the captive-portal check over link `l` (§17), off the loop, unless one is in flight.
+    fn check_captive(&mut self, l: &host::Link) {
         let Some((host, port, path)) = self.captive_url.clone() else { return };
+        if self.captive_checks.contains(&l.addr) {
+            return;
+        }
+        self.captive_checks.push(l.addr);
         let (addr, name, tx, waker) = (l.addr, l.name.clone(), self.ev_tx.clone(), self.waker.clone());
         thread::spawn(move || {
             use std::net::ToSocketAddrs;
@@ -1668,6 +1677,13 @@ impl Daemon {
             self.next_scan = now + LINK_SCAN;
             self.scan();
             self.follow_default();
+            // §17: a link behind a portal is checked again on every scan, one check at a time, so
+            // it carries lanes once someone has logged in.
+            let held: Vec<host::Link> =
+                self.socks.iter().filter(|s| self.captive.contains(&s.link.addr)).map(|s| s.link.clone()).collect();
+            for l in &held {
+                self.check_captive(l);
+            }
             self.stun_tick(now);
             self.pool.keep(&self.cfg.allow);
             if self.cfg.role == Role::Anchor {

@@ -421,6 +421,47 @@ fn a_captive_link_carries_no_lane() {
     assert!(st.problems.iter().any(|p| p.code == problem::CAPTIVE_PORTAL && p.link.as_deref() == Some("lo-a")));
 }
 
+/// §17: a link flagged behind a portal is checked again, so after the login it is offered without
+/// toggling the link or restarting the daemon.
+#[test]
+fn a_captive_link_is_checked_again_and_offered_after_the_login() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let ln = std::net::TcpListener::bind((ip(41, 80), 0)).unwrap();
+    let port = ln.local_addr().unwrap().port();
+    let (logged_in, asked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let (li, n) = (logged_in.clone(), asked.clone());
+    thread::spawn(move || {
+        for mut s in ln.incoming().flatten() {
+            let _ = io::Read::read(&mut s, &mut [0u8; 1024]);
+            n.fetch_add(1, Ordering::SeqCst);
+            let _ = s.write_all(match li.load(Ordering::SeqCst) {
+                false => b"HTTP/1.0 302 Found\r\nLocation: http://login.hotel/\r\n\r\n".as_slice(),
+                true => b"HTTP/1.0 200 OK\r\n\r\n<HTML><BODY>Success</BODY></HTML>".as_slice(),
+            });
+        }
+    });
+    let (mut d, _, _) = node("mac", ip(41, 1), ip(41, 10), Config::default());
+    d.captive_url = Some((ip(41, 80).to_string(), port, "/hotspot-detect.html".into()));
+    let mut p = host::Poll::default();
+    let t = Instant::now();
+    let mut until = |d: &mut Daemon, what: &str, done: &dyn Fn(&Daemon) -> bool| {
+        while !done(d) {
+            assert!(t.elapsed() < Duration::from_secs(20), "{what}: {:?}", d.logs);
+            d.step(&mut p, Duration::from_millis(5)).unwrap();
+        }
+    };
+    until(&mut d, "flagged", &|d| !d.captive.is_empty());
+    // Still behind the portal: asked again, a scan apart, and still held back.
+    until(&mut d, "asked again", &|_| asked.load(Ordering::SeqCst) >= 2);
+    assert!(!d.captive.is_empty() && d.offer().links.is_empty());
+    assert!(t.elapsed() >= Duration::from_nanos(LINK_SCAN as u64), "one check a scan, not a storm");
+    logged_in.store(true, Ordering::SeqCst);
+    until(&mut d, "cleared", &|d| d.captive.is_empty());
+    assert_eq!(d.offer().links.len(), 1, "the link is offered again");
+    let st = d.status(false);
+    assert!(!st.links[0].captive && st.problems.iter().all(|p| p.code != problem::CAPTIVE_PORTAL), "{st:?}");
+}
+
 /// Runs `req` on `c` until its reply comes.
 fn call(a: &mut Daemon, c: &mut Daemon, req: Request) -> Reply {
     let (tx, rx) = mpsc::channel();
