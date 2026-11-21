@@ -942,7 +942,14 @@ mod v2 {
         win32(unsafe { SetIpInterfaceEntry(&mut row) })
     }
 
-    /// Adds `addr`/`bits` to the adapter, which also routes the subnet into it.
+    /// Adds `addr`/`bits` to the adapter, which also routes the subnet into it, and returns once a
+    /// socket can bind it.
+    ///
+    /// An address made here is preferred at once. One that was there already may not be: Internet
+    /// Connection Sharing gives the adapter 192.168.137.1 through duplicate detection, tentative
+    /// for some seconds, and binding a tentative address fails with WSAEADDRNOTAVAIL. The anchor
+    /// binds its DNS relay to the address egress_enable reports as soon as it returns, so this
+    /// waits for the address, 10 s at most; past that the bind's own error says what is wrong.
     fn address(luid: &NET_LUID_LH, addr: IpAddr, bits: u8) -> io::Result<()> {
         // SAFETY: as in `interface`.
         let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { mem::zeroed() };
@@ -954,9 +961,17 @@ mod v2 {
         row.DadState = IpDadStatePreferred; // no duplicate detection on a point-to-point device
         // SAFETY: as above.
         match unsafe { CreateUnicastIpAddressEntry(&row) } {
-            ERROR_OBJECT_ALREADY_EXISTS => Ok(()),
-            e => win32(e),
+            ERROR_OBJECT_ALREADY_EXISTS => {}
+            e => return win32(e),
         }
+        for _ in 0..200 {
+            // SAFETY: row names the address by its interface and value; Get fills in the rest.
+            if unsafe { GetUnicastIpAddressEntry(&mut row) } != 0 || row.DadState == IpDadStatePreferred {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
     }
 
     fn inet(a: IpAddr) -> SOCKADDR_INET {

@@ -517,8 +517,10 @@ mod mac {
     fn real_egress_forwards_and_nats_then_puts_back() {
         let mut ok = Checks::default();
         let (_state, link, ts) = (StateDir::new(), primary(), targets());
-        let pf =
-            || out("pfctl", &["-s", "info"]).lines().find(|l| l.contains("Status")).unwrap_or_default().to_string();
+        // "Status: Enabled for 0 days 00:00:03": the word after "Status:".
+        let pf = || {
+            out("pfctl", &["-s", "info"]).split_whitespace().skip_while(|w| *w != "Status:").nth(1).map(String::from)
+        };
         let was = (sysctl("net.inet.ip.forwarding"), sysctl("net.inet6.ip6.forwarding"), pf());
         eprintln!("before: forwarding {} and {}, pf {:?}", was.0, was.1, was.2);
         let direct = ask(&UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap(), &ts, Duration::from_secs(2));
@@ -544,7 +546,7 @@ mod mac {
         let rule = format!("nat on {0} inet from 10.77.9.0/24 to any -> ({0}", link.name);
         ok.that(anchor.contains(&rule), format!("the anchor lacks {rule:?}"));
         ok.that(main.contains("nat-anchor \"com.apple/*\""), "the main ruleset does not include com.apple/*");
-        ok.that(pf().contains("Enabled"), "pf is not enabled");
+        ok.that(pf().as_deref() == Some("Enabled"), "pf is not enabled");
         ok.that(sysctl("net.inet.ip.forwarding") == "1", "IPv4 forwarding is off");
         // A client's packets, as the daemon writes them into the device: NAT's answer comes back out.
         let client = SocketAddr::from((a4(7), 40000));
@@ -938,13 +940,14 @@ mod win {
         let on = egress_enable(&e);
         eprintln!("egress_enable, {:?}: {on:?}", at.elapsed());
         let on = on.unwrap();
+        // What the anchor tells its clients is its own address, and where it binds its DNS relay
+        // at once: sharing's address is tentative at first, which no socket can bind.
+        let bound = UdpSocket::bind((on.addr4.0, 0));
         show("the adapter, egress on", &ps(ADAPTER));
         show("sharing, egress on", &ps(SHARING));
         ok.that(on.uplink.as_deref() == Some(&link.name), format!("the uplink is {:?}, not {}", on.uplink, link.name));
         ok.that(!on.v6, "IPv6 egress, which sharing does not give");
-        // What the anchor tells its clients is its own address: what they send there must arrive here.
-        let bound = UdpSocket::bind((on.addr4.0, 0));
-        ok.that(bound.is_ok(), format!("the adapter lacks the address egress reports, {}: {bound:?}", on.addr4.0));
+        ok.that(bound.is_ok(), format!("the address egress reports, {}, cannot be bound yet: {bound:?}", on.addr4.0));
         if on.v4 {
             ok.that(
                 on.addr4 == (Ipv4Addr::new(192, 168, 137, 1), 24) && on.why.is_none(),
