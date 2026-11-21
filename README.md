@@ -156,4 +156,6 @@ Rust 1.99.1, the toolchain CI pins. On Linux the tests run `ip`, so they need ip
 build embeds Wintun, which `.github/scripts/wintun.sh` downloads and checks first. The crates:
 `crates/core` (the pure engine), `crates/wirebond` (daemon, OS layer, CLI), `crates/netsim`
 (simulator and acceptance), `crates/load` (the harness's load and echo tool). A tag `v*.*.*`
-builds, tests and publishes a release (`.github/workflows/release.yml`).
+builds, tests and publishes a release (`.github/workflows/release.yml`). A manual run of that
+workflow given a tag publishes one too, after the same checks less the simulator's full set: how a
+release candidate goes out.
