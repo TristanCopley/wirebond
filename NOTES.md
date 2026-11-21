@@ -50,14 +50,16 @@ Decisions for the owner:
 2. **A12's CPU budget, and its lanes.** At 100 Mbit/s each daemon's share of a core follows the machine. Over 22 runs on CI's runners (the 18 at 50698d7 and the four of the change that unmasked them) the client uses 25-55% and the anchor 29-64%, in two clusters: 9 runs at 51-55% and 60-64%, the other 13 at 25-41% and 29-44%. A cloud container measures 33-38%. No run met 25%; the nearest had 25.3% and 29.1%. This entry had recorded about 30%, most of it the loop sleeping and waking 18-36 thousand times a second. Meeting 25% needs a short coalescing wait (up to about 0.5 ms of added delay); a budget of about 30% instead would have held on 3 of the 22 runs at most, so either budget needs the machine it is measured on. Whatever the CPU, A12 fails on every CI run on its second check: it wants exactly two lanes up after the run, and CI's runners have IPv6, where the client has four, the hotel's and the cell's over IPv4 and over IPv6. Without IPv6 it has two and the check passes. So on CI A12 runs with four lanes up, not SPEC's two; whether the check or the four lanes is wrong is open. `system.yml` fails until both are settled.
 3. **A4 (bandwidth, bulk TCP).** Reorder wait p99 is 25-30 ms against 18 ms, and one seed reaches 96.4 of 99 Mbit/s.
 
-4. **Releasing 2.0.0-rc.1, and bandwidth's failover.** `release.yml` publishes only after `ci.yml` with `long: true` (netsim's full set) and `system.yml` pass, and neither does. The full set has three known failures:
+4. **Releasing 2.0.0-rc.1, and bandwidth's failover.** On a pushed tag `release.yml` publishes only after `ci.yml` with `long: true` (netsim's full set) and `system.yml` pass, and neither does. The full set has three known failures:
    - `a5_bandwidth`, 15 of 20 seeds: the longest frame gap is 138 to 656 ms (615 to 656 ms on 13 of the seeds) against 130 ms.
    - `a6_bandwidth`, 19 of 20 seeds: 2 to 49 frames stay unrecovered from 1 s after the drops begin (41 to 49 on 13 of the seeds), against at most 1.
    - `swarm`, 1 of 40 runs: seed 8's liveness run, in performance mode, so the set no longer fails in bandwidth mode only (Open 5).
 
    `system.yml` fails on A12 (Open 2) and at times on netem (Open 6), now that a failed harness fails its job.
 
-   Reproduce one: `WIREBOND_LONG=1 WIREBOND_SEED=1 cargo test -p wirebond-netsim --release --test accept -- --exact a5_bandwidth`. Either fix bandwidth's failover over every seed, or run the full set only for final releases (tags without `-`) and tag `v2.0.0-rc.1` now. The second no longer publishes by itself: `system.yml` has to pass too. Until a release exists, the one-line installers have nothing to download.
+   Reproduce one: `WIREBOND_LONG=1 WIREBOND_SEED=1 cargo test -p wirebond-netsim --release --test accept -- --exact a5_bandwidth`. Either fix bandwidth's failover over every seed, or run the full set only for final releases (tags without `-`). Meanwhile a release candidate can go out by hand: a manual run of `release.yml` given a tag (Actions, release, Run workflow, `tag`) publishes after `ci.yml`'s checks and `system.yml`, without the full set, and says so in the release's notes. A pushed tag is gated as before.
+
+   `v2.0.0-rc.1` went out by hand on 2026-11-21, from b3c64fc, where a failed harness could not yet fail `system.yml`. In that run the harness reported `failed: a12 netem`, the netem run's bonded video losing 1,197 of its 1,200 frames (Open 6), and the job passed: the release's note that `system.yml` passed is the mask's. The next manual run stops at `system.yml` until Open 2 and 6 are settled.
 
 5. **The long swarm's seed 8.** With `WIREBOND_LONG=1` (5 simulated minutes a run) seed 8 fails in liveness mode: from 5 s after the faults healed, at 200 s, video had a 1000.8 ms gap, against at most 1000 ms. The seed runs in performance mode with 13 fault classes on. Its 30-second run passes, and the PR set (seeds 1-3) does not hold it; the nightly did not reach `swarm` until it ran with `--no-fail-fast`. Why the gap is 0.8 ms over has not been looked into. Reproduce: `WIREBOND_LONG=1 WIREBOND_SEED=8 cargo test -p wirebond-netsim --release --test swarm -- --exact swarm`.
 
@@ -87,5 +89,5 @@ Known limitations and gaps:
    tables, and decide on A11's noise if it bites.
 3. Run tier 4 by hand before 2.0.0 ships (SPEC §23.1): the Mac at a hotel, Wi-Fi plus an iPhone on
    USB, bonded to xanth; Moonlight at 10.77.0.1.
-4. Decide Open 2, 4, 5 and 6, each of which fails a job release.yml waits for, then tag `v2.0.0-rc.1` (and `v2.0.0` after the field run); release.yml publishes only once its checks pass, and the installers then work.
+4. Decide Open 2, 4, 5 and 6, each of which fails a job release.yml waits for, before the next release (`v2.0.0-rc.1` went out by hand on 2026-11-21, see Open 4; `v2.0.0` follows the field run); release.yml publishes only once its checks pass, and the installers then work.
 5. Delete the stale `spec/next` branch on GitHub (Branches page): this session's git access may not delete branches.
