@@ -271,6 +271,28 @@ fn run_service_stops_on_sigterm_and_sigint() {
     }
 }
 
+/// macOS's `route` says a refusal on standard error and may exit 0 all the same: any text there
+/// fails, but for the message that the route is there already (add) or gone already (delete).
+#[cfg(unix)]
+#[test]
+fn route_fails_on_what_it_says_whatever_its_exit_code() {
+    let (exists, gone) =
+        ("route: writing to routing socket: File exists\n", "route: writing to routing socket: not in table\n");
+    for ok in [true, false] {
+        assert!(unix::route_said(ok, exists, "File exists").is_ok(), "an add of a route that is there");
+        assert!(unix::route_said(ok, gone, "not in table").is_ok(), "a delete of a route that is gone");
+        // The other one's message is a failure: a delete cannot find the route exists.
+        assert!(
+            unix::route_said(ok, gone, "File exists").is_err() && unix::route_said(ok, exists, "not in table").is_err()
+        );
+        let refused = "route: writing to routing socket: Network is unreachable\n";
+        let e = unix::route_said(ok, refused, "File exists").unwrap_err();
+        assert_eq!(e.to_string(), refused.trim(), "refused, exit code {ok}");
+    }
+    assert!(unix::route_said(true, " \n", "File exists").is_ok(), "silent and exit 0: done");
+    assert!(unix::route_said(false, "", "File exists").is_err(), "silent and a failing exit code");
+}
+
 #[cfg(unix)]
 #[test]
 fn run_service_raises_the_descriptor_limit() {

@@ -345,6 +345,21 @@ pub(super) fn run<S: AsRef<std::ffi::OsStr>>(cmd: &str, args: &[S]) -> io::Resul
     if out.status.success() { Ok(out.stdout) } else { Err(io::Error::other(format!("{c:?}: {}", stderr.trim()))) }
 }
 
+/// What macOS's `route` did, from how it ended (`ok`) and what it wrote to standard error. Apple's
+/// tool reports a refused route there (another VPN's 0.0.0.0/1, a subnet clash) and may still exit
+/// 0, so any text is a failure, as with scutil; except `done`, which says the work was done already:
+/// "File exists" for an add, "not in table" for a delete.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn route_said(ok: bool, stderr: &str, done: &str) -> io::Result<()> {
+    let said = stderr.trim();
+    match said {
+        _ if said.contains(done) => Ok(()),
+        "" if ok => Ok(()),
+        "" => Err(io::Error::other("route failed without saying why")),
+        _ => Err(io::Error::other(said.to_string())),
+    }
+}
+
 /// The launchd job, daemon or agent: started at load, kept alive, no log paths (§15.3).
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn plist(exe: &Path) -> String {
