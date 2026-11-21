@@ -2,10 +2,19 @@ import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
+// The site's path on its host: empty at a domain's root (and for npm run dev), "/wirebond" for
+// GitHub Pages' project site at tristancopley.github.io/wirebond/. site.yml sets it.
+declare const process: { env: Record<string, string | undefined> };
+const base = process.env.BASE_PATH ?? '';
+if (base !== '' && !/^\/[^/].*[^/]$|^\/[^/]$/.test(base)) {
+	throw new Error(`BASE_PATH must be empty or start with / and not end with one, not ${JSON.stringify(base)}`);
+}
+
 export default defineConfig({
 	plugins: [
 		sveltekit({
 			adapter: adapter({ strict: true }),
+			paths: { base: base as '' | `/${string}` },
 			// Prerendered pages carry this policy as a <meta> tag: nothing loads from elsewhere,
 			// and the only request that leaves the site is the download page's release refresh.
 			csp: {
