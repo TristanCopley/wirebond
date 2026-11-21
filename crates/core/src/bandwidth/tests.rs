@@ -441,6 +441,35 @@ fn rewind_moves_the_delivery_rate() {
     }
 }
 
+/// A lane back from a bar is on trial for twice BANDWIDTH_FLOOR_HOLD (§14.2): it takes a copy of
+/// every bulk packet and none alone, and when it leaves again its queue, all copies, is dropped.
+#[test]
+fn barred_lane_returns_on_trial() {
+    let now = 30 * SEC;
+    let (wifi, phone) = (ix(1), ix(3));
+    let mut s = spreading(now);
+    (s.lanes[wifi].bars, s.lanes[wifi].took_at) = (1, now);
+    assert_eq!(s.earliest(now, 1400), Some(phone));
+    assert_eq!(s.bulk_lanes(now, 1400).collect::<Vec<_>>(), [phone, wifi]);
+    // Every lane on trial: the fastest carries, the others copy.
+    (s.lanes[phone].bars, s.lanes[phone].took_at) = (1, now);
+    assert_eq!(s.bulk_lanes(now, 1400).collect::<Vec<_>>(), [wifi, phone]);
+    s.lanes[phone].bars = 0;
+    // Barred again: nothing of its queue moves to the lanes that stay.
+    packets(&mut s, wifi, 300, 2, now, true);
+    s.lanes[wifi].bar_until = now + BAR;
+    let mut out = Acts::default();
+    s.schedule(&mut out, now + MS);
+    assert_eq!((spread_of(&s), s.rewinds), (vec![2, 3], 0));
+    assert!(out.0.is_empty() && s.lanes.iter().all(|l| l.q.is_empty()));
+    // The trial over, it carries its share alone; a lane never barred is never on trial.
+    let mut s = spreading(now);
+    (s.lanes[wifi].bars, s.lanes[wifi].took_at) = (1, now - 2 * BANDWIDTH_FLOOR_HOLD);
+    assert_eq!(s.bulk_lanes(now, 1400).collect::<Vec<_>>(), [wifi]);
+    (s.lanes[wifi].bars, s.lanes[wifi].took_at) = (0, now);
+    assert_eq!(s.bulk_lanes(now, 1400).collect::<Vec<_>>(), [wifi]);
+}
+
 /// While blind (§11.4) the spread is the blind pair, and a lane that leaves it takes its queue
 /// along, unrewound.
 #[test]
