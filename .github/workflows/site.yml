@@ -1,0 +1,124 @@
+# The website in site/: type and Svelte checks, the static build, and the Playwright smoke test
+# against that build, at the root and under GitHub Pages' /wirebond. On main, once the owner turns
+# GitHub Pages on (Settings, Pages, Source: GitHub Actions), it also publishes the site there;
+# until then the deploy says Pages is off and ends successfully.
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
+  pull_request:
+    paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
+  # To publish at once after turning Pages on, or to refresh the release a page lists without
+  # JavaScript (the download page asks GitHub again in the browser).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.event_name }}-${{ github.ref }}
+  # A newer push supersedes a pull request's run, but a deploy on main is never cut off midway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Check
+        run: npm run check
+      - name: Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Build
+        run: npm run build
+        env:
+          # Read-only; lifts GitHub's limit on anonymous API calls when the build asks for the release.
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Smoke test
+        run: npm test
+      - name: Build under /wirebond, as GitHub Pages serves a project site
+        run: npm run build
+        env:
+          BASE_PATH: /wirebond
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Smoke test under /wirebond
+        run: npm test
+        env:
+          BASE_PATH: /wirebond
+
+  # Whether GitHub Pages is on, and at which path it serves the site. Off is not a failure.
+  pages:
+    needs: site
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
+      base: ${{ steps.pages.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: site/pages.sh
+          sparse-checkout-cone-mode: false
+      - name: Ask GitHub whether Pages is on
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(curl -sS -o pages.json -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages")
+          site/pages.sh "$status" pages.json 2> said.txt >> "$GITHUB_OUTPUT" || { cat said.txt; exit 1; }
+          cat said.txt
+          cat said.txt >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: pages
+    if: needs.pages.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build at the path Pages serves
+        run: npm run build
+        env:
+          BASE_PATH: ${{ needs.pages.outputs.base }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/build
+      - id: deployment
+        uses: actions/deploy-pages@v5
