@@ -1,9 +1,12 @@
 # wirebond 2.0: notes
 
 Where the 2.0 build stands, the decisions taken while building it that SPEC.md does not record,
-and what the owner has to do. SPEC.md is the specification; notes/2.0-build.md fixes the build's
-interfaces and who owns which file. The 1.x notes (notes/rust.md, notes/open.md and the Go-era
-notes) are gone; their history stays in git.
+and what the owner has to do. SPEC.md is the specification; notes/2.0-build.md is the record of the
+build's hand-off (the interfaces agreed then, who owned which file, and what is still open from
+it). The 1.x notes (notes/rust.md, notes/open.md and the Go-era notes) are gone, and git does not
+hold them either: this repository's history starts with the commit "wirebond 2.0".
+CONTEXT.md and RESEARCH.md are 1.x-era background (SPEC §25); CONTEXT.md says which of it still
+holds.
 
 ## Status
 
@@ -56,21 +59,35 @@ Decisions for the owner:
 
    Reproduce one: `WIREBOND_LONG=1 WIREBOND_SEED=1 cargo test -p wirebond-netsim --release --test accept -- --exact a5_bandwidth`. Either fix bandwidth's failover over every seed, or run the full set only for final releases (tags without `-`) and tag `v2.0.0-rc.1` now. Until a release exists, the one-line installers have nothing to download.
 
+5. **Where the local API listens: SPEC §20.1 against §19 and the code.** §20.1 says one endpoint, `/var/run/wirebond.sock` (owner root, group `wirebond`, mode 0660, install adding the installing user to the group) and `\\.\pipe\wirebond` on Windows. §19 and the code use two sockets in the state directory: `ctl.sock`, which only the service's owner may connect to, for changes, and `status.sock`, which anyone may connect to, for reads (`crates/wirebond/src/host/mod.rs`: `CTL_SOCK`, `STATUS_SOCK`; AF_UNIX on Windows too). There is no `wirebond` group and install adds no user to one. Either §20.1 takes §19's two sockets, or the code takes §20.1's endpoint and group.
+6. **A notice for Wintun.** `Cargo.toml` says MIT and LICENSE has the MIT text, but each Windows executable embeds Wintun 0.14.1's signed `wintun.dll`, which is WireGuard LLC's under its "Prebuilt Binaries License", not MIT. That license (read at Wintun's tag 0.14.1, `prebuilt-binaries-license.txt`) asks for no notice or attribution. Its section 3 forbids modifying or reverse engineering the DLL and removing its notices, and allows distributing it only "alongside other software that uses the Software only via the Permitted API", `wintun.h`'s, which is how wirebond uses it; it ends on any breach, and WireGuard LLC may change its terms. Whether embedding the unmodified DLL in the executable, which writes it out byte for byte at install, counts as distributing it alongside is the owner's reading to make. A short third-party notice (in README or a `THIRD-PARTY-NOTICES` file, or Wintun's own license text beside the release assets) would tell a recipient that MIT does not cover that DLL; the license does not require one. Separately, the Rust crates built into every executable are each available under MIT or Apache-2.0 (`cargo metadata`); both licenses ask that their notices accompany copies, and no release carries them yet.
+
+Spec problems this build found, for the owner (SPEC.md is the owner's to change):
+
+- **§16:** `key` carries `floor` (the counter floor of §10.4), which the table does not list; `bond open` carries `measure` for pick's temporary bond (§18); the `view` reply carries the status in a `status` field.
+- **§19:** "`--json` gives the §20.2 schema" holds for `status` only: other verbs print their one reply line (`ok`, `changed`, `message`, `error`), and `version --json` prints `{"version", "commit"}`.
+- **§20.2:** `Problem` has a `msg` field, a client's bond has `addr6` and `anchor_addr6`, a lane has `reorder_p50_ms` and `reorder_p99_ms`, and `contribution` has `links`, all beyond the example (each is left out of the JSON while empty, so the example still round-trips).
+- **§22.2, "Requirements checked at install":** `wirebond install` checks nothing; `install.sh` requires systemd and warns when `ip` or `nft` is missing. Neither names `curl`, which §22.3's update needs, nor `nmcli`.
+- **§22.4:** config.json also holds an `update` object (`url`, `starts`, `trial`, `bad`: where updates come from, and the trial of §22.3), which the example does not show.
+
 Known limitations and gaps:
 
 - **§14.1:** a copy queued in the sender's pacer on the lower-base-OWD lane can arrive after its gap was given up; it is then delivered out of order.
 - **Moonlight's 1,392-byte video payloads** exceed the 1,372 bytes a 1,400-byte TUN carries whole, so each is sent as two fragments. They are delivered correctly; the cost is CPU.
 - **The mesh lane:** a full lane packet (1,461 bytes) exceeds Tailscale's 1,280-byte MTU, so the OS fragments it.
-- **Not done:** the six engine test vectors regenerated from Rust; the GPUI viewer (`crates/view`).
-- **Review of the install work:** an adversarial review (installers, the Rust changes, CI) reported 18 defects, one of them twice. The commits after 60d0088 fix them, except three: a release published mid-install fails the checksum (both installers now say to run again), and Windows Server 2016's TLS and a failed PATH write's message, noted above. Its docs-accuracy pass did not finish: README's Install and Set up, SPEC §19 and §22 and the installers' printed next steps are worth one more read against the code.
+- **A stop without teardown on macOS and Linux.** launchd and systemd stop the daemon with SIGTERM, whose default action ends the process: the teardown of §3.2 step 7 and §5.4 (capture removed first, then `bond close`) runs only on Windows, where the service manager's stop request reaches the loop. The kernel takes the TUN device and the routes through it; what else a role installed stays until the daemon next starts and cleans up (`cleanup_stale`). Checked on Linux with an anchor: after SIGTERM the nftables table `inet wirebond`, `ip_forward=1` and the saved values under `/run/wirebond` were still there. By the code, a client leaves its two routing rules, table 7849's throw routes and the lane links' `rp_filter`, and on macOS the DNS service key, pf's anchor and enable reference and the forwarding sysctls stay. `wirebond uninstall` stops the service the same way and does not clean up either, so §22.2's "removes ... routes, rules, NAT, DNS settings" holds only when the role was turned off first, which README now says to do; a support's sharing (NetworkManager's shared connection, Internet Sharing) outlasts even a restart.
+- **`missing_tool` is reported late, and too widely.** §5.3 has the daemon check for `ip` at start; it reports `missing_tool` when a TUN, capture or egress call fails for want of the tool, so a device with no role shows nothing. It also gives that code to any such call that fails with the error kind NotFound, such as macOS's "no default route".
+- **Status fields the daemon never fills.** A lane's `dev_ms`, `tx_mbps`, `rx_mbps`, `first_arrivals` and `bytes_today` (§20.2) are always 0: `node`'s `lanes` does not set them, though the engine's snapshot has each lane's first arrivals. `wirebond status` therefore shows 0% first arrivals and 0.0 ms jitter on every lane.
+- **Not done:** the six engine test vectors regenerated from Rust; the GPUI viewer (`crates/view`), whose release assets §22.1 lists. The comments of `crates/core` and `crates/netsim` were not brought to 2.0: they hold 247 citations of sections SPEC 2.0 does not have (206 and 41; `§7.x`, `§8.x`, `§15.x` and `§17.x` are the 1.x specification's), and name the Go sources (`Go: core/lane.go`) and the deleted notes (`notes/core.md`, `rust.md`, `open.md`, `netsim.md`) throughout. Review ids in comments (`R1-13`, `R2-21`) are from the 1.x reviews, whose documents are gone too; they still tie a rule to its test.
+- **Review of the install work:** an adversarial review (installers, the Rust changes, CI) reported 18 defects, one of them twice. The commits after 60d0088 fix them, except three: a release published mid-install fails the checksum (both installers now say to run again), and Windows Server 2016's TLS and a failed PATH write's message, noted below. Its docs-accuracy pass is done: README's Install and Set up, SPEC §19 and §22, the installers' printed next steps and the comments of `crates/wirebond`, the workflows and the scripts were read against the code. What it found is fixed where it was a document or a comment (README, CONTEXT.md, notes/2.0-build.md, tests/system, the 1.x section numbers in `host`, `update` and the workflows) and listed in these notes where it is the specification's or the code's.
 - **Not yet run on real hardware:** macOS and Windows code has run only in CI (unit tests and the installers' service install); ICS on Windows with Wintun, pf on macOS and the field run (§23.1 tier 4) remain. The ARM builds (Linux aarch64, armv6/7; Windows ARM64) are built and linted but never run.
-- **Install, untested paths:** Windows's "changing wirebond needs an administrator PowerShell" (CI's runner is always an administrator); `install.ps1` on Windows Server 2016, which needs TLS 1.2 turned on before `irm` can fetch it; Linux without systemd is refused by the installer, but a manual `wirebond install` there leaves its files until `wirebond uninstall`. On Windows, if writing the machine PATH fails, install still says a new PowerShell will find `wirebond` (uninstall does name a PATH entry it could not remove).
+- **Install, untested paths:** Windows's "changing wirebond needs an administrator PowerShell" (CI's runner is always an administrator); `install.ps1` on Windows Server 2016, which needs TLS 1.2 turned on before `irm` can fetch it; Linux without systemd is refused by the installer, but a manual `wirebond install` there leaves its files until `wirebond uninstall`. On Windows, if writing the machine PATH fails, install still says a new PowerShell will find `wirebond` (uninstall does name a PATH entry it could not remove). On Linux without `curl`, `install.sh` downloads with `wget` and installs, but the daemon's updates need `curl` and fail there; the installer warns about a missing `ip` or `nft`, not about `curl`.
 
 ## The owner's steps
 
-1. Settle the spec gaps above and in notes/2.0-build.md.
-2. When the daemon brings bonds up, run `sudo tests/system/run.sh` locally and on CI; read the
-   tables, and decide on A11's noise if it bites.
+1. Settle the open decisions and the spec problems above, and what notes/2.0-build.md still lists.
+2. Read the system harness's tables (CI's `system` job prints them; `sudo tests/system/run.sh` runs
+   it locally), and decide on A11's noise if it bites.
 3. Run tier 4 by hand before 2.0.0 ships (SPEC §23.1): the Mac at a hotel, Wi-Fi plus an iPhone on
    USB, bonded to xanth; Moonlight at 10.77.0.1.
 4. Decide Open 4, then tag `v2.0.0-rc.1` (and `v2.0.0` after the field run); release.yml publishes only once its checks pass, and the installers then work.
