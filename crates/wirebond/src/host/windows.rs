@@ -1,13 +1,14 @@
-//! Windows (SPEC §6.2, §8.4, §15.3, §15.5, §15.6): the functions of Go's host_windows.go under the
-//! same names, which host/mod.rs calls as `os::<function>`, and what Go's standard library and
-//! x/sys gave it here: the interface listing, the UDP resets turned off and the service
-//! dispatcher. The local sockets are mod.rs's AF_UNIX ones (Windows 10 1803 and later).
-//! notes/rust.md lists where this differs from Go and what is unverified.
+//! Windows: the per-OS set host/mod.rs calls as `os::<function>` (SPEC §9.1, §11.4, §19, §22.2,
+//! §22.3): the interface listing, socket options with the UDP resets turned off, the
+//! sleep-inclusive clock, paths, the state directory's and status.sock's access, the firewall
+//! rule, the machine's PATH, the service and its dispatcher. The local sockets are mod.rs's
+//! AF_UNIX ones (Windows 10 1803 and later). Then the 2.0 platform API (SPEC 2.0 §5–§8).
+//! None of this has run on real hardware yet, only in CI (NOTES.md).
 
 use std::ffi::{OsStr, c_void};
 use std::fs::OpenOptions;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::os::windows::io::{AsRawHandle, AsRawSocket};
 use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt};
 use std::path::{Path, PathBuf};
@@ -35,7 +36,7 @@ use super::{Iface, Scope};
 use wirebond_core::SOCK_BUF;
 
 /// The state directory's owner, administrators, and its DACL: SYSTEM and administrators only,
-/// inherited by what is made in it (§15.3).
+/// inherited by what is made in it (§22.4).
 const STATE_SD: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 /// status.sock's DACL: the state directory's two ACEs, and read and write, which connecting
 /// needs, for every signed-in user.
@@ -78,7 +79,7 @@ pub fn ifaces() -> io::Result<Vec<Iface>> {
                 name: String::from_utf16_lossy(slice::from_raw_parts(name, n)),
                 up: a.OperStatus == IfOperStatusUp,
                 p2p: matches!(a.IfType, IF_TYPE_PPP | IF_TYPE_TUNNEL | IF_TYPE_ATM),
-                mtu: if a.Mtu == u32::MAX { 0 } else { a.Mtu }, // unknown: Go's -1, under 1,500
+                mtu: if a.Mtu == u32::MAX { 0 } else { a.Mtu }, // unknown: counts as under 1,500
                 mac: a.PhysicalAddressLength == 6,
                 wifi: a.IfType == IF_TYPE_IEEE80211,
                 addrs: Vec::new(),
@@ -125,9 +126,9 @@ pub fn sockopts(s: &Socket, v6: bool, index: u32, _name: &str) -> io::Result<(us
 }
 
 /// Turns off SIO_UDP_CONNRESET and SIO_UDP_NETRESET, so an ICMP port unreachable or TTL expiry
-/// does not fail the socket's next read (§6.2: "each UDP socket"). Go turns off the first itself;
-/// Rust turns off neither, so node's forward and flow sockets need this too.
-pub fn no_reset(s: &Socket) {
+/// does not fail the socket's next read: Rust's standard library turns off neither. `sockopts`
+/// calls it on every lane socket, and `wake_pair` on the waker's.
+fn no_reset(s: &Socket) {
     for code in [SIO_UDP_CONNRESET, SIO_UDP_NETRESET] {
         let (off, mut n) = (0u32, 0u32);
         let (input, none) = ((&raw const off).cast(), null_mut());
@@ -137,14 +138,13 @@ pub fn no_reset(s: &Socket) {
     }
 }
 
-/// The OS's sleep-inclusive clock (§8.4) in nanoseconds: GetTickCount64, which counts sleep.
+/// The OS's sleep-inclusive clock (§11.4) in nanoseconds: GetTickCount64, which counts sleep.
 pub fn boot() -> i64 {
     // SAFETY: GetTickCount64 takes nothing and cannot fail.
     unsafe { GetTickCount64() as i64 * 1_000_000 }
 }
 
-/// This device's host name (status's name, §14.3): its DNS host name, which Go's os.Hostname reads;
-/// "" should it fail.
+/// This device's host name (status's `device`, §20.2): its DNS host name; "" should it fail.
 pub fn hostname() -> String {
     let (mut b, mut n) = ([0u16; 256], 256u32);
     // SAFETY: b holds n UTF-16 units; the call writes at most that many and sets n to the name's.
@@ -183,15 +183,6 @@ pub(super) fn wake_pair() -> io::Result<(WakeSock, WakeSock)> {
     Ok((u.try_clone()?, u))
 }
 
-/// The next datagram waiting on u and its sender, or WouldBlock. Winsock has no MSG_DONTWAIT, so u
-/// is nonblocking for the read alone: the loop's sends on it wait for room, as on any OS.
-pub fn recv_now(u: &UdpSocket, b: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-    u.set_nonblocking(true)?;
-    let r = u.recv_from(b);
-    u.set_nonblocking(false)?;
-    r
-}
-
 /// Whether this process may install the system service: it is elevated.
 pub fn admin() -> bool {
     let (mut e, mut n) = (TOKEN_ELEVATION::default(), 0);
@@ -203,7 +194,22 @@ pub fn admin() -> bool {
     got != 0 && e.TokenIsElevated != 0
 }
 
-/// The executable and the state directory (§15.3). Windows has only the system scope.
+/// Whether standard output is a console, with escape sequences turned on for it, which
+/// `status --watch` draws with: consoles since Windows 10 take them once asked.
+pub fn terminal() -> bool {
+    use windows_sys::Win32::System::Console::{
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE, SetConsoleMode,
+    };
+    let mut mode = 0;
+    // SAFETY: GetStdHandle takes no pointer, and a handle that is no console is refused; mode is an
+    // out parameter.
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        GetConsoleMode(h, &mut mode) != 0 && SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+    }
+}
+
+/// The executable and the state directory (§22.2, §22.4). Windows has only the system scope.
 pub fn paths(_: Scope) -> (PathBuf, PathBuf) {
     let var = |k, d: &str| env::var_os(k).map_or_else(|| d.into(), PathBuf::from);
     let exe = var("ProgramFiles", r"C:\Program Files").join(r"wirebond\wirebond.exe");
@@ -498,7 +504,7 @@ pub fn drop(download: &Path) {
 }
 
 /// Deletes the executable's directory, update leftovers included, once this process has exited
-/// (§15.6).
+/// (§22.2).
 pub fn remove_exe(exe: &Path) -> io::Result<bool> {
     let Some(dir) = exe.parent().filter(|d| d.exists()) else {
         return Ok(false);
@@ -544,7 +550,7 @@ pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Resu
     let r = run(stopped);
     // Exit code 1 when the daemon ended unasked, so the recovery actions restart it, and 0 after
     // a stop request, so a stop sticks. An update's exit(3) ends the process without reporting
-    // SERVICE_STOPPED, which they count as a failure too (§15.5).
+    // SERVICE_STOPPED, which they count as a failure too (§22.3).
     status(SERVICE_STOPPED, 0, put(&STOP, None).is_some().into());
     let _ = dispatcher.join();
     r
@@ -645,7 +651,6 @@ mod tests;
 
 pub use v2::*;
 
-#[allow(dead_code)] // 2.0 wave 2: the daemon's pumps and bond logic call these
 mod v2 {
     use std::ffi::c_void;
     use std::fs::{self, OpenOptions};
@@ -1051,14 +1056,26 @@ mod v2 {
 
     /// Internet Connection Sharing (HNetCfg.HNetShare) from the uplink to the adapter, which ICS
     /// readdresses to 192.168.137.1/24: `EgressOn::addr4` says so. IPv4 only; ICS busy or refused
-    /// gives v4 false and local delivery only (§6.2).
+    /// gives v4 false and local delivery only (§6.2), at the address of the bond's own subnet that
+    /// the adapter was opened with. Either way the adapter has the address this reports: the anchor
+    /// hands it to its clients as its own, and what they send there must reach this device.
     pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
         let uplink = uplink();
         let v4 = match &uplink {
             Some(up) => ics(up, &e.tun, true).is_ok(),
             None => false,
         };
-        Ok(EgressOn { v4, v6: false, addr4: ICS_ADDR, uplink })
+        let addr4 = egress_addr4(v4, e.net4);
+        if let Some(luid) = luid_of(&e.tun) {
+            // There already unless ICS has yet to set it, or took the other when it came or went.
+            address(&luid, IpAddr::V4(addr4.0), addr4.1)?;
+        }
+        Ok(EgressOn { v4, v6: false, addr4, uplink })
+    }
+
+    /// The anchor's own address: ICS's while it shares, else the first of the bond's subnet `net4`.
+    pub(super) fn egress_addr4(ics: bool, net4: (Ipv4Addr, u8)) -> (Ipv4Addr, u8) {
+        if ics { ICS_ADDR } else { (Ipv4Addr::from(u32::from(net4.0) | 1), net4.1) }
     }
 
     /// Turns off the sharing whose private side is the adapter: only what egress_enable made.
@@ -1246,12 +1263,6 @@ mod v2 {
                 return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
             }
             Ok(())
-        }
-
-        /// Ends the association, as before closing `s` elsewhere; `s` stays nonblocking.
-        pub fn remove(&self, s: &impl AsRawSocket) {
-            // SAFETY: s is an open socket; no event and no events ends the association.
-            unsafe { WSAEventSelect(s.as_raw_socket() as SOCKET, 0, 0) };
         }
 
         /// Associates node's waker as `add` does a socket, so a wake from another thread ends the

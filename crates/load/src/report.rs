@@ -284,7 +284,8 @@ pub fn table(rows: &[Json]) -> String {
         },
     );
     out += &section(
-        "video: frames through an echo (round trip; decodable with any `need` shards of a frame)",
+        "video: frames through an echo (round trip; decodable with any `need` shards of a frame; \
+         a percentile that reaches the unrecovered frames is endless: -)",
         &["label", "rate", "fps", "frames", "decodable", "unrecovered", "loss", "p50", "p99", "p99.9", "worst", "gap"],
         &["", "Mbps", "", "", "", "", "%", "ms", "ms", "ms", "ms", "ms"],
         "video",

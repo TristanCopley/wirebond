@@ -598,3 +598,18 @@ fn golden_views() {
         golden(name, &out);
     }
 }
+
+/// `--watch` (§19) belongs to status, in either form, and a terminal's frame is drawn from the
+/// top-left corner over the last one.
+#[test]
+fn watch_belongs_to_status_and_draws_over_the_last_frame() {
+    let args = |line: &str| line.split_whitespace().map(String::from).collect::<Vec<_>>();
+    assert_eq!(watched(&args("")), Ok(false), "a bare wirebond is status");
+    assert_eq!(watched(&args("status")), Ok(false));
+    assert_eq!(watched(&args("status xanth --json")), Ok(true));
+    for other in ["client xanth", "anchor on", "version", "update"] {
+        assert_eq!(watched(&args(other)), Err("--watch belongs to status".into()), "{other}");
+    }
+    assert!(watched(&args("status --frobnicate")).is_err());
+    assert_eq!(screen("a\nbc\n"), "\x1b[Ha\x1b[K\nbc\x1b[K\n\x1b[J");
+}

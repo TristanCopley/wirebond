@@ -10,7 +10,8 @@
 #
 # WIREBOND_BIN: the daemon (default target/release/wirebond); LOAD_BIN: the load tool (default
 # target/release/load, built when missing); WIREBOND_MODE: performance (default) or bandwidth;
-# WIREBOND_SECONDS: each measurement (10); WIREBOND_KEEP=1 keeps the run directory.
+# WIREBOND_SECONDS: each measurement (10); WIREBOND_KEEP=1 keeps the run directory; WIREBOND_A12_CPU:
+# A12's budget in percent of one core per daemon (25, SPEC §23.3), for a machine slower than a device.
 #
 # Each run has its own namespaces (wbs-<pid>-i, -c, -a, -b, -s), removed on exit:
 #
@@ -41,6 +42,7 @@ run=$(mktemp -d "${TMPDIR:-/tmp}/wirebond-system.XXXXXX")
 results=$run/results.jsonl
 mode=${WIREBOND_MODE:-performance}
 secs=${WIREBOND_SECONDS:-10}
+cpu=${WIREBOND_A12_CPU:-25}
 bin=${WIREBOND_BIN:-$repo/target/release/wirebond}
 load=${LOAD_BIN:-}
 failed=$run/failed.txt
@@ -53,12 +55,12 @@ ANCHOR4=203.0.113.2 ANCHOR6=2001:db8:a::2
 MESH_C=100.64.0.1 MESH_A=100.64.0.2 MESH_B=100.64.0.3
 BOND_A4=10.77.0.1 BOND_A6=fd77:b0d::1
 HOTEL4=192.168.1.2 CELL4=172.20.10.2
-# The largest UDP payloads the bond carries whole: its MTU is TUN_MTU, 1400 (SPEC §5.3), less the
+# The largest UDP payloads the bond carries whole: its MTU is TUN_MTU, 1400 (SPEC §5.1), less the
 # IPv4 or IPv6 and UDP headers. A larger datagram leaves the client's kernel as two IP fragments,
-# so every one is two packets through the bond, and the engine keys the fragments after the first
-# apart from the first (§13): reordered against each other by more than the kernel's
-# ipfrag_max_dist (64) fragments, the datagram fails reassembly (Ip.ReasmFails in drops.txt). The
-# bond's checks send these; a8 measures a fragmented stream beside them, informative.
+# so every one is two packets through the bond, which keeps a datagram's fragments in one flow
+# and in order (§13); a datagram whose fragments still arrive more than the kernel's
+# ipfrag_max_dist (64) fragments apart fails reassembly (Ip.ReasmFails in drops.txt). The bond's
+# checks send payloads that fit; a8 measures a fragmented stream beside them, informative.
 FIT4=1372 FIT6=1352
 # IPv6 everywhere when the kernel has it; without it, the IPv6 halves of the checks are skipped.
 v6=0
@@ -269,8 +271,11 @@ dir=$1
 shift
 target=$(readlink -f /etc/resolv.conf || echo /etc/resolv.conf)
 case $target in /run/*)
+	# By rename, which cannot find the file there: the start of a daemon and a status poll both
+	# come here.
 	mkdir -p "$dir/run/$(dirname "${target#/run/}")"
-	cp "$dir/resolv.conf" "$dir/run/${target#/run/}" ;;
+	cp "$dir/resolv.conf" "$dir/run/${target#/run/}.$$"
+	mv -f "$dir/run/${target#/run/}.$$" "$dir/run/${target#/run/}" ;;
 esac
 mount --bind "$dir/run" /var/run
 case $target in /run/*) ;; *) mount --bind "$dir/resolv.conf" /etc/resolv.conf ;; esac
@@ -525,14 +530,16 @@ chan_up() { [ -n "$(ip netns exec "$C" ss -Htn state established '( dport = :784
 ms_between() { echo $((($2 - $1) / 1000000)); }
 
 # lanes_until SCENARIO SECONDS LABEL OP N: until the number of the client's lanes that are up meets
-# `test COUNT OP N`, recorded in the results with how long it took.
+# `test COUNT OP N`, or with OP `all` until every lane it lists is up, recorded in the results with
+# how long it took.
 lanes_until() {
-	local t0 n
+	local t0 n of
 	t0=$(date +%s%N)
 	while :; do
 		client_status
 		n=$(sed 's/.*"lanes":\[//' "$run/$scen/client.json" | grep -o '"state":"up"' | wc -l)
-		if [ "$n" "$4" "$5" ]; then
+		of=$(sed 's/.*"lanes":\[//' "$run/$scen/client.json" | grep -o '"state":"[a-z]*"' | wc -l)
+		if { [ "$4" = all ] && [ "$n" -gt 0 ] && [ "$n" -eq "$of" ]; } || { [ "$4" != all ] && [ "$n" "$4" "$5" ]; }; then
 			record "$1" "$3" true "\"lanes_up\":$n,\"ms\":$(ms_since "$t0")"
 			return 0
 		fi
@@ -718,7 +725,8 @@ a10() {
 	teardown
 }
 
-# a12: CPU at 100 Mbit/s in performance with two lanes: at most 25% of one core per daemon. The echo
+# a12: CPU at 100 Mbit/s in performance with two lanes: at most 25% of one core per daemon
+# (WIREBOND_A12_CPU). The echo
 # returns every datagram, so each daemon carries 100 Mbit/s each way. The mesh lane (the first in
 # the status) is blocked, so the two lanes are the hotel's and the cell's (performance sends every
 # packet on each lane); an idle bond keeps its spare lanes dormant, so they are counted right after
@@ -727,45 +735,62 @@ a12() {
 	needs_daemon
 	start a12
 	bonded
+	lanes_until a12 15 "every lane up" all || true
 	lanes_blocked on "$A" tailscale0
 	wait_for client 15s "the mesh lane not up" '!bond.lanes.0.state==up' || fail a12
 	check a12 measure "$C" udp --to "$SERVER4:47998" --mbps 100 --size "$FIT4" --duration "$secs" \
 		--pids "client=${pid[client]},anchor=${pid[anchor]}" --label "a12: 100 Mbit/s, performance, two lanes" \
-		--check 'loss_pct<=1' --check 'procs.client.cpu<=25' --check 'procs.anchor.cpu<=25'
-	lanes_until a12 1 "two lanes up after the run" -eq 2 || true
+		--check 'loss_pct<=1' --check "procs.client.cpu<=$cpu" --check "procs.anchor.cpu<=$cpu"
+	# With IPv6 each link has a second lane, so four are up, not two.
+	lanes_until a12 1 "both links' lanes up after the run" -ge 2 || true
 	teardown
 }
 
 # perf NAME NETEM JITTER: the performance runs on the shaped hotel and cell. 30 Mbit/s video at
-# 120 fps to the anchor through the bond, first with the direct lanes blocked (the baseline: the
-# mesh lane alone), then with every lane: never worse than the baseline at p50, p99 and p99.9 (A11),
-# at most 1 unrecovered frame; then UDP and TCP to the internet server, with CPU and RSS.
+# 120 fps to the anchor through the bond with every lane, at most 1 unrecovered frame; then UDP and
+# TCP to the internet server, with CPU and RSS; then the same video with the direct lanes blocked
+# (the baseline: the mesh lane alone), which the bond is never worse than at p50, p99 and p99.9
+# (A11). The bond runs first, on lanes that have all validated. Blocking came first once, as soon
+# as the bond was up: a lane blocked before it validated is not probed again while data flows, and
+# one that validated and went down starts its rate over when it is back, so on some runs the bond
+# was measured without the cell's lanes, or on lanes still climbing.
 perf() {
 	local name=$1 netem=$2 jitter=${3:-}
 	needs_daemon
 	start "$name"
 	shape "$netem" "$jitter"
 	bonded
-	local p="client=${pid[client]},anchor=${pid[anchor]}" base
+	local p="client=${pid[client]},anchor=${pid[anchor]}" bond base f worse=
+	lanes_until "$name" 15 "every lane up" all || true
+	# A stream that starts as the lanes come up can run late in its first second, while no lane's
+	# rate is known yet (NOTES.md, Open 1): that start is reported here and not judged, and the
+	# judged run that follows is the bond in its stride.
+	measure "$C" video --to "$BOND_A4:48000" --mbps 30 --fps 120 --size "$FIT4" --duration 3 --pids "$p" \
+		--label "$name: the stream's first 3 s (informative)" || true
+	check "$name" measure "$C" video --to "$BOND_A4:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" \
+		--pids "$p" --label "$name: bonded video, $mode" --check 'unrecovered<=1'
+	bond=$(tail -n 1 "$results")
+	measure "$C" udp --to "$SERVER4:47998" --mbps 30 --size "$FIT4" --duration "$secs" --pids "$p" \
+		--label "$name: UDP 30 Mbit/s to the server" || true
+	measure "$C" tcp --duration "$secs" --to "$SERVER4:47989" --pids "$p" --label "$name: TCP to the server" || true
+	# What the stream gets with no bond at all: the anchor's mesh address is never captured.
+	measure "$C" video --to "$MESH_A:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" \
+		--label "$name: video straight over the mesh, no bond (informative)" || true
 	direct_blocked on "$A"
 	lanes_until "$name" 15 "the baseline: the mesh lane alone" -eq 1 || true
 	measure "$C" video --to "$BOND_A4:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" --pids "$p" \
 		--label "$name: baseline video (mesh lane)" || true
 	base=$(tail -n 1 "$results")
-	direct_blocked off "$A"
-	# The mesh lane stayed up: wait for the hotel's and the cell's lanes too.
-	lanes_until "$name" 30 "every lane back" -ge 3 || true
-	sleep 2
-	local f against=()
+	# load counts a frame never decodable as endlessly late: a percentile that reaches such frames
+	# is null in the result and endless here.
 	for f in frame_p50_ms frame_p99_ms frame_p999_ms; do
-		against+=(--check "$f<=$(jq -r ".$f // 0" <<<"$base")")
+		jq -en --argjson bond "$bond" --argjson base "$base" --arg f "$f" \
+			'($bond[$f] // infinite) <= ($base[$f] // infinite)' >/dev/null || worse="$worse $f"
 	done
-	check "$name" measure "$C" video --to "$BOND_A4:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" \
-		--pids "$p" \
-		--label "$name: bonded video, $mode" --check 'unrecovered<=1' "${against[@]}"
-	measure "$C" udp --to "$SERVER4:47998" --mbps 30 --size "$FIT4" --duration "$secs" --pids "$p" \
-		--label "$name: UDP 30 Mbit/s to the server" || true
-	measure "$C" tcp --duration "$secs" --to "$SERVER4:47989" --pids "$p" --label "$name: TCP to the server" || true
+	f='[.frame_p50_ms, .frame_p99_ms, .frame_p999_ms]'
+	record "$name" "the bond no worse than the baseline at p50, p99 and p99.9${worse:+, but at$worse}" \
+		"$([ -z "$worse" ] && echo true || echo false)" \
+		"\"bond_ms\":$(jq -c "$f" <<<"$bond"),\"baseline_ms\":$(jq -c "$f" <<<"$base")"
 	teardown
 }
 

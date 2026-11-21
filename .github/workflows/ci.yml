@@ -28,6 +28,12 @@ concurrency:
 env:
   RUST_VERSION: '1.99.1' # the toolchain every job installs; release.yml and system.yml name it too
 
+defaults:
+  run:
+    # Named, so that it is bash -eo pipefail: under the default, bash -e, a pipeline's status is its
+    # last command's, and a failing `cargo tree | awk | sort` would pass the allow-list check.
+    shell: bash
+
 jobs:
   # Lints and static checks, apart from the tests so that a lint failure still lets the tests run.
   rust-lint:
@@ -39,7 +45,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt
         run: cargo fmt --all --check
-      - name: core does no I/O, takes no locks, reads no clock, draws no randomness and writes no JSON (SPEC §4.2, §15.1)
+      - name: core does no I/O, takes no locks, reads no clock, draws no randomness and writes no JSON (SPEC §4.2)
         run: |
           # Unsafe code is forbidden in every build of core but its unit tests, where lib.rs denies
           # it and only pair.rs's counting allocator opts out.
@@ -56,10 +62,10 @@ jobs:
           if grep -E '\bstd::os\b|\b(fs|env|process|thread|sync)::|\b(UdpSocket|TcpStream|TcpListener|ToSocketAddrs|Unix(Stream|Listener|Datagram)|Mutex|RwLock|Condvar|OnceLock|LazyLock|Barrier|Atomic[A-Z][A-Za-z0-9]*|thread_local|Instant|SystemTime|UNIX_EPOCH|getrandom|OsRng|SysRng|thread_rng|generate_key|generate_nonce|serde_json)\b|\brand(_core)?::|\b(e?print(ln)?|dbg)!' <<< "$code"; then
             echo "core must stay pure: the caller passes the time and the randomness, and node does the I/O"; exit 1
           fi
-      - name: No crate but the workspace's and its dependencies when the port began (SPEC §15.1, R11)
+      - name: No crate outside the allow-list, the workspace's own and its dependencies (SPEC §22.5)
         env:
-          # Cargo.lock's crates at a78f983: what the three crates declared and what those pull in,
-          # for every target. A new crate is a decision, made by adding it here with the reason.
+          # Cargo.lock's crates: what the workspace's crates declare and what those pull in, for
+          # every target. A new crate is a decision, made by adding it here with the reason.
           # zeroize (core, C1): superseded and dropped keys, the AES round keys, the GHASH key and
           # the HMAC state are zeroed (SPEC §10.2).
           ALLOWED: >-
@@ -87,7 +93,7 @@ jobs:
       - name: Rust toolchain
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update && rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
-      - name: Fetch netsim's Mahimahi traces (SPEC §17.2)
+      - name: Fetch netsim's Mahimahi traces (SPEC §23.1 tier 2)
         if: hashFiles('crates/netsim/traces.sum') != ''
         run: |
           # traces.sum: sha256sum lines ("<sha256>  <file>", the file named by itself or by a path
@@ -108,16 +114,18 @@ jobs:
         run: cargo test --workspace --exclude wirebond-netsim --locked
       - name: cargo test netsim's PR seed set, in a release build since it is heavy
         run: cargo test -p wirebond-netsim --release --locked
-      - name: netsim's full acceptance set (SPEC §17.3)
+      - name: netsim's full acceptance set (SPEC §23.3)
         if: github.event_name == 'schedule' || inputs.long
         env:
           WIREBOND_LONG: '1' # netsim's long set
-        run: cargo test -p wirebond-netsim --release --locked
+        # Every suite reports: without --no-fail-fast cargo stops at the first that fails, and the
+        # ones after it (fuzz, swarm and the rest) never ran at full length.
+        run: cargo test -p wirebond-netsim --release --locked --no-fail-fast
 
   rust-targets:
     runs-on: ubuntu-latest
     env:
-      # SPEC §15.1's assets: Darwin arm64 and x86_64; Linux x86_64, aarch64 and ARMv6 (published
+      # SPEC §22.1's assets: Darwin arm64 and x86_64; Linux x86_64, aarch64 and ARMv6 (published
       # as armv7l and armv6l), static with musl; Windows AMD64 and ARM64.
       TARGETS: >-
         aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
@@ -143,7 +151,7 @@ jobs:
           [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
       - name: Build the Linux x86_64 release binary
         run: cargo build -p wirebond --release --locked --target x86_64-unknown-linux-musl
-      - name: Static and stripped (SPEC §15.1)
+      - name: Static and stripped (SPEC §22.5)
         run: |
           bin=target/x86_64-unknown-linux-musl/release/wirebond
           echo "linux x86_64: $(stat -c %s "$bin") bytes"

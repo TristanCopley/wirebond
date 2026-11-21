@@ -151,7 +151,7 @@ fn mode(path: &Path) -> u32 {
 
 #[test]
 fn asset_names() {
-    // §15.1's names. 32-bit ARM fetches armv6l, the same build as armv7l.
+    // §22.1's names. 32-bit ARM fetches armv6l, the same build as armv7l.
     for (os, arch, want) in [
         ("macos", "aarch64", "wirebond-Darwin-arm64"),
         ("macos", "x86_64", "wirebond-Darwin-x86_64"),
@@ -266,7 +266,7 @@ fn check_reads_the_redirect() {
         match (check(&cfg, running), want) {
             (Ok(got), Ok(want)) => assert_eq!(got.as_deref(), want, "{case}"),
             (Err(e), Err(word)) => {
-                eprintln!("{case}: {e}"); // what update_failed says
+                eprintln!("{case}: {e}"); // what the failed update's reply says
                 assert!(e.to_string().contains(word), "{case}: {e}");
             }
             (got, want) => panic!("{case}: check = {got:?}, want {want:?}"),
@@ -335,7 +335,7 @@ fn stage_fails(case: &str, files: HashMap<String, Answer>) -> (String, String) {
     let exe = dir.exe("v0.3.0");
     put(&with(&exe, ".new"), "stale");
     let e = stage(&origin.config(), &exe, "v0.4.1").expect_err(case).to_string();
-    eprintln!("{case}: {e}"); // what update_failed says
+    eprintln!("{case}: {e}"); // what the failed update's reply says
     (e, self::files(&exe))
 }
 
@@ -417,8 +417,9 @@ fn stage_accepts_the_version_without_v() {
     stage(&origin.config(), &exe, "v0.4.1").unwrap();
 }
 
-/// Stages under the umask the daemon binds its sockets with (§15.3), which would leave a new file
-/// without any execute bit. The umask belongs to the process, so this runs in a child test process.
+/// Stages under the umask the daemon binds its sockets with (host's `private`, 0177), which would
+/// leave a new file without any execute bit. The umask belongs to the process, so this runs in a
+/// child test process.
 #[cfg(unix)]
 #[test]
 fn stage_ignores_the_umask() {
@@ -442,8 +443,8 @@ fn stage_ignores_the_umask() {
     assert_eq!(mode(&with(&exe, ".new")), 0o755);
 }
 
-/// The rollback state machine across starts of a new version (§15.5 step 6): a version gets
-/// UPDATE_MAX_STARTS starts to reach healthy, and the next start rolls it back.
+/// The rollback state machine across starts of a new version (§22.3, healthy or rolled back): a
+/// version gets UPDATE_MAX_STARTS starts to reach healthy, and the next start rolls it back.
 #[test]
 fn trial() {
     for (case, fails, running) in [
@@ -625,7 +626,7 @@ fn schedule_applies_after_update_idle_without_traffic() {
     s.healthy = true;
     assert_eq!(s.due(UPDATE_FIRST, 10), Some(Due::Check));
     assert_eq!(s.checked(Ok(Some("v2.0.1".into()))), "update: v2.0.1 staged");
-    assert_eq!(s.staged(), Some("v2.0.1"));
+    assert_eq!(s.staged.as_deref(), Some("v2.0.1"));
     let t = UPDATE_FIRST + UPDATE_IDLE - 1;
     assert_eq!(s.due(t, 10), None, "idle since UPDATE_FIRST only");
     assert_eq!(s.due(t + 1, 11), None, "traffic restarts the idle clock");

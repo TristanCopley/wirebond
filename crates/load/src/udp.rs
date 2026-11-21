@@ -311,9 +311,17 @@ impl Frames {
     }
 }
 
+/// Every frame's delay in ms, from its send (`starts`) to its last needed shard (`done`). A frame
+/// never decodable is endlessly late, as netsim's A11 counts it: a percentile beyond the decodable
+/// share of the frames is then endless, not the delay of the few that made it.
+pub fn frame_delays(done: &[Option<u64>], starts: &[u64]) -> Vec<f64> {
+    done.iter().zip(starts).map(|(d, &s)| d.map_or(f64::INFINITY, |d| d.saturating_sub(s) as f64 / 1e6)).collect()
+}
+
 /// Sends frames of mbps / fps bytes in size-byte shards, plus parity, each frame a burst at its
 /// frame time, and assembles the echoes as Moonlight would: decodable and unrecovered frames, and
-/// the frame delay (from the frame's send to its last needed shard) at p50, p99, p99.9 and worst.
+/// the frame delay at p50, p99 and p99.9 over every frame sent ([`frame_delays`]; null where
+/// endless) and the worst of the decodable.
 pub fn video(c: &VideoConfig) -> io::Result<Json> {
     let size = c.size.max(STAMP);
     let (data, parity) = shards(c);
@@ -351,13 +359,13 @@ pub fn video(c: &VideoConfig) -> io::Result<Json> {
             frames.arrive(a.stamp.frame as usize, a.at);
         }
     }
-    let mut delays: Vec<f64> =
-        frames.done.iter().zip(&starts).filter_map(|(d, &s)| d.map(|d| d.saturating_sub(s) as f64 / 1e6)).collect();
-    let decodable = delays.len();
+    let mut delays = frame_delays(&frames.done, &starts);
     let mut done_at: Vec<u64> = frames.done.iter().flatten().copied().collect();
+    let decodable = done_at.len();
     done_at.sort_unstable();
     let gap = longest_gap(starts.first().copied().unwrap_or(0), &done_at, end);
-    let [p50, p99, p999, max] = quantiles(&mut delays);
+    let [p50, p99, p999, _] = quantiles(&mut delays);
+    let worst = delays[..decodable].last().map_or(0.0, |&d| round3(d)); // sorted: the decodable come first
     let secs = (end as f64 / 1e9).max(1e-9);
     Ok(obj([
         ("to", c.to.to_string().into()),
@@ -382,7 +390,7 @@ pub fn video(c: &VideoConfig) -> io::Result<Json> {
         ("frame_p50_ms", p50.into()),
         ("frame_p99_ms", p99.into()),
         ("frame_p999_ms", p999.into()),
-        ("frame_max_ms", max.into()),
+        ("frame_max_ms", worst.into()),
         // The longest time without a frame becoming decodable: a freeze.
         ("gap_ms", round3(gap as f64 / 1e6).into()),
         ("procs", procs),
