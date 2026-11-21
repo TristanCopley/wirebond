@@ -9,3 +9,9 @@
 
 # Rust build output
 /target/
+
+# The website's dependencies and build output (site/README.md)
+/site/node_modules/
+/site/.svelte-kit/
+/site/build/
+/site/test-results/
