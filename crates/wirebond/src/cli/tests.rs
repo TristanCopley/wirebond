@@ -598,3 +598,36 @@ fn golden_views() {
         golden(name, &out);
     }
 }
+
+/// §20.4: the lane table shows what the daemon measures. No jitter column while the daemon has no
+/// figure for it; first arrivals as a percentage; the links by their labels.
+#[test]
+fn the_lane_table_shows_first_arrivals_and_no_jitter_column() {
+    let lane = crate::api::Lane {
+        id: 257,
+        links: vec!["Wi-Fi".into(), "Ethernet".into()],
+        group: 1,
+        state: crate::api::LaneState::Up,
+        rtt_ms: 61.0,
+        first_arrivals: 0.71,
+        rescues_per_min: 12,
+        ..crate::api::Lane::default()
+    };
+    let bond = crate::api::Bond {
+        anchor: "xanth".into(),
+        state: crate::api::BondState::Up,
+        lanes: vec![lane],
+        ..crate::api::Bond::default()
+    };
+    let text =
+        render::status_text(&Status { role: crate::api::Role::Client, bond: Some(bond), ..Status::default() }, None);
+    let rows: Vec<Vec<&str>> = text.lines().map(|l| l.split_whitespace().collect()).collect();
+    let head = rows.iter().find(|r| r.first() == Some(&"lane")).unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(*head, ["lane", "links", "group", "state", "rtt", "loss", "rate", "share", "first", "rescues"]);
+    let row = rows.iter().find(|r| r.first() == Some(&"257")).unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(*row, ["257", "Wi-Fi", "→", "Ethernet", "1", "up", "61.0ms", "0.0%", "0Mbps", "0%", "71%", "12/min"]);
+    // --json leaves out the figure the daemon does not have, and writes it once it does.
+    let json = |l: &crate::api::Lane| serde_json::to_string(l).unwrap();
+    assert!(!json(&crate::api::Lane::default()).contains("dev_ms"));
+    assert!(json(&crate::api::Lane { dev_ms: 1.1, ..crate::api::Lane::default() }).contains(r#""dev_ms":1.1"#));
+}

@@ -342,6 +342,9 @@ pub struct Lane {
     pub state: LaneState,
     pub rtt_ms: f64,
     pub owd_ms: f64,
+    /// The delay's variation. The engine keeps it and its status does not yet give it, so the
+    /// daemon never sets it: left out while zero, as no figure, not as none measured.
+    #[serde(skip_serializing_if = "zero")]
     pub dev_ms: f64,
     pub loss: f64,
     /// The controller's rate.

@@ -457,6 +457,18 @@ fn kind(l: &host::Link) -> LinkKind {
     }
 }
 
+/// A peer's link as the links table names it: its support, or the label its kind came from
+/// (`kind`), with its id where the kind says no more.
+fn peer_label(o: &proto::LinkOffer) -> String {
+    match (&o.support, o.kind) {
+        (Some(name), _) => name.clone(),
+        (None, LinkKind::Wifi) => "Wi-Fi".into(),
+        (None, LinkKind::Ethernet) => "Ethernet".into(),
+        (None, LinkKind::Usb) => "iPhone".into(),
+        (None, k) => format!("{}{}", k.as_str(), o.id),
+    }
+}
+
 impl Daemon {
     pub fn new(version: &str, dir: Option<PathBuf>, cfg: Config, plat: Box<dyn Platform>) -> io::Result<Daemon> {
         let (ev_tx, ev_rx) = mpsc::channel();
@@ -2226,12 +2238,24 @@ impl Daemon {
             let theirs = theirs.map_or(link, |o| if o.group == 0 { o.id } else { o.group });
             at.filter(|_| mine).map_or(theirs, |i| groups[i])
         };
+        // The client's link and the anchor's, as the links tables label them: the engine's labels
+        // are its groups' (`feed_links`). A link that has gone keeps the engine's.
+        let mine = self.cfg.role == Role::Client;
+        let links = |l: &core::LaneStatus| {
+            let (c, a) = ((l.id >> 8) as u8, l.id as u8);
+            let (own, peer) = if mine { (c, a) } else { (a, c) };
+            let own = self.socks.iter().find(|s| s.id == own && l.id != 0).map(|s| s.link.label.clone());
+            let peer = b.offer.iter().find(|o| o.id == peer && l.id != 0).map(peer_label);
+            let (own, peer) = (own.unwrap_or_else(|| l.local.clone()), peer.unwrap_or_else(|| l.remote.clone()));
+            if mine { vec![own, peer] } else { vec![peer, own] }
+        };
+        let firsts: u64 = snap.lanes.iter().map(|l| l.first_arrivals).sum();
         let lanes = snap
             .lanes
             .iter()
             .map(|l| api::Lane {
                 id: l.id,
-                links: vec![l.local.clone(), l.remote.clone()],
+                links: links(l),
                 group: group(l.id),
                 state: match l.state {
                     "up" => api::LaneState::Up,
@@ -2245,6 +2269,7 @@ impl Daemon {
                 loss: l.out.loss,
                 rate_mbps: l.out.rate_mbps,
                 share: if total == 0 { 0.0 } else { l.out.sent_bytes as f64 / total as f64 },
+                first_arrivals: if firsts == 0 { 0.0 } else { l.first_arrivals as f64 / firsts as f64 },
                 rescues_per_min: l.rescues,
                 reorder_p50_ms: l.reorder_wait_p50 as f64 / MS as f64,
                 reorder_p99_ms: l.reorder_wait_p99 as f64 / MS as f64,

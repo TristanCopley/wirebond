@@ -19,6 +19,8 @@ struct Knobs {
     /// Why enabling egress fails, when it does, and why it enables none, when it does that.
     egress_err: Option<String>,
     egress_why: Option<String>,
+    /// The label of every link, where the links are not labelled after their interfaces.
+    label: Option<String>,
     /// Why the TUN device does not open, when it does not, and how often it opened.
     tun_err: Option<String>,
     tuns: usize,
@@ -100,7 +102,10 @@ impl Platform for Host {
     }
 
     fn links(&mut self, _: &[(IpAddr, u8)]) -> io::Result<(Vec<host::Link>, Vec<host::Link>)> {
-        Ok((self.links.clone(), vec![self.mesh.clone()]))
+        let label = self.knobs.lock().unwrap().label.clone();
+        let relabel =
+            |l: &host::Link| host::Link { label: label.clone().unwrap_or_else(|| l.label.clone()), ..l.clone() };
+        Ok((self.links.iter().map(relabel).collect(), vec![self.mesh.clone()]))
     }
 
     fn bind(&mut self, link: &host::Link, mesh: bool) -> io::Result<UdpSocket> {
@@ -504,6 +509,39 @@ fn an_anchor_without_a_device_refuses_bonds_and_opens_it_again() {
     a.knobs.lock().unwrap().tun_err = None;
     run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
     assert_eq!((a.knobs.lock().unwrap().tuns, a.calls()), (1, vec!["egress on ".to_string()]));
+}
+
+/// §20.2: a lane names the client's link and the anchor's by their labels, as the links tables do,
+/// on both ends in that order, and its first arrivals are the engine's, as a fraction of the bond's.
+#[test]
+fn status_lanes_name_links_by_label_and_count_first_arrivals() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(73, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(73, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(73, 2))], ip(73, 20), acfg);
+    let mut c = node("mac", &[("en0", ip(73, 1))], ip(73, 10), ccfg);
+    (a.knobs.lock().unwrap().label, c.knobs.lock().unwrap().label) = (Some("Ethernet".into()), Some("Wi-Fi".into()));
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    let direct =
+        |n: &Node| n.d.bonds[0].session.as_ref().unwrap().snapshot().lanes.iter().any(|l| l.id != 0 && l.validated);
+    run(&mut [&mut a, &mut c], "a direct lane", |n| direct(n[0]) && direct(n[1]));
+    for i in 0..20u8 {
+        let mut p = udp_to("1.1.1.1:53".parse().unwrap());
+        *p.last_mut().unwrap() = i;
+        c.tun.0.lock().unwrap().0.push_back(p);
+    }
+    run(&mut [&mut a, &mut c], "egress", |n| n[0].tun.0.lock().unwrap().1.len() >= 20);
+    let (cl, al) = (c.d.status(false).bond.unwrap().lanes, a.d.status(false).anchor.unwrap().bonds[0].lanes.clone());
+    let names = |ls: &[api::Lane]| ls.iter().find(|l| l.id != 0).map(|l| l.links.clone());
+    let want = Some(vec!["Wi-Fi".to_string(), "Ethernet".to_string()]);
+    assert_eq!((names(&cl), names(&al)), (want.clone(), want), "the client's link, then the anchor's");
+    // The anchor received every packet: its lanes' first arrivals are fractions that add up.
+    let firsts: Vec<f64> = al.iter().map(|l| l.first_arrivals).collect();
+    assert!(
+        (firsts.iter().sum::<f64>() - 1.0).abs() < 1e-9 && firsts.iter().all(|f| (0.0..=1.0).contains(f)),
+        "{al:?}"
+    );
+    // The client received none: no fraction to show.
+    assert!(cl.iter().all(|l| l.first_arrivals == 0.0), "{cl:?}");
 }
 
 #[test]
