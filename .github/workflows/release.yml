@@ -21,6 +21,12 @@ permissions:
 env:
   RUST_VERSION: '1.99.1' # as in ci.yml
 
+defaults:
+  run:
+    # bash -eo pipefail, as in ci.yml, so that the tag and publish jobs' steps too fail on any
+    # command of a pipeline.
+    shell: bash
+
 jobs:
   # A manual publish names its tag, which is checked before a release is made of it.
   tag:
