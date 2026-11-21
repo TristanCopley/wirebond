@@ -194,6 +194,21 @@ pub fn admin() -> bool {
     got != 0 && e.TokenIsElevated != 0
 }
 
+/// Whether standard output is a console, with escape sequences turned on for it, which
+/// `status --watch` draws with: consoles since Windows 10 take them once asked.
+pub fn terminal() -> bool {
+    use windows_sys::Win32::System::Console::{
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE, SetConsoleMode,
+    };
+    let mut mode = 0;
+    // SAFETY: GetStdHandle takes no pointer, and a handle that is no console is refused; mode is an
+    // out parameter.
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        GetConsoleMode(h, &mut mode) != 0 && SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+    }
+}
+
 /// The executable and the state directory (§22.2, §22.4). Windows has only the system scope.
 pub fn paths(_: Scope) -> (PathBuf, PathBuf) {
     let var = |k, d: &str| env::var_os(k).map_or_else(|| d.into(), PathBuf::from);

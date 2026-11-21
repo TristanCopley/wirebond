@@ -131,7 +131,8 @@ performance|bandwidth` changes it later.
 
 ## Commands
 
-`wirebond help` lists them: `wirebond [status [<device>]]`, `client <anchor> [mode] | off`, `mode
+`wirebond help` lists them: `wirebond [status [<device>] [--watch]]` (`--watch` shows it again every
+second: lanes, delay, loss and each link's share, live while you play), `client <anchor> [mode] | off`, `mode
 performance|bandwidth`, `pick [<device>...] [--mode M] [--seconds N] [--dry-run]` to measure
 candidate anchors and choose the best (`pick --add|--remove <device>` keeps the list), `anchor
 on|off`, `anchor allow|deny <device>...`, `support on <uplink> <cable> [--for <client>] | off`,

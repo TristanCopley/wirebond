@@ -76,10 +76,11 @@ pub use os::{
 };
 // Per OS, one signature everywhere: whether this process may install a system service (root, or
 // elevated on Windows); the sleep-inclusive clock in nanoseconds (Linux CLOCK_BOOTTIME, macOS
-// CLOCK_MONOTONIC, Windows GetTickCount64); the host name; and the daemon as the service
-// manager's entry point, `wirebond run`, where `stop` fires on a Windows stop request and SIGTERM
-// from launchd or systemd ends the process elsewhere.
-pub use os::{admin, boot, hostname, run_service};
+// CLOCK_MONOTONIC, Windows GetTickCount64); the host name; whether standard output is a terminal
+// that takes escape sequences, for `status --watch`; and the daemon as the service manager's entry
+// point, `wirebond run`, where `stop` fires on a Windows stop request and SIGTERM from launchd or
+// systemd ends the process elsewhere.
+pub use os::{admin, boot, hostname, run_service, terminal};
 // Windows' wait (§4.3): WSAEventSelect, Wintun's read event and a waitable timer.
 #[cfg(windows)]
 pub use os::EventLoop;

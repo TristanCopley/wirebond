@@ -162,6 +162,12 @@ pub fn admin() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// Whether standard output is a terminal, which takes the escape sequences `status --watch` draws
+/// with.
+pub fn terminal() -> bool {
+    io::IsTerminal::is_terminal(&io::stdout())
+}
+
 /// Runs the daemon directly: launchd and systemd stop it with SIGTERM, whose default action ends
 /// the process, so `stop` never fires. First it raises the descriptor limit (`raise_nofile`).
 pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Result<()> {
