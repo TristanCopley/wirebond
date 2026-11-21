@@ -234,3 +234,20 @@ fn an_anchor_without_ics_keeps_the_bond_subnets_address() {
     assert_eq!(v2::egress_addr4(false, net), (Ipv4Addr::new(10, 77, 0, 1), 24));
     assert_eq!(v2::egress_addr4(false, (Ipv4Addr::new(10, 99, 5, 0), 24)), (Ipv4Addr::new(10, 99, 5, 1), 24));
 }
+
+/// Sharing's script (§6.2): this process's first sharing turns off what the pair already shows
+/// (the flags a reboot kept share nothing for an adapter made anew) before it turns sharing on;
+/// later ones, and turning it off, do not.
+#[test]
+fn the_first_sharing_turns_the_pair_off_and_on() {
+    let fresh = v2::ics_script("Ethernet", "wirebond", true, true);
+    let at = |what: &str| fresh.find(what).unwrap_or_else(|| panic!("{what} in:\n{fresh}"));
+    let off = at("if ($true) {\nif ($priv.SharingEnabled) { $priv.DisableSharing() }\n\
+                  if ($pub.SharingEnabled) { $pub.DisableSharing() }\n$ours = $false\n}");
+    assert!(off < at("$pub.EnableSharing(0)") && off < at("$priv.EnableSharing(1)"), "off, then on:\n{fresh}");
+    for (enable, why) in [(true, "a later sharing"), (false, "turning sharing off")] {
+        let s = v2::ics_script("Ethernet", "wirebond", enable, false);
+        assert!(s.contains("if ($false) {\nif ($priv.SharingEnabled)"), "{why} leaves a working pair alone:\n{s}");
+    }
+    assert!(v2::ics_script("it's", "wirebond", true, false).contains("-eq 'it''s'"), "names are quoted");
+}

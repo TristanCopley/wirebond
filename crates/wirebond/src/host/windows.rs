@@ -658,6 +658,7 @@ mod v2 {
     use std::process::Command;
     use std::ptr::{null, null_mut};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use std::{env, mem, slice};
 
@@ -840,7 +841,9 @@ mod v2 {
                 address(&tun.luid, IpAddr::V4(a), bits)?;
             }
             if let Some((a, bits)) = c.addr6 {
-                address(&tun.luid, IpAddr::V6(a), bits)?;
+                // A PC with IPv6 turned off has no IPv6 interface: the device opens on IPv4 alone,
+                // as with the MTU above.
+                let _ = address(&tun.luid, IpAddr::V6(a), bits);
             }
             Ok(tun)
         }
@@ -1102,9 +1105,22 @@ mod v2 {
     /// with `enable` false, ends the sharing whose private side is `private`. ICS serves one shared
     /// pair at a time: a pair of ours moves to the new public side (the uplink changed); one in use by
     /// something else, Mobile Hotspot included, is an error and stays.
+    ///
+    /// This process's first sharing turns the pair off and on (`ics_script`'s `fresh`): Windows
+    /// keeps the pair's flags across a reboot, but shares nothing for an adapter made anew until
+    /// then. Later calls change only what differs.
     fn ics(public: &str, private: &str, enable: bool) -> io::Result<()> {
+        static SHARED: AtomicBool = AtomicBool::new(false);
+        let fresh = enable && !SHARED.load(Ordering::Relaxed);
+        powershell(&ics_script(public, private, enable, fresh))?;
+        SHARED.fetch_or(enable, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// `ics`'s script. `fresh`: sharing the pair already shows is turned off first, then on.
+    pub(super) fn ics_script(public: &str, private: &str, enable: bool, fresh: bool) -> String {
         let q = |s: &str| s.replace('\'', "''");
-        let script = format!(
+        format!(
             "$ErrorActionPreference = 'Stop'\n\
              $m = New-Object -ComObject HNetCfg.HNetShare\n\
              $pub = $null; $priv = $null; $others = @()\n\
@@ -1119,6 +1135,11 @@ mod v2 {
                if (-not $pub -or -not $priv) {{ throw 'no connection named {pub} or {priv}' }}\n\
                if ($others -and -not $ours) {{ throw 'Internet Connection Sharing is in use by another connection' }}\n\
                foreach ($s in $others) {{ $s.DisableSharing() }}\n\
+               if ({fresh}) {{\n\
+                 if ($priv.SharingEnabled) {{ $priv.DisableSharing() }}\n\
+                 if ($pub.SharingEnabled) {{ $pub.DisableSharing() }}\n\
+                 $ours = $false\n\
+               }}\n\
                if (-not ($pub.SharingEnabled -and $pub.SharingConnectionType -eq 0)) {{ $pub.EnableSharing(0) }}\n\
                if (-not $ours) {{ $priv.EnableSharing(1) }}\n\
              }} elseif ($ours) {{\n\
@@ -1129,8 +1150,8 @@ mod v2 {
             pub = q(public),
             priv = q(private),
             enable = if enable { "$true" } else { "$false" },
-        );
-        powershell(&script)
+            fresh = if fresh { "$true" } else { "$false" },
+        )
     }
 
     /// Runs a PowerShell script without a window or a profile; its error becomes ours.
