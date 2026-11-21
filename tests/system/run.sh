@@ -10,7 +10,8 @@
 #
 # WIREBOND_BIN: the daemon (default target/release/wirebond); LOAD_BIN: the load tool (default
 # target/release/load, built when missing); WIREBOND_MODE: performance (default) or bandwidth;
-# WIREBOND_SECONDS: each measurement (10); WIREBOND_KEEP=1 keeps the run directory.
+# WIREBOND_SECONDS: each measurement (10); WIREBOND_KEEP=1 keeps the run directory; WIREBOND_A12_CPU:
+# A12's budget in percent of one core per daemon (25, SPEC §23.3), for a machine slower than a device.
 #
 # Each run has its own namespaces (wbs-<pid>-i, -c, -a, -b, -s), removed on exit:
 #
@@ -41,6 +42,7 @@ run=$(mktemp -d "${TMPDIR:-/tmp}/wirebond-system.XXXXXX")
 results=$run/results.jsonl
 mode=${WIREBOND_MODE:-performance}
 secs=${WIREBOND_SECONDS:-10}
+cpu=${WIREBOND_A12_CPU:-25}
 bin=${WIREBOND_BIN:-$repo/target/release/wirebond}
 load=${LOAD_BIN:-}
 failed=$run/failed.txt
@@ -718,7 +720,8 @@ a10() {
 	teardown
 }
 
-# a12: CPU at 100 Mbit/s in performance with two lanes: at most 25% of one core per daemon. The echo
+# a12: CPU at 100 Mbit/s in performance with two lanes: at most 25% of one core per daemon
+# (WIREBOND_A12_CPU). The echo
 # returns every datagram, so each daemon carries 100 Mbit/s each way. The mesh lane (the first in
 # the status) is blocked, so the two lanes are the hotel's and the cell's (performance sends every
 # packet on each lane); an idle bond keeps its spare lanes dormant, so they are counted right after
@@ -731,8 +734,9 @@ a12() {
 	wait_for client 15s "the mesh lane not up" '!bond.lanes.0.state==up' || fail a12
 	check a12 measure "$C" udp --to "$SERVER4:47998" --mbps 100 --size "$FIT4" --duration "$secs" \
 		--pids "client=${pid[client]},anchor=${pid[anchor]}" --label "a12: 100 Mbit/s, performance, two lanes" \
-		--check 'loss_pct<=1' --check 'procs.client.cpu<=25' --check 'procs.anchor.cpu<=25'
-	lanes_until a12 1 "two lanes up after the run" -eq 2 || true
+		--check 'loss_pct<=1' --check "procs.client.cpu<=$cpu" --check "procs.anchor.cpu<=$cpu"
+	# With IPv6 each link has a second lane, so four are up, not two.
+	lanes_until a12 1 "both links' lanes up after the run" -ge 2 || true
 	teardown
 }
 

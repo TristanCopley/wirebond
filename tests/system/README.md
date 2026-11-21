@@ -15,7 +15,7 @@ sudo tests/system/run.sh [net|a7|a8|a9|a10|a12|shaped|netem|daemons|all|clean]..
 | `a8` | Client to the internet server through the anchor's NAT, UDP and TCP, IPv4 and IPv6; a forged source never arrives. |
 | `a9` | Client to a service on the anchor at 10.77.0.1: delivered locally, never NATed. |
 | `a10` | `pick` between two anchors: the better one wins in each mode; `--dry-run` changes nothing. Without netem the worse anchor is only narrower, so only bandwidth mode is checked. |
-| `a12` | At most 25% of one core per daemon at 100 Mbit/s in performance with two lanes. |
+| `a12` | At most 25% of one core per daemon at 100 Mbit/s in performance with two lanes (`WIREBOND_A12_CPU`). The harness bills a daemon for the kernel's work along the whole simulated path, so the figure is an upper bound on a device's. |
 | `shaped`, `netem` | 30 Mbit/s video at 120 fps on the shaped hotel and cell, against the mesh-lane baseline (A11), then UDP and TCP with CPU and RSS. |
 | `daemons`, `all` | Every daemon scenario; `all` adds `net`. `clean` removes what dead runs left. |
 
@@ -34,6 +34,7 @@ The namespaces, the addresses and the shaping are drawn at the top of `run.sh`. 
 in its own subshell: one that stops is recorded and the next still runs. At the end, `load table`
 prints every result and verdict; each failed scenario is diagnosed (daemon statuses and logs,
 addresses, rules, routes, nftables, qdiscs, echo counters). Environment: `WIREBOND_BIN`, `LOAD_BIN`,
-`WIREBOND_MODE`, `WIREBOND_SECONDS`, `WIREBOND_KEEP=1` (keep the run directory), `WIREBOND_TRACE=1`.
+`WIREBOND_MODE`, `WIREBOND_SECONDS`, `WIREBOND_KEEP=1` (keep the run directory), `WIREBOND_TRACE=1`,
+`WIREBOND_A12_CPU` (A12's budget in percent of one core, 25 by default; CI's runners get 85).
 
 `load help` lists the load tool's commands; NOTES.md records how it measures.
