@@ -212,19 +212,6 @@ fn hostname_is_the_kernels() {
 }
 
 #[test]
-fn wait_readable_wakes_for_a_connection() {
-    let ln = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    ln.set_nonblocking(true).unwrap();
-    let begin = Instant::now();
-    assert!(!wait_readable(&ln, Duration::from_millis(50)).unwrap(), "nothing to accept");
-    assert!(begin.elapsed() >= Duration::from_millis(40), "it waited");
-    let _c = std::net::TcpStream::connect(ln.local_addr().unwrap()).unwrap();
-    let begin = Instant::now();
-    assert!(wait_readable(&ln, Duration::from_secs(5)).unwrap(), "a connection waits");
-    assert!(begin.elapsed() < Duration::from_secs(1) && ln.accept().is_ok());
-}
-
-#[test]
 fn run_service_never_stops() {
     // Run by hand, stop never fires. The only test that calls run_service in this process: Windows
     // lets a process call StartServiceCtrlDispatcherW once, and a second call fails with 1056.
@@ -980,14 +967,15 @@ mod on_linux {
         fs::write(RP_LO, "0").unwrap();
     }
 
+    /// A tool that is absent is an error of kind NotFound reading `missing_tool <tool>`, which the
+    /// daemon reports as the problem `missing_tool`; a tool that runs and fails is neither. It
+    /// runs `ip`, so the tests need iproute2.
     #[test]
     fn missing_tools_are_named() {
         let e = os::tool("wirebond-no-such-tool", &[], None).unwrap_err();
-        assert_eq!((e.kind(), missing_tool(&e).as_deref()), (io::ErrorKind::NotFound, Some("wirebond-no-such-tool")));
-        assert_eq!(missing_tool(&io::Error::other("ip rule add: RTNETLINK answers: File exists")), None);
-        assert!(missing_tools().iter().all(|t| ["ip", "nft"].contains(t)));
+        assert_eq!((e.kind(), e.to_string().as_str()), (io::ErrorKind::NotFound, "missing_tool wirebond-no-such-tool"));
         let e = os::tool("ip", &["no-such-object"], None).unwrap_err();
-        assert!(missing_tool(&e).is_none() && e.to_string().starts_with("ip no-such-object: "), "{e}");
+        assert!(e.kind() != io::ErrorKind::NotFound && e.to_string().starts_with("ip no-such-object: "), "{e}");
     }
 
     #[test]
@@ -1035,7 +1023,7 @@ mod on_linux {
         let _fake = Fake::new();
         let s = Share { uplink: "wlan0".into(), cable: "eth1".into() };
         let e = support_share(&s).unwrap_err();
-        assert_eq!(missing_tool(&e).as_deref(), Some("nmcli"), "{e}");
+        assert!(e.kind() == io::ErrorKind::NotFound && e.to_string().starts_with("missing_tool nmcli\n"), "{e}");
         assert!(e.to_string().contains("To share wlan0 to eth1 by hand"), "{e}");
         support_unshare(&s).unwrap();
     }

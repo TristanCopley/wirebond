@@ -1,29 +1,31 @@
-//! Self-update: check, fetch, verify, smoke test, swap, rollback and bad versions (SPEC §15.5).
+//! Self-update: check, fetch, verify, smoke test, swap, rollback and bad versions (SPEC §22.3).
 //! Rust's standard library has no HTTP or TLS, so update runs the system's curl (macOS and Windows
-//! 10 1803+ ship it, and the install line uses it on macOS and Linux) with explicit arguments,
-//! never through a shell. Calls that take `&mut Config` change it, and node saves config.json
-//! after each; the others never touch config.json. `exe` is the installed executable's path
-//! (§15.3). Every error maps to the CLI's update_failed, with its message. node owns the timers
-//! and the idle rule:
+//! 10 1803+ ship it; on Linux it must be installed, as install.sh's own download may have used
+//! wget) with explicit arguments, never through a shell. Calls that take `&mut Config` change it,
+//! and the caller saves config.json after each; the others never touch config.json. `exe` is the
+//! installed executable's path (§22.2). A failed update is the reply `failed`, with its message,
+//! and a line in the log. [`Schedule`], which the daemon's loop drives, owns the timers and the
+//! idle rule:
 //!
-//! 1. At every daemon start, before anything else: `back = started(&mut cfg.update, exe,
-//!    version)`; save config.json; if `back`, `rollback(exe)` and, if that succeeds, `restart(exe)`.
-//! 2. After UPDATE_HEALTHY with the event loop running and both local sockets answering (the mesh
-//!    does not count): `healthy(&mut cfg.update, exe)`; save config.json.
-//! 3. UPDATE_FIRST after start, then every UPDATE_EVERY ± UPDATE_JITTER, and at once when a peer's
-//!    hello carries a version `newer` than this one (at most once per NEWER_PEER_CHECK): `check`,
-//!    then `stage` a tag that is not already staged. Both block on the network, at most 85 s
-//!    together, so node runs them off its event loop and never alongside `apply`. Ok from `stage`
-//!    means the tag is staged: status shows update_ready.
-//! 4. After UPDATE_IDLE with no flow on any connection, or at once on `wirebond update`:
-//!    `apply(exe)`; if that succeeds, reply to the CLI, then `restart(exe)`.
+//! 1. At every daemon start, before anything else (`Schedule::boot`): `back = started(&mut
+//!    cfg.update, exe, version)`; save config.json; if `back`, `rollback(exe)` and, if that
+//!    succeeds, `restart(exe)`.
+//! 2. UPDATE_HEALTHY after the start, with the loop running (the mesh does not count):
+//!    `healthy(&mut cfg.update, exe)`; save config.json.
+//! 3. UPDATE_FIRST after start, then every UPDATE_EVERY ± UPDATE_JITTER, at once on `wirebond
+//!    update`, and at once when a peer's hello carries a version `newer` than this one (once per
+//!    version): `check`, then `stage` a tag that is not already staged. Both block on the network,
+//!    at most 85 s together, so they run on a thread of their own, never two at once and never
+//!    alongside `apply`. Ok from `stage` means the tag is staged, which the log says.
+//! 4. After UPDATE_IDLE without traffic, or at once on `wirebond update`: `apply(exe)`; if that
+//!    succeeds, reply to the CLI, then `restart(exe)`.
 //!
-//! `stage` runs `<exe>.new --version --json`. The CLI answers it without contacting the daemon or
-//! installing anything, by printing exactly this line on stdout and exiting 0, where version is
-//! the build's version (the tag):
+//! `stage` runs `<exe>.new version --json`. The CLI answers it without contacting the daemon or
+//! installing anything, by printing exactly this line on stdout and exiting 0 (`api::Version`),
+//! where version is the build's version (the tag):
 //!
 //! ```text
-//! {"ok":true,"data":{"version":"v0.3.1","commit":"<commit>"}}
+//! {"version":"v2.0.1","commit":"<commit>"}
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -46,14 +48,14 @@ mod tests;
 pub const DEFAULT_URL: &str = "https://github.com/TristanCopley/wirebond";
 
 /// Seconds each curl call may take, and the asset download (a 3 MB asset needs 0.6 Mbps): check
-/// and stage together take at most 15 + 15 + 45 s plus the smoke test's 10, within node's 90 s and
-/// the CLI's 4 minutes for update.
+/// and stage together take at most 15 + 15 + 45 s plus the smoke test's 10, within the CLI's
+/// 4 minutes for update.
 const MAX_TIME: &str = "15";
 const ASSET_TIME: &str = "45";
 /// SMOKE_TIMEOUT, which core keeps in nanoseconds.
 const SMOKE: Duration = Duration::from_nanos(SMOKE_TIMEOUT as u64);
 
-/// config.json's "update" object (§15.4).
+/// config.json's "update" object, which §22.4's example does not show.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -69,7 +71,7 @@ pub struct Config {
     pub bad: Vec<String>,
 }
 
-/// This platform's release asset name (§15.1), e.g. "wirebond-Darwin-arm64".
+/// This platform's release asset name (§22.1), e.g. "wirebond-Darwin-arm64".
 pub fn asset() -> &'static str {
     name(std::env::consts::OS, std::env::consts::ARCH)
 }
@@ -110,7 +112,7 @@ fn bare(v: &str) -> &str {
     v.strip_prefix('v').unwrap_or(v)
 }
 
-/// One check of the latest release (§15.5 step 1): one HEAD of <url>/releases/latest, whose
+/// One check of the latest release (§22.3's schedule): one HEAD of <url>/releases/latest, whose
 /// redirect it reads instead of following; the tag ends Location's path. None means nothing newer
 /// (or no release yet). A redirect to anything but a release tag is an error, not silence
 /// (R1-35), and so is a newer tag in `bad`, so that `wirebond update` says why it stays (R1-36).
@@ -132,12 +134,12 @@ pub fn check(cfg: &Config, running: &str) -> io::Result<Option<String>> {
     Ok(newer(tag, running).then(|| tag.to_owned()))
 }
 
-/// Fetches, verifies and stages `tag` as `<exe>.new`, then smoke-tests it (§15.5 steps 2–3). The
-/// asset and SHA256SUMS both come from /releases/download/<tag>/, so from one release, and nothing
-/// changes unless the asset's sha256 is on its SHA256SUMS line. Then a fresh `<exe>.new` replaces
-/// any stale one (a new file, private until written, then mode 0755, synced; the installed file is
-/// never written) and must answer `--version --json` with the tag within SMOKE_TIMEOUT, or it is
-/// removed. Ok means `tag` is staged for `apply`.
+/// Fetches, verifies and stages `tag` as `<exe>.new`, then smoke-tests it (§22.3: download and
+/// verify, smoke test). The asset and SHA256SUMS both come from /releases/download/<tag>/, so from
+/// one release, and nothing changes unless the asset's sha256 is on its SHA256SUMS line. Then a
+/// fresh `<exe>.new` replaces any stale one (a new file, private until written, then mode 0755,
+/// synced; the installed file is never written) and must answer `version --json` with the tag
+/// within SMOKE_TIMEOUT, or it is removed. Ok means `tag` is staged for `apply`.
 pub fn stage(cfg: &Config, exe: &Path, tag: &str) -> io::Result<()> {
     let dir = at(cfg, &format!("download/{tag}/"));
     let sums = curl(&format!("{dir}SHA256SUMS"), &["-L"])?;
@@ -211,14 +213,14 @@ fn at(cfg: &Config, path: &str) -> String {
     format!("{}/releases/{path}", url.unwrap_or(DEFAULT_URL))
 }
 
-/// Swaps the staged file in (§15.5 step 5): `<exe>.new` becomes `<exe>`, and `<exe>` is kept as
+/// Swaps the staged file in (§22.3, swap): `<exe>.new` becomes `<exe>`, and `<exe>` is kept as
 /// `<exe>.old`, unless a version on trial already left a proven `<exe>.old`, which stays (R1-13).
 pub fn apply(exe: &Path) -> io::Result<()> {
     let old = with(exe, ".old");
     swap(exe, &with(exe, ".new"), (!old.exists()).then_some(old))
 }
 
-/// Puts `<exe>.old` back over `<exe>` (§15.5 step 6).
+/// Puts `<exe>.old` back over `<exe>` (§22.3, rolled back).
 pub fn rollback(exe: &Path) -> io::Result<()> {
     swap(exe, &with(exe, ".old"), None)
 }
@@ -245,7 +247,7 @@ fn swap(exe: &Path, from: &Path, keep: Option<PathBuf>) -> io::Result<()> {
     moved
 }
 
-/// Restarts into the new executable and never returns (§15.5 step 5). On macOS and Linux it execs
+/// Restarts into the new executable and never returns (§22.3, swap). On macOS and Linux it execs
 /// `exe` with the same arguments and environment: the process id stays, so launchd and systemd
 /// see nothing. On Windows, or if the exec fails, it exits with status 3 without reporting
 /// SERVICE_STOPPED, and the service manager starts `exe` again. Either way every socket closes
@@ -257,11 +259,11 @@ pub fn restart(exe: &Path) -> ! {
     std::process::exit(3)
 }
 
-/// At every daemon start: the rollback bookkeeping (§15.5 step 6), which changes `cfg`. It removes
-/// a stale `<exe>.new` and `<exe>.del`. While `<exe>.old` exists the running version is on trial:
-/// `starts` counts its starts, from 1 for a version new to the trial (R1-13), and once
-/// UPDATE_MAX_STARTS of them ended without `healthy`, the next start adds it to `bad` (as a tag),
-/// ends the trial and returns true: node rolls back.
+/// At every daemon start: the rollback bookkeeping (§22.3, healthy or rolled back), which changes
+/// `cfg`. It removes a stale `<exe>.new` and `<exe>.del`. While `<exe>.old` exists the running
+/// version is on trial: `starts` counts its starts, from 1 for a version new to the trial (R1-13),
+/// and once UPDATE_MAX_STARTS of them ended without `healthy`, the next start adds it to `bad` (as
+/// a tag), ends the trial and returns true: the caller rolls back.
 pub fn started(cfg: &mut Config, exe: &Path, running: &str) -> bool {
     let _ = fs::remove_file(with(exe, ".new"));
     let _ = fs::remove_file(with(exe, ".del"));
@@ -279,7 +281,7 @@ pub fn started(cfg: &mut Config, exe: &Path, running: &str) -> bool {
     back
 }
 
-/// Ends a trial after UPDATE_HEALTHY healthy (§15.5 step 6), which changes `cfg`: node calls it
+/// Ends a trial after UPDATE_HEALTHY healthy (§22.3), which changes `cfg`: the schedule calls it
 /// once per start. It resets the start count and deletes `<exe>.old`.
 pub fn healthy(cfg: &mut Config, exe: &Path) {
     (cfg.starts, cfg.trial) = (0, String::new());
@@ -364,11 +366,6 @@ impl Schedule {
         self.rand ^= self.rand << 17;
         let span = 2 * UPDATE_JITTER as u64 + 1;
         now + UPDATE_EVERY - UPDATE_JITTER + (self.rand % span) as Mono
-    }
-
-    /// The version staged for the swap, if any.
-    pub fn staged(&self) -> Option<&str> {
-        self.staged.as_deref()
     }
 
     /// `wirebond update`: check at once, and swap in at once what it stages; `reply` hears the

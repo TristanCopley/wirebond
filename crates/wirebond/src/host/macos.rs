@@ -1,5 +1,5 @@
 //! macOS: the Wi-Fi test, socket options, the scopes' layout, launchd and the application
-//! firewall (§6.2, §15.3, §15.6).
+//! firewall (§9.1, §22.2). Then the 2.0 platform API (SPEC 2.0 §5–§8).
 
 use super::Scope;
 pub use super::unix::*;
@@ -13,8 +13,7 @@ use std::{env, io, ptr};
 use wirebond_core::SOCK_BUF;
 
 pub(super) const BOOT_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
-/// The application firewall's tool, which is not on PATH: uninstall's note names it in full, as
-/// node's tailscale_only fix does (R1-05).
+/// The application firewall's tool, which is not on PATH: uninstall's note names it in full.
 const FW: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
 /// The command people type: a link to the system executable, which sits off PATH in the state
 /// directory (layout). /usr/local/bin is on macOS's default PATH, and the link is only a name, so
@@ -106,7 +105,7 @@ pub(super) fn relink(s: Scope, exe: &Path) -> bool {
 
 /// Boots the job out and removes its plist, LINK, and the application firewall's entry for `exe`.
 /// That needs root; while the firewall still lists `exe`, the note is the command for the CLI to
-/// print (§15.6).
+/// print (§22.2).
 pub(super) fn unregister(s: Scope, exe: &Path) -> io::Result<(bool, String)> {
     let (_, job, dom) = layout(s);
     let _ = run("launchctl", &["bootout", &format!("{dom}/com.wirebond")]);
@@ -125,7 +124,6 @@ pub(super) fn unregister(s: Scope, exe: &Path) -> io::Result<(bool, String)> {
 
 pub use v2::*;
 
-#[allow(dead_code)] // 2.0 wave 2: the daemon's pumps and bond logic call these
 mod v2 {
     use std::io::{self, Write};
     use std::mem;

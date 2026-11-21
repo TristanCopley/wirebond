@@ -1,5 +1,6 @@
-//! Install and uninstall (§14.1, §15.2, §15.3, §15.6): the scope a verb needs, the executable
-//! copied into place, config.json, and the service or agent.
+//! Install and uninstall (SPEC §19, §22.2): the scope a verb needs, the executable copied into
+//! place, config.json, and the service. What names an agent or `Scope::User` is 1.x's macOS login
+//! agent, which §25 removes: install only replaces one that is there with the system service.
 
 use super::{CONFIG_FILE, Config, Scope, os};
 use std::hash::{BuildHasher, RandomState};
@@ -28,7 +29,7 @@ pub(super) fn has(s: Scope) -> bool {
 
 /// Whether `wirebond` on PATH is `s`'s executable: the first `wirebond` along PATH is it, or a
 /// link to it such as the one macOS's install makes in /usr/local/bin; an older copy earlier on
-/// PATH would shadow it. While it is not, the CLI names the executable's full path (§15.2).
+/// PATH would shadow it. While it is not, the CLI names the executable's full path (§22.2).
 pub fn on_path(s: Scope) -> bool {
     let exe = s.paths().0;
     let (Some(name), Ok(real)) = (exe.file_name(), fs::canonicalize(&exe)) else { return false };
@@ -63,11 +64,11 @@ fn same_dir(a: &str, b: &str) -> bool {
     a.trim_end_matches('\\').eq_ignore_ascii_case(b.trim_end_matches('\\'))
 }
 
-/// Puts wirebond in place for scope `s` and starts it (§15.2, §15.3); idempotent. Returns whether
+/// Puts wirebond in place for scope `s` and starts it (§19, §22.2); idempotent. Returns whether
 /// anything changed.
 ///
 /// It creates the state directory, copies the running executable to `s`'s path (see `place`),
-/// creates config.json, records madeBin if it created the executable's directory, registers the
+/// creates config.json, records `made_bin` if it created the executable's directory, registers the
 /// service or agent (on Windows also the firewall rule) and starts it, restarting it on a new
 /// executable. Only then is the download removed, so a failed install keeps it to run again
 /// (R2-21); a missing executable, as a crash in an update's swap leaves, is put back the same way.
@@ -126,12 +127,16 @@ fn place(s: Scope, exe: &Path) -> io::Result<(bool, Option<PathBuf>)> {
     Ok((true, Some(src)))
 }
 
-/// Removes everything `install` created for scope `s` (§15.6): the service or agent, the firewall
+/// Removes everything `install` created for scope `s` (§22.2): the service or agent, the firewall
 /// rule, the state directory, the executable and its update leftovers, and the executable's
 /// directory if wirebond created it and it is empty; idempotent. Returns whether anything changed
 /// and a note for a person: on macOS, while the application firewall still lists the executable,
 /// the command that removes it, which needs admin. On Windows a detached cmd deletes the
 /// executable's directory about 2 s later, once the caller has exited.
+///
+/// What a running daemon put on the network (capture, egress, sharing) is the daemon's to remove,
+/// in its teardown or by `cleanup_stale` at its next start: uninstall stops the service and does
+/// not call either (NOTES.md, known limitations).
 pub fn uninstall(s: Scope) -> io::Result<(bool, String)> {
     let (exe, dir) = s.paths();
     let made = Config::load(&dir).is_ok_and(|c| c.made_bin);
@@ -161,8 +166,8 @@ pub(super) fn put(path: &Path, b: &[u8], mode: u32) -> io::Result<()> {
     r.inspect_err(|_| _ = fs::remove_file(&tmp))
 }
 
-/// Creates the new file `path` holding `b`, private to this process's user until it does (as Go's
-/// CreateTemp makes it), then `mode` whatever the umask, and syncs it: config.json and the unit
+/// Creates the new file `path` holding `b`, private to this process's user until it does (mode
+/// 0600 at creation), then `mode` whatever the umask, and syncs it: config.json and the unit
 /// through [`put`], and update's `<exe>.new`. On Windows the directory's DACL decides.
 #[cfg_attr(windows, allow(unused_variables))]
 pub fn create(path: &Path, b: &[u8], mode: u32) -> io::Result<()> {
