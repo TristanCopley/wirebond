@@ -16,6 +16,8 @@ struct Knobs {
     slept: i64,
     dns_local: bool,
     uplink: String,
+    /// Why enabling egress fails, when it does.
+    egress_err: Option<String>,
 }
 
 /// A fake TUN device: what the test writes for the daemon to read, and what the daemon wrote.
@@ -69,6 +71,9 @@ impl Platform for Host {
 
     fn egress_enable(&mut self, _: &host::Egress) -> io::Result<host::EgressOn> {
         let uplink = self.knobs.lock().unwrap().uplink.clone();
+        if let Some(e) = self.knobs.lock().unwrap().egress_err.clone() {
+            return Err(io::Error::other(e));
+        }
         self.calls.lock().unwrap().push(format!("egress on {uplink}"));
         Ok(host::EgressOn { v4: true, v6: true, addr4: (Ipv4Addr::new(10, 77, 0, 1), 24), uplink: Some(uplink) })
     }
@@ -391,6 +396,24 @@ fn dns_local_is_raised_when_capture_leaves_dns_alone() {
     assert!(c.d.status(false).problems.iter().any(|p| p.code == problem::DNS_LOCAL));
     assert!(c.d.answer(Request::ClientOff).changed);
     assert!(!c.d.status(false).problems.iter().any(|p| p.code == problem::DNS_LOCAL));
+}
+
+/// §5.2, §7: an anchor without egress runs no DNS relay, so a client that keeps its own routes
+/// keeps its own resolver too: capture names no DNS address, and `dns_local` is not raised for it.
+#[test]
+fn a_client_of_an_anchor_without_egress_leaves_dns_alone() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(70, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(70, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(70, 2))], ip(70, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(70, 1))], ip(70, 10), ccfg);
+    a.knobs.lock().unwrap().egress_err = Some("sharing is off".into());
+    c.knobs.lock().unwrap().dns_local = true; // what Linux answers when it was given no address
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    let cap = c.d.capture.clone().unwrap();
+    assert_eq!((cap.routes, cap.dns), (host::Routes::BondOnly, None), "the bond's subnets only, DNS left alone");
+    let st = c.d.status(false);
+    assert!(st.problems.iter().any(|p| p.code == problem::NO_EGRESS), "{st:?}");
+    assert!(st.problems.iter().all(|p| p.code != problem::DNS_LOCAL), "{st:?}");
 }
 
 #[test]

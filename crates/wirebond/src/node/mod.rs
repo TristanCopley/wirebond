@@ -1866,14 +1866,16 @@ impl Daemon {
             bond6: b.addr6.map(|a| (Ipv6Addr::from_bits(a.to_bits() & !0xffff_ffff_ffff_ffff), 64)),
             exclude: self.cfg.mesh_ranges(),
             links: self.socks.iter().filter(|s| s.id != 0).map(|s| s.link.name.clone()).collect(),
-            dns: self.dns,
+            // §5.2, §7: an anchor without egress runs no relay, and the client keeps its routes:
+            // its lookups stay with its own resolver.
+            dns: self.dns.filter(|_| b.egress != Egress::None),
         };
         match self.plat.capture_install(&c) {
             Ok(()) => {
+                // §7: without a way to point the resolver at the anchor, DNS stays local.
+                self.dns_local = c.dns.is_some() && self.plat.dns_local();
                 self.capture = Some(c);
                 self.log("capture installed".into());
-                // §7: without a way to point the resolver at the anchor, DNS stays local.
-                self.dns_local = self.plat.dns_local();
                 if self.dns_local {
                     self.log("DNS left alone: queries go to the local resolver".into());
                 }
