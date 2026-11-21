@@ -354,7 +354,9 @@ pub(super) fn route_said(ok: bool, stderr: &str, done: &str) -> io::Result<()> {
     }
 }
 
-/// The launchd job, daemon or agent: started at load, kept alive, no log paths (§22.2).
+/// The launchd job, daemon or agent: started at load, kept alive, no log paths (§22.2). Its
+/// process type is Interactive: launchd throttles the processor and I/O of a job that names none
+/// (launchd.plist(5)), and this one carries every packet of the stream someone is playing.
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn plist(exe: &Path) -> String {
     let exe = exe.display();
@@ -363,7 +365,8 @@ pub(super) fn plist(exe: &Path) -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>com.wirebond</string>
 <key>ProgramArguments</key><array><string>{exe}</string><string>run</string></array>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>ProcessType</key><string>Interactive</string></dict></plist>
 "#
     )
 }

@@ -359,7 +359,7 @@ fn plist_text() {
     let text = p.split('>').filter_map(|s| s.split('<').next()).map(str::trim);
     let text: Vec<_> = text.filter(|t| !t.is_empty()).collect();
     let want = ["Label", "com.wirebond", "ProgramArguments", "/Users/a/.local/bin/wirebond", "run"];
-    assert_eq!(text, [&want[..], &["RunAtLoad", "KeepAlive"]].concat());
+    assert_eq!(text, [&want[..], &["RunAtLoad", "KeepAlive", "ProcessType", "Interactive"]].concat());
     assert!(p.contains("<key>RunAtLoad</key><true/>") && p.contains("<key>KeepAlive</key><true/>"));
     assert!(p.ends_with("</dict></plist>\n") && !p.contains("Path"), "{p}");
 }
