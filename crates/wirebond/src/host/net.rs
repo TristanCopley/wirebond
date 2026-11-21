@@ -109,8 +109,8 @@ pub struct Capture {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Egress {
     pub tun: String,
-    /// The bond subnets (config `bond_net4`, `bond_net6`); Windows ignores `net4` (ICS fixes
-    /// 192.168.137.0/24).
+    /// The bond subnets (config `bond_net4`, `bond_net6`). While Windows ICS shares, it fixes
+    /// 192.168.137.0/24 instead of `net4`.
     pub net4: Net4,
     pub net6: Option<Net6>,
 }
@@ -120,8 +120,8 @@ pub struct Egress {
 pub struct EgressOn {
     pub v4: bool,
     pub v6: bool,
-    /// The anchor's own address and subnet on the device: 10.77.0.1/24, or 192.168.137.1/24 where
-    /// Windows ICS readdressed the adapter. Clients get addresses in this subnet.
+    /// The anchor's own address and subnet, which the device has: 10.77.0.1/24, or 192.168.137.1/24
+    /// while Windows ICS shares. Clients get addresses in this subnet and send to this address.
     pub addr4: Net4,
     /// The interface of the default route, which NAT follows (re-checked every LINK_SCAN).
     pub uplink: Option<String>,
