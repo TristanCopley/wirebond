@@ -1,12 +1,19 @@
 # Release (SPEC §15.1): on a tag vX.Y.Z, every check of ci.yml plus netsim's full acceptance set and
 # system.yml, then the executables, SHA256SUMS and a GitHub release. A manual run builds them and
-# keeps the assets as a workflow artifact, with no checks and no release.
+# keeps the assets as a workflow artifact, with no checks and no release. A manual run given a tag
+# publishes too: ci.yml's checks without netsim's full set, system.yml, then the release, whose tag
+# it makes at the commit it built. That is how a release candidate goes out while the full set fails.
 name: release
 
 on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Publish this build as a release under this tag, such as v2.0.0-rc.1. Left empty, the run only builds.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -15,15 +22,30 @@ env:
   RUST_VERSION: '1.99.1' # as in ci.yml
 
 jobs:
+  # A manual publish names its tag, which is checked before a release is made of it.
+  tag:
+    if: inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: The tag is vX.Y.Z, with a pre-release suffix or without, and has no release yet
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "the release $TAG exists already"; exit 1
+          fi
+
   checks:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.tag != ''
     uses: ./.github/workflows/ci.yml
     with:
-      long: true
+      long: ${{ github.event_name == 'push' }} # netsim's full set gates a pushed tag, not a manual publish
 
   # The build is published only once its daemons pass tests/system (SPEC §17.1 tier 3).
   system:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.tag != ''
     uses: ./.github/workflows/system.yml
 
   rust:
@@ -49,7 +71,7 @@ jobs:
       TARGET: ${{ matrix.target }}
       ASSETS: ${{ matrix.assets }}
       EXE: target/${{ matrix.target }}/release/wirebond${{ startsWith(matrix.os, 'windows') && '.exe' || '' }}
-      WIREBOND_VERSION: ${{ github.ref_name }}
+      WIREBOND_VERSION: ${{ inputs.tag || github.ref_name }} # the tag pushed or given; else the branch
       WIREBOND_COMMIT: ${{ github.sha }}
       CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER: rust-lld
       # The C runtime linked in, so the .exe needs no Visual C++ redistributable on the device.
@@ -83,9 +105,9 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [checks, system, rust]
+    needs: [tag, checks, system, rust]
     if: >-
-      always() && github.event_name == 'push' && needs.checks.result == 'success' &&
+      always() && (github.event_name == 'push' || inputs.tag != '') && needs.checks.result == 'success' &&
       needs.rust.result == 'success' && needs.system.result == 'success' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
@@ -109,4 +131,13 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/wirebond-* dist/SHA256SUMS --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # A pushed tag exists already. A manual publish makes its tag here, at the commit it built,
+          # and its notes say which checks it passed.
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            how=(--verify-tag)
+          else
+            how=(--target "$GITHUB_SHA" --notes "Published from a manual run: ci.yml's checks and system.yml passed; netsim's full acceptance set, which gates a pushed tag, was not run.")
+          fi
+          gh release create "$TAG" dist/wirebond-* dist/SHA256SUMS "${how[@]}" --generate-notes --repo "$GITHUB_REPOSITORY"
