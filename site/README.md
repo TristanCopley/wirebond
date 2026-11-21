@@ -8,8 +8,8 @@ for [README.md](../README.md), `/docs/spec` for [SPEC.md](../SPEC.md)). It is Sv
 npm ci
 npm run check                              # svelte-check: types and Svelte's a11y rules, warnings fail
 npm run build                              # writes build/
-npm test                                   # Playwright against build/, served by vite preview
-PW_CHROMIUM=/path/to/chrome npm test       # with a Chromium other than Playwright's own
+npm test                                   # Playwright against build/ as it stands: build first
+PW_CHROMIUM=/opt/pw-browsers/chromium npm test   # with a Chromium other than Playwright's own
 ```
 
 Node 22.17 or later. `npm run dev` serves it with reloads while you edit. CI
@@ -17,27 +17,36 @@ Node 22.17 or later. `npm run dev` serves it with reloads while you edit. CI
 static host. Pages are written as `download.html` and so on, which most hosts serve at `/download`.
 
 **One source of truth.** The site holds no copy of README.md or SPEC.md. `src/lib/server/markdown.ts`
-imports both from the repository root when the site is built and renders them; the landing page
-quotes README's opening and its promise, and the download page takes the install commands and
-"Build and test" from README the same way. Headings get GitHub's anchors, so `#19-cli` points at
-the same section here as on GitHub; links to README.md and SPEC.md stay on the site, links to any
-other file go to it on GitHub, and every `§N` becomes a link to that SPEC section. The build fails
-if any in-page link points at a heading that does not exist. Everything else written on the pages
-is taken from those two files; the site claims nothing they do not say.
+imports both from the repository root when the site is built and renders them. The landing page
+renders README's opening paragraphs (its status line among them), "Modes" and the promise; the
+download page renders README's "Install" (installers, requirements, "Without the installer") and
+"Build and test" whole. What the pages write themselves is glue: headings, links, the release note,
+and the asset table, whose names come from SPEC §22.1. Headings get GitHub's anchors, so `#19-cli`
+points at the same section here as on GitHub; links to README.md and SPEC.md stay on the site,
+links to any other file go to it on GitHub (at the commit CI builds, `GITHUB_SHA`, else `main`),
+and every `§N` becomes a link to that SPEC section. The build fails if any in-page link points at
+a heading that does not exist.
 
 **The release.** The download page asks GitHub's API for the latest release while it is built and
 says in the build log what it found: a release, none (404), or no answer (no network, a timeout, a
-rate limit). It reads the same for the last two, "no release has been published yet", so the build
-needs no network. In the browser it asks once more, so a release published after the build still
+rate limit). It reads the same for the last two, "no release had been published when this page was
+built", with the date and a link to GitHub's releases, so the build needs no network. With
+`GITHUB_TOKEN` set (CI sets it) the build sends it, since a shared build machine often has used up
+GitHub's anonymous limit. In the browser it asks once more, so a release published after the build still
 shows; that request to `api.github.com` is the only one any page makes beyond the site itself, and
 the other pages ship no JavaScript at all. A content security policy written into each page
-enforces that. No cookies, no analytics, no fonts from elsewhere.
+enforces that; it allows inline style attributes (`style-src-attr`), which SvelteKit's route
+announcer needs, and nothing else inline. No cookies, no analytics, no fonts from elsewhere.
+Prerendering also writes a `__data.json` beside each page; only the download page reads its own,
+and the others are dead weight on the host, accepted rather than restructure the loads.
 
 **Why these choices.** marked renders the Markdown: one small package with no dependencies of its
 own, GitHub-flavoured tables built in, and a renderer that is easy to bend (anchors, scrolling code
 and tables, `§` links); markdown-it needs plugins for the same, and remark/rehype is a dozen
 packages. There is no syntax highlighting: it would add a dependency and the code blocks are short
-shell lines. There is no theme toggle: the site follows the system's light or dark setting, which
+shell lines. Code blocks and tables scroll sideways inside themselves and carry no `tabindex`: current browsers
+let the keyboard scroll them anyway, and a tab stop on every block would cost more than it gives.
+There is no theme toggle: the site follows the system's light or dark setting, which
 needs no script and no stored choice. The other packages are SvelteKit itself (`@sveltejs/kit`,
 its Vite plugin, `adapter-static`, `vite`, `svelte`), TypeScript, `svelte-check`, and
 `@playwright/test` for the smoke test, all development dependencies of a site that ships none.

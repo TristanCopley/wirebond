@@ -47,16 +47,24 @@ for (const { path, heading } of ROUTES) {
 	});
 }
 
+const NONE = 'No release had been published when this page was built';
+
 test('the download page says no release has been published', async ({ page }) => {
-	await page.goto('/download');
-	await expect(page.getByText('No release has been published yet.')).toBeVisible();
+	const csp: string[] = [];
+	page.on('console', (m) => {
+		if (m.type() === 'error' && /Content Security Policy/i.test(m.text())) csp.push(m.text());
+	});
+	await page.goto('/download', { waitUntil: 'networkidle' });
+	await expect(page.getByText(NONE)).toBeVisible();
 	await expect(page.locator('pre code.language-sh').first()).toContainText('install.sh | sh');
 	await expect(page.locator('pre code.language-powershell')).toContainText('install.ps1 | iex');
 	for (const asset of [...ASSETS, 'SHA256SUMS']) {
 		await expect(page.getByRole('cell', { name: asset, exact: true })).toBeVisible();
 	}
 	await expect(page.getByRole('heading', { name: 'Build from source' })).toBeVisible();
-	await expect(page.locator('#build ~ pre code')).toContainText('cargo build --release');
+	// Whatever README's build steps are, they are rendered here.
+	await expect(page.locator('#build ~ pre code').first()).not.toBeEmpty();
+	expect(csp).toEqual([]);
 });
 
 test('the download page links a release once GitHub has one', async ({ page }) => {
@@ -77,7 +85,7 @@ test('the download page links a release once GitHub has one', async ({ page }) =
 	);
 	await page.goto('/download');
 	await expect(page.getByRole('link', { name: 'v9.9.9' })).toBeVisible();
-	await expect(page.getByText('No release has been published yet.')).toHaveCount(0);
+	await expect(page.getByText(NONE)).toHaveCount(0);
 	await expect(page.getByRole('link', { name: 'wirebond-Darwin-arm64' })).toHaveAttribute(
 		'href',
 		/download\/v9\.9\.9\/wirebond-Darwin-arm64$/
@@ -91,7 +99,7 @@ test('the spec renders its sections, contents and § links', async ({ page }) =>
 	}
 	await expect(page.locator('h3[id="221-platforms-and-assets"]')).toHaveText('22.1 Platforms and assets');
 	await expect(page.getByRole('navigation', { name: 'Contents' }).locator('a[href="#19-cli"]')).toHaveCount(1);
-	await expect(page.locator('a[href="#23-testing-and-acceptance"]', { hasText: '§23' }).first()).toBeVisible();
+	await expect(page.locator('a[href$="/docs/spec#23-testing-and-acceptance"]', { hasText: '§23' }).first()).toBeVisible();
 	await expect(page.locator('table').first()).toBeVisible();
 });
 
@@ -102,14 +110,20 @@ test('links between README and SPEC stay on the site', async ({ page }) => {
 	await page.goto('/docs');
 	await expect(page.getByRole('link', { name: 'NOTES.md', exact: true })).toHaveAttribute(
 		'href',
-		'https://github.com/TristanCopley/wirebond/blob/main/NOTES.md'
+		/^https:\/\/github\.com\/TristanCopley\/wirebond\/blob\/[^/]+\/NOTES\.md$/
 	);
 });
 
-test('the first Tab reaches the skip link', async ({ page }) => {
+test('the first Tab reaches the skip link, and the text comes before the contents', async ({ page }) => {
 	await page.goto('/docs/spec');
 	await page.keyboard.press('Tab');
 	await expect(page.getByRole('link', { name: 'Skip to content' })).toBeFocused();
+	const order = await page.evaluate(() => {
+		const article = document.querySelector('main article')!;
+		const toc = document.querySelector('main nav.toc')!;
+		return article.compareDocumentPosition(toc) & Node.DOCUMENT_POSITION_FOLLOWING;
+	});
+	expect(order).toBeTruthy();
 });
 
 test('pages other than download request nothing from elsewhere', async ({ page, baseURL }) => {
@@ -129,9 +143,10 @@ test.describe('with JavaScript disabled', () => {
 			await page.goto(path);
 			await expect(page.getByRole('heading', { level: 1 })).toHaveText(heading);
 		}
+		// What the page says about a release depends on GitHub's answer when it was built.
 		await page.goto('/download');
 		await expect(page.locator('pre code.language-sh').first()).toContainText('install.sh | sh');
-		await expect(page.getByRole('cell', { name: 'wirebond-Linux-x86_64', exact: true })).toBeVisible();
+		await expect(page.locator('table.assets code', { hasText: /^wirebond-Linux-x86_64$/ })).toBeVisible();
 		await page.goto('/docs/spec');
 		await expect(page.getByRole('heading', { level: 2, name: '19. CLI' })).toBeVisible();
 	});

@@ -54,11 +54,12 @@ function parse(json: unknown): Release | null {
 	};
 }
 
-export async function latest(fetcher: typeof fetch = fetch, timeoutMs = 8000): Promise<Latest> {
+/** `headers` adds to the request's own; the build passes its token there, never the browser. */
+export async function latest(headers: Record<string, string> = {}, timeoutMs = 8000): Promise<Latest> {
 	let res: Response;
 	try {
-		res = await fetcher(LATEST_API, {
-			headers: { accept: 'application/vnd.github+json' },
+		res = await fetch(LATEST_API, {
+			headers: { accept: 'application/vnd.github+json', ...headers },
 			signal: AbortSignal.timeout(timeoutMs)
 		});
 	} catch (err) {
@@ -67,6 +68,10 @@ export async function latest(fetcher: typeof fetch = fetch, timeoutMs = 8000): P
 		return { state: 'unreachable', reason: `${err instanceof Error ? err.message : String(err)}${cause}` };
 	}
 	if (res.status === 404) return { state: 'none' };
+	const remaining = res.headers.get('x-ratelimit-remaining');
+	if (res.status === 429 || (res.status === 403 && remaining === '0')) {
+		return { state: 'unreachable', reason: `rate limited: HTTP ${res.status}, x-ratelimit-remaining ${remaining}` };
+	}
 	if (!res.ok) return { state: 'unreachable', reason: `HTTP ${res.status}` };
 	try {
 		const release = parse(await res.json());

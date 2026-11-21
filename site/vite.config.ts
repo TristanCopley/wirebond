@@ -14,6 +14,9 @@ export default defineConfig({
 					'default-src': ['self'],
 					'script-src': ['self'],
 					'style-src': ['self'],
+					// SvelteKit's route announcer, mounted on the download page, is hidden with a style
+					// attribute. Attributes only: style elements and scripts stay locked.
+					'style-src-attr': ['unsafe-inline'],
 					'img-src': ['self', 'data:'],
 					'connect-src': ['self', 'https://api.github.com'],
 					'base-uri': ['self'],

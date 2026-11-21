@@ -4,6 +4,8 @@
 	import { latest, PLATFORMS, RELEASES, SUMS, type Release } from '#lib/release.ts';
 	import type { PageProps } from './$types';
 
+	// The install text and the build steps are README's, rendered when the site is built; the
+	// asset table is SPEC §22.1's, linked to the latest release when there is one.
 	let { data }: PageProps = $props();
 
 	// undefined until the browser has asked GitHub itself; then its answer replaces the build's,
@@ -20,6 +22,7 @@
 
 	const size = (bytes: number) => (bytes ? `${(bytes / 1e6).toFixed(1)} MB` : '');
 	const day = (iso: string | null) => (iso ? iso.slice(0, 10) : '');
+	const assets = `${resolve('/docs/spec')}#221-platforms-and-assets`;
 </script>
 
 <svelte:head>
@@ -38,38 +41,27 @@
 			</p>
 		{:else}
 			<div class="note" id="no-release">
-				<p><strong>No release has been published yet.</strong></p>
 				<p>
-					The one-line installers and the downloads below fetch the latest release from GitHub, so
-					they need one to exist. Until then, <a href="#build">build from source</a>.
+					<strong>No release had been published when this page was built
+						(<time datetime={data.built}>{data.built}</time>).</strong>
+					<a href={RELEASES}>GitHub's releases</a> say whether that has changed.
+				</p>
+				<p>
+					The installers download from the latest release, and the executables below are its
+					assets, so both need a release to exist. Until then, <a href="#build">build from source</a>.
 				</p>
 			</div>
 		{/if}
 	</div>
 
-	<h2>One line</h2>
-	<p>On macOS or Linux:</p>
-	<!-- svelte-ignore a11y_no_noninteractive_tabindex: a block that scrolls sideways must be reachable from the keyboard -->
-	<pre tabindex="0"><code class="language-sh">{data.sh}</code></pre>
-	<p>On Windows, in an administrator PowerShell:</p>
-	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-	<pre tabindex="0"><code class="language-powershell">{data.powershell}</code></pre>
-	<p>
-		Either downloads this machine's executable from the latest release, checks it against the
-		release's <code>{SUMS}</code>, and runs <code>wirebond install</code>. Nothing changes on the
-		network until you give the device a role; <a href="{resolve('/docs')}#set-up">set it up</a> next.
-	</p>
+	<h2>Install</h2>
+	{@html data.install}
+	<p>Then <a href="{resolve('/docs')}#set-up">set it up</a>.</p>
 
 	<h2>Executables</h2>
-	<p>
-		Without the installer, download your machine's asset and <code>{SUMS}</code>, check the hash, and
-		run <code>sudo ./wirebond-&lt;OS&gt;-&lt;arch&gt; install</code> (on Windows,
-		<code>.\wirebond-Windows-AMD64.exe install</code> in an administrator PowerShell). The assets are
-		named as <code>uname -sm</code> prints the machine.
-	</p>
-	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-	<div class="scroll" tabindex="0" role="region" aria-label="Table: executables">
-		<table>
+	<p>The daemon's assets (<a href={assets}>SPEC §22.1</a>):</p>
+	<div class="scroll">
+		<table class="assets">
 			<thead>
 				<tr><th scope="col">Machine</th><th scope="col">Asset</th></tr>
 			</thead>
@@ -104,8 +96,7 @@
 		{#if release}
 			Other assets, such as the viewer, are on the <a href={release.url}>release's page</a>.
 		{:else}
-			These are the names every release carries. Releases will be listed on
-			<a href={RELEASES}>GitHub</a>.
+			Releases will be listed on <a href={RELEASES}>GitHub</a>.
 		{/if}
 	</p>
 

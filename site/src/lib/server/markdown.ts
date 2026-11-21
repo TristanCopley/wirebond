@@ -6,10 +6,20 @@ import { resolve } from '$app/paths';
 import readmeSource from '../../../../README.md?raw';
 import specSource from '../../../../SPEC.md?raw';
 
+// The build runs in Node; the site carries no Node types, so this is all it reads.
+declare const process: { env: Record<string, string | undefined> };
+
 const REPO = 'https://github.com/TristanCopley/wirebond';
+// Links to other files on GitHub point at the commit being built when CI names it, else at main.
+const REF = process.env.GITHUB_SHA || 'main';
+
+/** A repository file on GitHub, at the revision this site is built from. */
+export function blob(file: string): string {
+	return `${REPO}/blob/${REF}/${file}`;
+}
 
 export type Heading = { depth: number; text: string; id: string };
-export type Doc = { title: string; html: string; toc: Heading[] };
+export type Doc = { title: string; html: string; toc: Heading[]; url: string };
 
 type Name = 'README.md' | 'SPEC.md';
 const sources: Record<Name, string> = { 'README.md': readmeSource, 'SPEC.md': specSource };
@@ -32,7 +42,7 @@ function escape(text: string): string {
 		.replace(/'/g, '&#39;');
 }
 
-function plain(tokens: Token[]): string {
+export function plain(tokens: Token[]): string {
 	return tokens
 		.map((t) => ('tokens' in t && t.tokens ? plain(t.tokens) : 'text' in t ? t.text : ''))
 		.join('');
@@ -73,13 +83,10 @@ function lex(source: string): Lexed {
 }
 
 // SPEC's numbered sections ("11.4 Liveness") by number, for turning "§11.4" into a link.
-function sections(): Map<string, string> {
-	const map = new Map<string, string>();
-	for (const h of lex(specSource).headings) {
-		const m = /^(\d+(?:\.\d+)*)\.?\s/.exec(h.text);
-		if (m) map.set(m[1], h.id);
-	}
-	return map;
+const refs = new Map<string, string>();
+for (const h of lex(specSource).headings) {
+	const m = /^(\d+(?:\.\d+)*)\.?\s/.exec(h.text);
+	if (m) refs.set(m[1], h.id);
 }
 
 function href(target: string): string {
@@ -88,12 +95,13 @@ function href(target: string): string {
 	const file = new URL(path, 'file:///').pathname.slice(1);
 	const local = page(file);
 	if (local) return hash ? `${local}#${hash}` : local;
-	return `${REPO}/blob/main/${file}${hash ? `#${hash}` : ''}`;
+	return `${blob(file)}${hash ? `#${hash}` : ''}`;
 }
 
-function rewrite(from: Name, tokens: Token[]) {
-	const refs = sections();
-	const spec = from === 'SPEC.md' ? '' : (page('SPEC.md') ?? '');
+// Links get their site or GitHub address, and every "§N" becomes a link to that SPEC section. The
+// links carry the spec page's path even on that page, so a section quoted elsewhere still works.
+function rewrite(tokens: Token[]) {
+	const spec = page('SPEC.md') ?? '';
 	const inLink = new WeakSet<Token>();
 	marked.walkTokens(tokens, (t) => {
 		if (t.type === 'link') {
@@ -114,9 +122,12 @@ function rewrite(from: Name, tokens: Token[]) {
 	});
 }
 
-function renderer(ids: Map<Token, string>) {
-	const base = new Renderer();
-	return {
+// The heading ids of the document being rendered; set for each render, read by the renderer.
+let ids = new Map<Token, string>();
+const base = new Renderer();
+const rendering = new Marked({
+	gfm: true,
+	renderer: {
 		heading(this: Renderer, token: Tokens.Heading) {
 			const id = ids.get(token);
 			const inner = this.parser.parseInline(token.tokens);
@@ -126,20 +137,19 @@ function renderer(ids: Map<Token, string>) {
 			const lang = (token.lang ?? '').split(/\s/)[0];
 			const cls = lang ? ` class="language-${escape(lang)}"` : '';
 			const body = token.escaped ? token.text : escape(token.text);
-			// Focusable so that a long line can be scrolled from the keyboard.
-			return `<pre tabindex="0"><code${cls}>${body}</code></pre>\n`;
+			// No tabindex: browsers let the keyboard scroll an overflowing block without one.
+			return `<pre><code${cls}>${body}</code></pre>\n`;
 		},
 		table(this: Renderer, token: Tokens.Table) {
-			const label = escape(token.header.map((c) => plain(c.tokens)).join(', '));
-			return `<div class="scroll" tabindex="0" role="region" aria-label="Table: ${label}">${base.table.call(this, token)}</div>\n`;
+			return `<div class="scroll">${base.table.call(this, token)}</div>\n`;
 		}
-	};
-}
+	}
+});
 
-function html(from: Name, lexed: Lexed, tokens: Token[]): string {
-	rewrite(from, tokens);
-	const m = new Marked({ gfm: true, renderer: renderer(lexed.ids) });
-	return m.parser(tokens);
+function html(lexed: Lexed, tokens: Token[]): string {
+	rewrite(tokens);
+	ids = lexed.ids;
+	return rendering.parser(tokens);
 }
 
 /** A whole document: its first heading as the title, the rest as HTML, h2 and h3 as contents. */
@@ -150,7 +160,8 @@ export function doc(name: Name): Doc {
 	const body = first?.type === 'heading' ? rest : lexed.tokens;
 	return {
 		title,
-		html: html(name, lexed, body),
+		html: html(lexed, body),
+		url: blob(name),
 		toc: lexed.headings.filter((h) => h.depth === 2 || h.depth === 3)
 	};
 }
@@ -172,22 +183,19 @@ function between(name: Name, heading: string | null): { lexed: Lexed; tokens: To
 /** A section's body as HTML, without its heading. `null` names the text under the title. */
 export function section(name: Name, heading: string | null): string {
 	const { lexed, tokens } = between(name, heading);
-	return html(name, lexed, tokens);
+	return html(lexed, tokens);
 }
 
-/** The first paragraph of a section, as HTML. */
-export function paragraph(name: Name, heading: string | null): string {
+/** The `n`th block of one type in a section ("paragraph", "list"...), as HTML and plain text. */
+export function block(
+	name: Name,
+	heading: string | null,
+	type: Token['type'],
+	n = 0
+): { html: string; text: string } {
 	const { lexed, tokens } = between(name, heading);
-	const p = tokens.find((t) => t.type === 'paragraph');
-	if (!p) throw new Error(`${name}: no paragraph in "${heading}"`);
-	return html(name, lexed, [p]);
-}
-
-/** The code blocks of a section, by language. */
-export function code(name: Name, heading: string): Record<string, string> {
-	const out: Record<string, string> = {};
-	for (const t of between(name, heading).tokens) {
-		if (t.type === 'code' && t.lang && !(t.lang in out)) out[t.lang] = t.text;
-	}
-	return out;
+	const found = tokens.filter((t) => t.type === type)[n];
+	if (!found) throw new Error(`${name}: no ${type} ${n + 1} in "${heading ?? '(title)'}"`);
+	const text = 'tokens' in found && found.tokens ? plain(found.tokens) : 'text' in found ? found.text : '';
+	return { html: html(lexed, [found]), text };
 }

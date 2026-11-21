@@ -190,14 +190,6 @@ footer.site p {
 	margin-top: 0.25rem;
 }
 
-.prose dt {
-	font-weight: 600;
-}
-
-.prose dd {
-	margin: 0 0 0.75rem 1.25rem;
-}
-
 .prose blockquote {
 	margin: 1rem 0;
 	padding: 0 1rem;
@@ -228,10 +220,6 @@ footer.site p {
 
 .note p {
 	margin: 0.25rem 0;
-}
-
-.nots strong {
-	display: block;
 }
 
 .actions {
@@ -318,6 +306,12 @@ td code {
 	white-space: nowrap;
 }
 
+/* The asset names wrap rather than hide past a narrow phone's edge. */
+.assets td code {
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
 details summary {
 	cursor: pointer;
 }
@@ -329,7 +323,7 @@ details summary {
 	margin: 1rem 0;
 }
 
-/* Docs: contents above the text, or beside it on wide screens. */
+/* Docs: the contents after the text on narrow screens, beside it on wide ones. */
 
 .doc {
 	display: grid;
@@ -339,14 +333,15 @@ details summary {
 
 .toc {
 	font-size: 0.9rem;
-	border: 1px solid var(--border);
-	border-radius: 6px;
-	padding: 0.5rem 1rem;
+	border-top: 1px solid var(--border);
+	padding-top: 0.5rem;
 	align-self: start;
+	scroll-margin-top: 1rem;
 }
 
-.toc summary {
-	font-weight: 600;
+.toc h2 {
+	font-size: 1rem;
+	margin: 0.5rem 0;
 }
 
 .toc ol {
@@ -374,13 +369,24 @@ details summary {
 	text-decoration: underline;
 }
 
+.to-toc {
+	margin-left: 0.5rem;
+}
+
 @media (min-width: 64rem) {
 	.doc {
 		grid-template-columns: 16rem minmax(0, 1fr);
 		gap: 2.5rem;
 	}
 
+	.doc > .prose {
+		grid-column: 2;
+		grid-row: 1;
+	}
+
 	.toc {
+		grid-column: 1;
+		grid-row: 1;
 		position: sticky;
 		top: 1rem;
 		max-height: calc(100vh - 2rem);
@@ -388,17 +394,8 @@ details summary {
 		border: 0;
 		padding: 0;
 	}
-}
 
-/* Where the browser can show a closed <details> body, the wide layout keeps the contents open. */
-@supports selector(::details-content) {
-	@media (min-width: 64rem) {
-		.toc summary {
-			display: none;
-		}
-
-		.toc::details-content {
-			content-visibility: visible;
-		}
+	.to-toc {
+		display: none;
 	}
 }

@@ -4,7 +4,7 @@ name: site
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
     paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
   pull_request:
     paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
@@ -35,6 +35,9 @@ jobs:
         run: npm run check
       - name: Build
         run: npm run build
+        env:
+          # Read-only; lifts GitHub's limit on anonymous API calls when the build asks for the release.
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Chromium for Playwright
         run: npx playwright install --with-deps chromium
       - name: Smoke test
