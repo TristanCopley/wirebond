@@ -24,6 +24,12 @@ concurrency:
   group: system-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    # Named, so that it is bash -eo pipefail: the default, bash -e, takes a pipeline's status from
+    # its last command, and the harness below is piped into tee.
+    shell: bash
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -47,11 +53,21 @@ jobs:
       - name: The namespaces and the load tool, with no daemon
         run: sudo env PATH="$PATH" TMPDIR="$TMPDIR" LOAD_BIN="$LOAD_BIN" tests/system/run.sh net
       - name: A7, A8, A9, A10, A12, and the shaped and netem runs against the mesh-lane baseline
+        env:
+          # A12's budget is 25% of one core per daemon on the device (SPEC §23.3). A runner is a few
+          # shared virtual cores, and the harness bills each daemon for the kernel's work along the
+          # whole simulated path, so here the same check guards against a regression: runners
+          # measured 51-53% (client) and 61-63% (anchor) in November 2026.
+          WIREBOND_A12_CPU: '85'
         run: |
+          # The tables go to the job's summary as well; the harness's status is the step's.
           {
             echo '```'
-            sudo env PATH="$PATH" TMPDIR="$TMPDIR" WIREBOND_BIN="$WIREBOND_BIN" LOAD_BIN="$LOAD_BIN" tests/system/run.sh daemons
+            code=0
+            sudo env PATH="$PATH" TMPDIR="$TMPDIR" WIREBOND_BIN="$WIREBOND_BIN" LOAD_BIN="$LOAD_BIN" \
+              WIREBOND_A12_CPU="$WIREBOND_A12_CPU" tests/system/run.sh daemons || code=$?
             echo '```'
+            exit "$code"
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
         run: sudo chmod -R a+rX "$TMPDIR"
