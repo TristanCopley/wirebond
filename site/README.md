@@ -13,8 +13,17 @@ PW_CHROMIUM=/opt/pw-browsers/chromium npm test   # with a Chromium other than Pl
 ```
 
 Node 22.17 or later. `npm run dev` serves it with reloads while you edit. CI
-(`.github/workflows/site.yml`) runs the same four steps and deploys nothing; put `build/` on any
-static host. Pages are written as `download.html` and so on, which most hosts serve at `/download`.
+(`.github/workflows/site.yml`) runs the same steps, once at the root and once with
+`BASE_PATH=/wirebond`, the path GitHub Pages serves a project site at; set `BASE_PATH` the same way
+to build and test for any host that serves the site below its root. Pages are written as
+`download.html` and so on, which most hosts serve at `/download`.
+
+**Publishing.** The site publishes itself to GitHub Pages once the owner turns Pages on: Settings,
+Pages, Source: GitHub Actions. From then on every push to `main` that changes the site, README.md
+or SPEC.md deploys it to <https://tristancopley.github.io/wirebond/>, and running the `site`
+workflow by hand (Actions, site, Run workflow) deploys at once. Until Pages is on, the deploy step
+says so in its log and summary and succeeds. A custom domain is the owner's choice to make, since
+it costs money; none is set up, and the workflow follows one if it is added in the same settings.
 
 **One source of truth.** The site holds no copy of README.md or SPEC.md. `src/lib/server/markdown.ts`
 imports both from the repository root when the site is built and renders them. The landing page
