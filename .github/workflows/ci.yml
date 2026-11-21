@@ -237,10 +237,33 @@ jobs:
           log="$RUNNER_TEMP/test.log"
           grep -E 'has been running for over|^test .*(FAILED|ignored)' "$log" || echo "no test ran over 60 s"
           tail -n 40 "$log" || true
+      # host/real.rs: the OS layer called as the daemon calls it, checked against the OS's own view
+      # of the result (ifconfig, route, scutil and pfctl; Get-NetIPAddress, Get-NetRoute and the
+      # like). The tests are ignored elsewhere: they need root, which sudo gives on macOS and the
+      # runner has on Windows, and they change the machine's network. Each runs in a process of its
+      # own. Those that install capture take this runner's traffic too, its connection to GitHub
+      # included, for the few seconds capture stays: the log pauses there.
+      - name: The OS layer against this runner's own kernel and network, one test at a time
+        timeout-minutes: 15
+        run: |
+          bin=$(cargo test -p wirebond --locked --no-run --message-format=json |
+            jq -r 'select(.executable != null and .target.name == "wirebond") | .executable' | tr -d '\r' | tail -n 1)
+          if [ "$RUNNER_OS" = macOS ]; then as_root='sudo -E'; else as_root=; fi
+          tests=$("$bin" --list --ignored host::real:: | tr -d '\r' | sed -n 's/: test$//p')
+          [ -n "$tests" ] || { echo "$bin lists no host::real test"; exit 1; }
+          failed=
+          for t in $tests; do
+            echo "::group::$t"
+            $as_root "$bin" --ignored --exact "$t" --nocapture || failed="$failed $t"
+            echo "::endgroup::"
+            sleep 3 # the runner's own connections recover from a test's capture
+          done
+          [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
 
   # The installers end to end on each OS (SPEC 2.0 §22.1), against an executable built here and
   # served on 127.0.0.1 as a release folder: install, the daemon answering, `wirebond` on PATH,
-  # rights, a second install changing nothing, and an uninstall that leaves nothing behind.
+  # rights, a second install changing nothing, the service as an anchor on macOS and Windows, and
+  # an uninstall that leaves nothing behind, of the anchor's network setup either.
   installers:
     name: installers ${{ matrix.os }}
     strategy:
@@ -270,7 +293,7 @@ jobs:
             asset=wirebond-$(uname -s)-$(uname -m) && cp target/debug/wirebond "rel/$asset"
           fi
           cd rel && { sha256sum "$asset" 2>/dev/null || shasum -a 256 "$asset"; } > SHA256SUMS && cat SHA256SUMS
-      - name: install.sh, then the daemon, rights, a second install and uninstall
+      - name: install.sh, then the daemon, rights, a second install, the anchor on macOS and uninstall
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -288,7 +311,34 @@ jobs:
           cat err
           test "$code" = 4
           grep -q 'changing wirebond needs sudo' err
+          # macOS: the service as an anchor (SPEC §6, §22.2), with its utun, forwarding, pf's NAT
+          # rules and the DNS relay for real. It stays on, so that the uninstall below is what
+          # stops it: the daemon's teardown on launchd's SIGTERM has to take all of it back.
+          if [ "$RUNNER_OS" = macOS ]; then
+            forwarding=$(sysctl -n net.inet.ip.forwarding)
+            sudo wirebond anchor on
+            sleep 3
+            wirebond status
+            wirebond status --json | tee status.json
+            sudo cat '/Library/Application Support/wirebond/wirebond.log'
+            ifconfig | tee ifaces
+            { sudo pfctl -a com.apple/wirebond -s nat 2>/dev/null || true; } | tee nat
+            jq -e '.role == "anchor" and .anchor.egress != "none" and .anchor.uplink != null' status.json
+            jq -e '[.problems[].code] | index("no_egress") == null and index("missing_tool") == null' status.json
+            grep -q 'inet 10.77.0.1 ' ifaces
+            grep -q 'nat on .* from 10.77.0.0/24' nat
+            test "$(sysctl -n net.inet.ip.forwarding)" = 1
+          fi
           sudo wirebond uninstall
+          if [ "$RUNNER_OS" = macOS ]; then
+            ifconfig | tee ifaces
+            { sudo pfctl -a com.apple/wirebond -s nat 2>/dev/null || true; } | tee nat
+            echo 'show State:/Network/Service/com.wirebond/DNS' | scutil | tee key
+            if grep 'inet 10.77.0.1 ' ifaces; then echo 'the utun remains'; exit 1; fi
+            if grep 'nat on' nat; then echo 'the pf anchor still holds rules'; exit 1; fi
+            if grep ServerAddresses key; then echo 'the DNS key remains'; exit 1; fi
+            test "$(sysctl -n net.inet.ip.forwarding)" = "$forwarding"
+          fi
           hash -r
           if command -v wirebond; then echo 'wirebond is still on PATH'; exit 1; fi
           if pgrep -f 'wirebond run'; then echo 'the daemon still runs'; exit 1; fi
@@ -297,7 +347,7 @@ jobs:
                    "/Library/Application Support/wirebond" /Library/LaunchDaemons/com.wirebond.plist; do
             if [ -e "$p" ] || [ -L "$p" ]; then echo "$p remains"; exit 1; fi
           done
-      - name: install.ps1 in Windows PowerShell 5.1, then the daemon, PATH, a second install and uninstall
+      - name: install.ps1 in Windows PowerShell 5.1, then the daemon, PATH, a second install, the anchor and uninstall
         if: runner.os == 'Windows'
         shell: powershell
         run: |
@@ -315,8 +365,51 @@ jobs:
             if ((& $path) -notcontains $folder) { throw "$folder is not on the machine's PATH" }
             $again = wirebond install
             if ($again -notmatch 'installed already') { throw "a second install: $again" }
+            # The service as an anchor (SPEC §6, §22.2), with its Wintun adapter and Internet
+            # Connection Sharing for real. A server edition, as this runner is, may refuse sharing:
+            # the anchor then keeps 10.77.0.1 on the adapter and status says why under no_egress.
+            $shared = {
+              $m = New-Object -ComObject HNetCfg.HNetShare
+              $on = foreach ($c in $m.EnumEveryConnection) {
+                if ($m.INetSharingConfigurationForINetConnection.Invoke($c).SharingEnabled) { $m.NetConnectionProps.Invoke($c).Name }
+              }
+              "shared connections: $($on -join ', ')"
+            }
+            $before = & $shared
+            wirebond anchor on
+            if ($LASTEXITCODE) { throw "anchor on: exit code $LASTEXITCODE" }
+            Start-Sleep 3
+            wirebond status
+            $json = (wirebond status --json) -join "`n"
+            $json
+            Get-Content (Join-Path $env:ProgramData 'wirebond\wirebond.log')
+            Get-NetIPAddress -InterfaceAlias wirebond | Format-Table InterfaceAlias, IPAddress, PrefixLength, AddressState
+            $st = $json | ConvertFrom-Json
+            if ($st.role -ne 'anchor') { throw "the role is $($st.role)" }
+            $own = if ($st.anchor.egress -eq 'none') { '10.77.0.1' } else { '192.168.137.1' }
+            $has = (Get-NetIPAddress -InterfaceAlias wirebond -AddressFamily IPv4).IPAddress
+            if ($has -notcontains $own) { throw "egress is $($st.anchor.egress), and the adapter has $has, not $own" }
+            $why = ($st.problems | Where-Object code -eq 'no_egress').msg
+            if (($st.anchor.egress -eq 'none') -and -not $why) { throw 'no egress, and status does not say why' }
+            if (($st.anchor.egress -ne 'none') -and $why) { throw "egress, and status says $why" }
+            wirebond anchor off
+            if ($LASTEXITCODE) { throw "anchor off: exit code $LASTEXITCODE" }
+            Start-Sleep 2
+            if (Get-NetAdapter -Name wirebond -ErrorAction SilentlyContinue) { throw 'the adapter outlived anchor off' }
+            # On again, so that the uninstall is what stops it: the daemon's teardown on the
+            # service manager's stop request.
+            wirebond anchor on
+            if ($LASTEXITCODE) { throw "anchor on again: exit code $LASTEXITCODE" }
+            Start-Sleep 3
+            if (-not (Get-NetAdapter -Name wirebond -ErrorAction SilentlyContinue)) { throw 'no adapter after anchor on again' }
             wirebond uninstall
             if ($LASTEXITCODE) { throw "uninstall: exit code $LASTEXITCODE" }
+            if (Get-NetAdapter -Name wirebond -ErrorAction SilentlyContinue) { throw 'the adapter remains' }
+            if (Get-NetRoute | Where-Object InterfaceAlias -eq wirebond) { throw 'a route to the adapter remains' }
+            netsh advfirewall firewall show rule name=wirebond | Out-Null
+            if (-not $LASTEXITCODE) { throw 'the firewall rule remains' }
+            $after = & $shared
+            if ($after -ne $before) { throw "before the anchor, $before; after uninstall, $after" }
             Start-Sleep 6 # the folder goes about 2 s after the CLI has exited
             if (Test-Path $folder) { throw "$folder remains" }
             if (Test-Path (Join-Path $env:ProgramData 'wirebond')) { throw 'the state folder remains' }
