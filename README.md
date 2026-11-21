@@ -36,10 +36,9 @@ as a support needs nothing. From then on the daemon updates itself from GitHub r
 each download's hash and rolling back a version that does not stay healthy; running the installer
 again also updates.
 
-`sudo wirebond uninstall` removes the service, the executable, its PATH entry and its settings.
-Turn the role off first (`wirebond client off`, `anchor off` or `support off`): on macOS and Linux,
-uninstalling while a role is on leaves that role's routing rules, NAT rules or sharing in place
-(NOTES.md, known limitations).
+`sudo wirebond uninstall` stops the daemon, which undoes what its role set up on the network, and
+removes the service, the executable, its PATH entry and its settings. A support's sharing is the
+exception: turn it off first with `wirebond support off`.
 
 Linux needs systemd (the installer stops without it), `ip` and `nft` (the iproute2 and nftables
 packages), `curl` for the daemon's self-update (the installer can download with `wget`; the daemon
