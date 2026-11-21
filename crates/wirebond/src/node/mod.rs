@@ -1421,12 +1421,7 @@ impl Daemon {
             addr(false).and_then(|a| if let IpAddr::V4(a) = a { Some(a) } else { None }),
             addr(true).and_then(|a| if let IpAddr::V6(a) = a { Some(a) } else { None }),
         );
-        let egress = match &self.egress {
-            Some((_, Some(on))) if on.v4 && on.v6 => Egress::Both,
-            Some((_, Some(on))) if on.v4 => Egress::V4,
-            Some((_, Some(on))) if on.v6 => Egress::V6,
-            _ => Egress::None,
-        };
+        let egress = self.egress_kind();
         let bi = match existing {
             Some(i) if self.bonds[i].inst == h.inst => i,
             other => {
@@ -1922,6 +1917,39 @@ impl Daemon {
             self.log(f);
         }
         self.socks_changed();
+        self.terms_changed();
+    }
+
+    /// What an anchor's egress achieved, as `bond ok` and status say it (§3.2, §20.2).
+    fn egress_kind(&self) -> Egress {
+        match self.egress.as_ref().and_then(|(_, on)| on.as_ref()) {
+            Some(on) if on.v4 && on.v6 => Egress::Both,
+            Some(on) if on.v4 => Egress::V4,
+            Some(on) if on.v6 => Egress::V6,
+            _ => Egress::None,
+        }
+    }
+
+    /// A bond gets its terms when it opens (§3.2 step 3): the client's bond addresses and the
+    /// anchor's egress, by which the client chooses its routes and DNS (§5.2). When an anchor's
+    /// egress comes later (its sharing worked on a later try), goes, or moves the bond subnet
+    /// (ICS, §6.2), the bonds open then would keep the old terms until they reconnected: a client
+    /// with bond-only routes beside an anchor that now forwards. The anchor closes them: each
+    /// client removes capture and redials (§17), and the bond that reopens has the new terms.
+    fn terms_changed(&mut self) {
+        let (egress, (_, nets)) = (self.egress_kind(), self.anchor_nets());
+        let mut bi = 0;
+        while bi < self.bonds.len() {
+            let b = &self.bonds[bi];
+            let addrs = [b.addr4.map(IpAddr::V4), b.addr6.map(IpAddr::V6)];
+            let moved = addrs.into_iter().flatten().any(|a| !host::in_ranges(a, &nets));
+            if b.measure || b.session.is_none() || (b.egress == egress && !moved) {
+                bi += 1;
+                continue;
+            }
+            self.log(format!("{}: egress is now {egress:?}: closing the bond to reopen it", b.peer));
+            self.end_bond(bi, true);
+        }
     }
 
     /// Ends every bond, disables egress and closes the TUN device.
@@ -2531,12 +2559,7 @@ impl Daemon {
                 })
                 .collect(),
             uplink: self.egress.as_ref().and_then(|(_, on)| on.as_ref()).and_then(|on| on.uplink.clone()),
-            egress: match self.egress.as_ref().and_then(|(_, on)| on.as_ref()) {
-                Some(on) if on.v4 && on.v6 => Egress::Both,
-                Some(on) if on.v4 => Egress::V4,
-                Some(on) if on.v6 => Egress::V6,
-                _ => Egress::None,
-            },
+            egress: self.egress_kind(),
             allow: self.cfg.allow.clone(),
         });
         let support = self.cfg.support.as_ref().filter(|_| self.cfg.role == Role::Support).map(|s| api::SupportView {

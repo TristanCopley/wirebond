@@ -509,6 +509,7 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 | Captive portal | On link up, and at every link scan while the link is marked captive, the node fetches `http://captive.apple.com/hotspot-detect.html` over that link. Anything but `Success` marks the link captive, and it carries no lane. If the bond is up through another link, the login page would go through the anchor, so status shows `captive_portal <link>`: run `wirebond client off`, log in, then `wirebond client <anchor>`. |
 | Sleep and wake | Wake detection (§11.4): re-punch, fresh estimates, keys kept. |
 | A link appears or vanishes | Rescan within 2 s, re-punch, recompute groups. |
+| An anchor's egress appears, goes or moves the bond subnet while bonds are open | The anchor closes those bonds with `bond close`: each client removes capture and redials, and the bond that reopens carries the new terms (§3.2 step 3). What was flowing to the anchor itself stalls for the second or two that takes. |
 | Mesh down, lanes up | Direct lanes keep carrying the bond, idle or not: the client's probes (§11.1) tell each side the other is there. Keys ratchet by derivation. The channel redials. |
 | Every lane down, channel up for `ALL_LANES_DOWN` (2 s) | Redial the channel, then re-punch. |
 | Only the mesh lane after `MESH_ONLY_AFTER` (30 s) | Problem `mesh_only`: the bond gives no gain over the baseline. |
