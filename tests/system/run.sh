@@ -271,8 +271,11 @@ dir=$1
 shift
 target=$(readlink -f /etc/resolv.conf || echo /etc/resolv.conf)
 case $target in /run/*)
+	# By rename, which cannot find the file there: the start of a daemon and a status poll both
+	# come here.
 	mkdir -p "$dir/run/$(dirname "${target#/run/}")"
-	cp "$dir/resolv.conf" "$dir/run/${target#/run/}" ;;
+	cp "$dir/resolv.conf" "$dir/run/${target#/run/}.$$"
+	mv -f "$dir/run/${target#/run/}.$$" "$dir/run/${target#/run/}" ;;
 esac
 mount --bind "$dir/run" /var/run
 case $target in /run/*) ;; *) mount --bind "$dir/resolv.conf" /etc/resolv.conf ;; esac
