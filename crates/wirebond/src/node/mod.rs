@@ -873,11 +873,22 @@ impl Daemon {
         true
     }
 
+    /// Resolves `name` again, off the loop, when its addresses are older than `every` (10 s while
+    /// it has none). The addresses it had stay until new ones arrive.
+    fn resolve(&mut self, name: &str, now: Mono, every: Mono) {
+        let old = self.resolved.get(name);
+        if old.is_none_or(|(a, at)| now - at >= if a.is_empty() { 10 * SEC } else { every }) {
+            let keep = old.map(|(a, _)| a.clone()).unwrap_or_default();
+            self.resolved.insert(name.to_string(), (keep, now));
+            ctl::resolve(name.to_string(), self.ev_tx.clone(), self.waker.clone());
+        }
+    }
+
     /// The configured STUN servers' addresses (§9.2): literal ones, and names resolved off the
-    /// loop, again every STUN_EVERY (every 10 s while a name resolves to nothing).
+    /// loop, again every STUN_EVERY.
     fn stun_servers(&mut self, now: Mono) -> Vec<SocketAddr> {
         let mut out = Vec::new();
-        for e in &self.cfg.stun {
+        for e in self.cfg.stun.clone() {
             if let Ok(a) = e.parse::<SocketAddr>() {
                 out.push(link::unmap(a));
                 continue;
@@ -886,12 +897,7 @@ impl Daemon {
             let Ok(port) = port.parse::<u16>() else { continue };
             let old = self.resolved.get(name);
             out.extend(old.iter().flat_map(|(a, _)| a.iter().map(|&ip| SocketAddr::new(ip.to_canonical(), port))));
-            let again = old.is_none_or(|(a, at)| now - at >= if a.is_empty() { 10 * SEC } else { STUN_EVERY });
-            if again {
-                let keep = old.map(|(a, _)| a.clone()).unwrap_or_default();
-                self.resolved.insert(name.to_string(), (keep, now));
-                ctl::resolve(name.to_string(), self.ev_tx.clone(), self.waker.clone());
-            }
+            self.resolve(name, now, STUN_EVERY);
         }
         out
     }
@@ -1110,8 +1116,13 @@ impl Daemon {
                 self.links_changed();
             }
             ctl::Ev::Resolved { name, addrs } => {
+                // A lookup that found nothing (the resolver is away) keeps the last answer.
                 let now = self.now();
-                self.resolved.insert(name, (addrs, now));
+                let e = self.resolved.entry(name).or_default();
+                if !addrs.is_empty() {
+                    e.0 = addrs;
+                }
+                e.1 = now;
             }
         }
     }
@@ -1687,11 +1698,8 @@ impl Daemon {
             self.stun_tick(now);
             self.pool.keep(&self.cfg.allow);
             if self.cfg.role == Role::Anchor {
-                for name in self.cfg.allow.iter().filter(|e| e.parse::<IpAddr>().is_err()) {
-                    if self.resolved.get(name).is_none_or(|(_, at)| now - at >= RESOLVE_EVERY) {
-                        self.resolved.insert(name.clone(), (Vec::new(), now));
-                        ctl::resolve(name.clone(), self.ev_tx.clone(), self.waker.clone());
-                    }
+                for name in self.cfg.allow.clone().iter().filter(|e| e.parse::<IpAddr>().is_err()) {
+                    self.resolve(name, now, RESOLVE_EVERY);
                 }
             }
         }

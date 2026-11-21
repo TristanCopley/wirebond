@@ -255,6 +255,24 @@ fn a_device_off_the_allow_list_is_refused() {
     assert!(!ccalls.lock().unwrap().iter().any(|c| c.starts_with("capture on")), "no capture without a bond");
 }
 
+/// §10.1: a name on the allow-list keeps the addresses it resolved to while it is resolved again
+/// and when that lookup finds nothing; only a new answer replaces them.
+#[test]
+fn an_allow_list_name_keeps_its_addresses_while_it_is_resolved_again() {
+    let name = "mac.wirebond.invalid".to_string();
+    let acfg = Config { role: Role::Anchor, allow: vec![name.clone()], ..Config::default() };
+    let (mut a, _, _) = node("xanth", ip(47, 2), ip(47, 20), acfg);
+    let (mac, moved) = (ip(47, 10), ip(47, 11));
+    a.resolved.insert(name.clone(), (vec![mac], -RESOLVE_EVERY));
+    a.step(&mut host::Poll::default(), Duration::from_millis(1)).unwrap();
+    assert!(a.resolved[&name].1 >= 0, "the first scan asks again");
+    assert_eq!(a.allowed(mac), Some(name.clone()), "allowed while the lookup is out");
+    a.event(ctl::Ev::Resolved { name: name.clone(), addrs: Vec::new() });
+    assert_eq!(a.allowed(mac), Some(name.clone()), "allowed after a lookup that found nothing");
+    a.event(ctl::Ev::Resolved { name: name.clone(), addrs: vec![moved] });
+    assert_eq!((a.allowed(moved), a.allowed(mac)), (Some(name), None), "a new answer replaces the old");
+}
+
 #[test]
 fn an_unreachable_anchor_backs_off() {
     let ccfg = Config { role: Role::Client, anchor: Some(ip(34, 20).to_string()), ..Config::default() };
