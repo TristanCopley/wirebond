@@ -928,8 +928,13 @@ mod on_linux {
         let _tun = Tun::open(&tun_config(TUN_NAME, [10, 77, 0, 1], "fd77:b0d::1")).unwrap();
         sh("ip", "-4 route add default dev lo"); // an uplink for it to find
         let on = egress_enable(&egress()).unwrap();
-        let want =
-            EgressOn { v4: true, v6: false, addr4: (Ipv4Addr::new(10, 77, 0, 1), 24), uplink: Some("lo".into()) };
+        let want = EgressOn {
+            v4: true,
+            v6: false,
+            addr4: (Ipv4Addr::new(10, 77, 0, 1), 24),
+            uplink: Some("lo".into()),
+            why: None,
+        };
         assert_eq!(on, want);
         assert_eq!(egress_enable(&egress()).unwrap(), want, "enabled twice");
         let t = sh("nft", "list table inet wirebond");

@@ -125,6 +125,8 @@ pub struct EgressOn {
     pub addr4: Net4,
     /// The interface of the default route, which NAT follows (re-checked every LINK_SCAN).
     pub uplink: Option<String>,
+    /// Why there is no egress, when there is none and the host can say: status's `no_egress`.
+    pub why: Option<String>,
 }
 
 /// A support's sharing (§8): `uplink` shared to `cable` with the OS's own sharing.

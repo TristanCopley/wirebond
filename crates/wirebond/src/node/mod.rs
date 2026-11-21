@@ -233,8 +233,8 @@ pub struct Daemon {
     dns: Option<IpAddr>,
     /// An anchor's egress: what was asked and what it achieved.
     egress: Option<(host::Egress, Option<host::EgressOn>)>,
-    /// Why an anchor has no TUN device, while it has none: it refuses bonds, and opens the device
-    /// again at `anchor_retry`.
+    /// What an anchor lacks and why (its TUN device, egress, the DNS relay): status's `no_egress`.
+    /// Without the device it refuses bonds, and opens it again at `anchor_retry`.
     anchor_fault: Option<String>,
     anchor_retry: Mono,
     /// An anchor's DNS relay (§7).
@@ -1805,18 +1805,24 @@ impl Daemon {
         if let Some(err) = fault {
             // Without the device there is nothing to forward for: egress and the relay wait for it.
             // Said once, not at every retry.
-            let fault = Some(err.to_string());
+            let fault = Some(format!("no TUN device: {err}"));
             if self.anchor_fault != fault {
                 self.host_failed("TUN device", &err);
             }
             (self.anchor_fault, self.egress) = (fault, Some((e, None)));
             return;
         }
-        self.anchor_fault = None;
+        let mut faults = Vec::new();
         let on = match self.plat.egress_enable(&e) {
-            Ok(on) => Some(on),
+            Ok(on) => {
+                if !on.v4 && !on.v6 {
+                    faults.push(format!("no egress: {}", on.why.as_deref().unwrap_or("the host enabled none")));
+                }
+                Some(on)
+            }
             Err(err) => {
                 self.host_failed("egress", &err);
+                faults.push(format!("no egress: {err}"));
                 None
             }
         };
@@ -1828,14 +1834,19 @@ impl Daemon {
         let (own, _) = self.anchor_nets();
         let on = self.egress.as_ref().and_then(|(_, on)| on.as_ref()).map_or((false, false), |on| (on.v4, on.v6));
         let own: Vec<IpAddr> = own.into_iter().filter(|a| if a.is_ipv4() { on.0 } else { on.1 }).collect();
-        match self.plat.upstream_resolver().and_then(|up| dns::Relay::new(&own, 53, up)) {
-            Ok((r, skipped)) => {
-                for (a, e) in skipped {
-                    self.log(format!("DNS relay on {a}: {e}"));
+        // No egress, no relay: the clients keep their own resolvers (§5.2).
+        if !own.is_empty() {
+            match self.plat.upstream_resolver().and_then(|up| dns::Relay::new(&own, 53, up)) {
+                Ok((r, skipped)) => {
+                    faults.extend(skipped.iter().map(|(a, e)| format!("no DNS relay on {a}: {e}")));
+                    self.dns_relay = Some(r);
                 }
-                self.dns_relay = Some(r);
+                Err(e) => faults.push(format!("no DNS relay: {e}")),
             }
-            Err(e) => self.log(format!("DNS relay: {e}")),
+        }
+        self.anchor_fault = (!faults.is_empty()).then(|| faults.join("; "));
+        if let Some(f) = self.anchor_fault.clone() {
+            self.log(f);
         }
         self.socks_changed();
     }
@@ -2125,7 +2136,7 @@ impl Daemon {
     /// loop acts on the new config in `reconcile`.
     fn answer(&mut self, req: Request) -> Reply {
         let before = self.cfg.clone();
-        let support_on = matches!(req, Request::SupportOn { .. });
+        let (support_on, anchor_on) = (matches!(req, Request::SupportOn { .. }), req == Request::AnchorOn);
         let c = &mut self.cfg;
         match req {
             Request::Status { device: None } => {
@@ -2189,7 +2200,15 @@ impl Daemon {
         if let Some(steps) = self.support.refused.clone().filter(|_| support_on) {
             return Reply { changed, ..Reply::fail("failed", steps) };
         }
-        Reply { ok: true, changed, ..Reply::default() }
+        // §6: what the anchor lacks is said where it was turned on. Without its device it serves
+        // nobody, so the command fails; without egress or the relay it still delivers locally.
+        match self.anchor_fault.clone().filter(|_| anchor_on) {
+            Some(why) if self.tun.is_none() => {
+                let message = "the role is saved: the daemon tries the device again every few seconds".into();
+                Reply { changed, message, ..Reply::fail("failed", why) }
+            }
+            why => Reply { ok: true, changed, message: why.unwrap_or_default(), ..Reply::default() },
+        }
     }
 
     /// One session's lanes as status shows them (§20.2).
@@ -2248,6 +2267,9 @@ impl Daemon {
         let mut v = Vec::new();
         if let Some(e) = &self.cfg_bad {
             v.push(p(problem::CONFIG_INVALID, None, e.clone()));
+        }
+        if let Some(why) = self.anchor_fault.as_ref().filter(|_| self.cfg.role == Role::Anchor) {
+            v.push(p(problem::NO_EGRESS, None, why.clone()));
         }
         if self.cfg.role == Role::Client {
             if let Some(e) = &self.unreachable {

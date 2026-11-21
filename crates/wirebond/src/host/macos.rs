@@ -371,7 +371,7 @@ mod v2 {
         }
         fs::write(egress_file(), &state)?;
         let first = Ipv4Addr::from((n4_bits(n4)) + 1);
-        Ok(EgressOn { v4: true, v6: up6, addr4: (first, e.net4.1), uplink: Some(uplink) })
+        Ok(EgressOn { v4: true, v6: up6, addr4: (first, e.net4.1), uplink: Some(uplink), why: None })
     }
 
     fn n4_bits(a: IpAddr) -> u32 {

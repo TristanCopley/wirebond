@@ -1056,16 +1056,18 @@ mod v2 {
     /// hands it to its clients as its own, and what they send there must reach this device.
     pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
         let uplink = uplink();
-        let v4 = match &uplink {
-            Some(up) => ics(up, &e.tun, true).is_ok(),
-            None => false,
+        // Why not, in a line: PowerShell's error starts with the message and goes on with where.
+        let why = match &uplink {
+            Some(up) => ics(up, &e.tun, true).err().map(|e| e.to_string().lines().next().unwrap_or_default().into()),
+            None => Some("no default route".to_string()),
         };
+        let v4 = why.is_none();
         let addr4 = egress_addr4(v4, e.net4);
         if let Some(luid) = luid_of(&e.tun) {
             // There already unless ICS has yet to set it, or took the other when it came or went.
             address(&luid, IpAddr::V4(addr4.0), addr4.1)?;
         }
-        Ok(EgressOn { v4, v6: false, addr4, uplink })
+        Ok(EgressOn { v4, v6: false, addr4, uplink, why })
     }
 
     /// The anchor's own address: ICS's while it shares, else the first of the bond's subnet `net4`.

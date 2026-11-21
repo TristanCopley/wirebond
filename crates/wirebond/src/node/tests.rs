@@ -68,7 +68,13 @@ impl Platform for Fake {
 
     fn egress_enable(&mut self, _: &host::Egress) -> io::Result<host::EgressOn> {
         self.calls.lock().unwrap().push("egress on".into());
-        Ok(host::EgressOn { v4: true, v6: true, addr4: (Ipv4Addr::new(10, 77, 0, 1), 24), uplink: Some("eth0".into()) })
+        Ok(host::EgressOn {
+            v4: true,
+            v6: true,
+            addr4: (Ipv4Addr::new(10, 77, 0, 1), 24),
+            uplink: Some("eth0".into()),
+            why: None,
+        })
     }
 
     fn egress_disable(&mut self, _: &host::Egress) -> io::Result<()> {

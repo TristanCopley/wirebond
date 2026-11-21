@@ -16,8 +16,9 @@ struct Knobs {
     slept: i64,
     dns_local: bool,
     uplink: String,
-    /// Why enabling egress fails, when it does.
+    /// Why enabling egress fails, when it does, and why it enables none, when it does that.
     egress_err: Option<String>,
+    egress_why: Option<String>,
     /// Why the TUN device does not open, when it does not, and how often it opened.
     tun_err: Option<String>,
     tuns: usize,
@@ -82,8 +83,12 @@ impl Platform for Host {
         if let Some(e) = self.knobs.lock().unwrap().egress_err.clone() {
             return Err(io::Error::other(e));
         }
+        let addr4 = (Ipv4Addr::new(10, 77, 0, 1), 24);
+        if let Some(why) = self.knobs.lock().unwrap().egress_why.clone() {
+            return Ok(host::EgressOn { v4: false, v6: false, addr4, uplink: None, why: Some(why) });
+        }
         self.calls.lock().unwrap().push(format!("egress on {uplink}"));
-        Ok(host::EgressOn { v4: true, v6: true, addr4: (Ipv4Addr::new(10, 77, 0, 1), 24), uplink: Some(uplink) })
+        Ok(host::EgressOn { v4: true, v6: true, addr4, uplink: Some(uplink), why: None })
     }
 
     fn egress_disable(&mut self, _: &host::Egress) -> io::Result<()> {
@@ -448,19 +453,29 @@ fn the_anchor_follows_its_uplink() {
 fn an_anchor_started_before_the_network_enables_egress_when_the_uplink_appears() {
     let acfg = Config { role: Role::Anchor, ..Config::default() };
     let mut a = node("xanth", &[("eth0", ip(71, 2))], ip(71, 20), acfg);
-    a.knobs.lock().unwrap().egress_err = Some("no default route".into());
+    a.knobs.lock().unwrap().egress_why = Some("no default route".into());
     run(&mut [&mut a], "anchor on", |n| n[0].d.egress.is_some());
     assert_eq!(a.d.status(false).anchor.unwrap().egress, Egress::None);
     assert!(a.d.tun.is_some() && a.calls().is_empty(), "the device is open; egress was refused");
+    // §20.2: status says why under `no_egress`, and so does `wirebond anchor on`, which succeeds:
+    // the anchor still delivers to itself.
+    let why = |n: &Node| {
+        let st = n.d.status(false);
+        st.problems.iter().find(|p| p.code == problem::NO_EGRESS).map(|p| p.msg.clone()).unwrap_or_default()
+    };
+    assert!(why(&a).contains("no egress: no default route"), "{}", why(&a));
+    let r = a.d.answer(Request::AnchorOn);
+    assert!(r.ok && !r.changed && r.message.contains("no default route"), "{r:?}");
     // The network comes up.
     {
         let mut k = a.knobs.lock().unwrap();
-        (k.default, k.uplink, k.egress_err) = (Some(ip(71, 2)), "eth0".into(), None);
+        (k.default, k.uplink, k.egress_why) = (Some(ip(71, 2)), "eth0".into(), None);
     }
     run(&mut [&mut a], "egress on", |n| n[0].calls().contains(&"egress on eth0".to_string()));
     let st = a.d.status(false).anchor.unwrap();
     assert_eq!((st.egress, st.uplink.as_deref()), (Egress::Both, Some("eth0")));
     assert_eq!(a.knobs.lock().unwrap().tuns, 1, "the device it had is kept");
+    assert!(!why(&a).contains("no egress"), "{}", why(&a));
 }
 
 /// §6.1: an anchor whose TUN device did not open refuses bonds, which would drop every packet, and
@@ -475,6 +490,12 @@ fn an_anchor_without_a_device_refuses_bonds_and_opens_it_again() {
     run(&mut [&mut a, &mut c], "refused", |n| n[1].d.unreachable.as_deref().is_some_and(|u| u.contains("TUN device")));
     assert!(a.d.bonds.is_empty() && a.d.tun.is_none() && c.d.capture.is_none());
     assert!(a.calls().is_empty(), "no egress for a device that is not there: {:?}", a.calls());
+    // §20.2: status says why under `no_egress`; `wirebond anchor on` fails with the reason.
+    let st = a.d.status(false);
+    let p = st.problems.iter().find(|p| p.code == problem::NO_EGRESS).unwrap_or_else(|| panic!("{st:?}"));
+    assert_eq!(p.msg, "no TUN device: the driver is not loaded");
+    let r = a.d.answer(Request::AnchorOn);
+    assert!(!r.ok && r.error.as_ref().is_some_and(|e| e.msg == p.msg), "{r:?}");
     let said = |n: &Node| n.d.logs.iter().filter(|l| l.contains("the driver is not loaded")).count();
     let until = Instant::now() + Duration::from_nanos(ANCHOR_RETRY as u64) + Duration::from_secs(1);
     run(&mut [&mut a, &mut c], "a retry later", |_| Instant::now() >= until);
