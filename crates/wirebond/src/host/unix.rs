@@ -12,9 +12,10 @@ use std::net::IpAddr;
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::prelude::*;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
-use std::{io, ptr};
+use std::{io, ptr, thread};
 
 /// The interfaces as getifaddrs lists them, Wi-Fi as the OS's `wifi` tells it.
 pub(super) fn ifaces() -> io::Result<Vec<Iface>> {
@@ -168,12 +169,41 @@ pub fn terminal() -> bool {
     io::IsTerminal::is_terminal(&io::stdout())
 }
 
-/// Runs the daemon directly: launchd and systemd stop it with SIGTERM, whose default action ends
-/// the process, so `stop` never fires. First it raises the descriptor limit (`raise_nofile`).
+/// Where SIGTERM and SIGINT write a byte while the daemon runs (`run_service`).
+static STOP: AtomicI32 = AtomicI32::new(-1);
+
+/// SIGTERM's and SIGINT's handler: one byte to STOP, and nothing else.
+extern "C" fn on_stop(_: c_int) {
+    // SAFETY: write is async-signal-safe, and STOP is a nonblocking socket open while this is set.
+    unsafe { libc::write(STOP.load(Ordering::Relaxed), [0u8].as_ptr().cast(), 1) };
+}
+
+/// Runs the daemon directly. launchd (`bootout`), systemd (`systemctl stop`) and a terminal stop
+/// it with SIGTERM or SIGINT: `stop` then fires, so the daemon removes capture and closes its
+/// bonds before it exits (§5.4), where the signal's default action would end it at once and leave
+/// the routes and the resolver pointing at a device that is gone. First it raises the descriptor
+/// limit (`raise_nofile`).
 pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Result<()> {
     raise_nofile();
-    let (_never, stop) = mpsc::channel();
-    run(stop)
+    let (tx, stop) = mpsc::channel();
+    let (from, to) = wake_pair()?;
+    STOP.store(to.into_raw_fd(), Ordering::Relaxed);
+    from.set_nonblocking(false)?;
+    thread::spawn(move || {
+        // A signal may interrupt the wait it ends.
+        while from.recv(&mut [0]).is_err_and(|e| e.kind() == io::ErrorKind::Interrupted) {}
+        let _ = tx.send(());
+    });
+    let on = |h: libc::sighandler_t| {
+        for sig in [libc::SIGTERM, libc::SIGINT] {
+            // SAFETY: on_stop only calls write, and SIG_DFL is the default again.
+            unsafe { libc::signal(sig, h) };
+        }
+    };
+    on(on_stop as extern "C" fn(c_int) as libc::sighandler_t);
+    let r = run(stop);
+    on(libc::SIG_DFL);
+    r
 }
 
 /// Raises the soft RLIMIT_NOFILE to the hard limit: launchd starts a job at 256 and systemd a
@@ -309,7 +339,44 @@ pub(super) fn run<S: AsRef<std::ffi::OsStr>>(cmd: &str, args: &[S]) -> io::Resul
     if out.status.success() { Ok(out.stdout) } else { Err(io::Error::other(format!("{c:?}: {}", stderr.trim()))) }
 }
 
-/// The launchd job, daemon or agent: started at load, kept alive, no log paths (§22.2).
+/// macOS's capture routes (§5.3): every address but 0.0.0.0/8 and ::/8, in sixteen routes whose keys
+/// are not all zeros (1.0.0.0/8, 2.0.0.0/7, … 128.0.0.0/1, and the same of IPv6's first byte). The
+/// kernel takes a route keyed 0.0.0.0 or :: for the default whatever its mask (xnu's
+/// rt_primary_default tests the key alone). With 0.0.0.0/1 in place, a lookup scoped to the primary
+/// interface no longer finds the real default: every socket pinned to Wi-Fi with IP_BOUND_IF, the
+/// Wi-Fi lane's and the mesh's own, then gets "network is unreachable" for any destination it has
+/// no cached route to, and the bond degrades at the next Wi-Fi reconnect. sing-tun routes macOS
+/// this way for the same reason.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn capture_routes() -> [(IpAddr, u8); 16] {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    std::array::from_fn(|i| {
+        let (first, bits) = (1u8 << (i % 8), 8 - (i % 8) as u8);
+        match i < 8 {
+            true => (IpAddr::V4(Ipv4Addr::new(first, 0, 0, 0)), bits),
+            false => (IpAddr::V6(Ipv6Addr::new(u16::from(first) << 8, 0, 0, 0, 0, 0, 0, 0)), bits),
+        }
+    })
+}
+
+/// What macOS's `route` did, from how it ended (`ok`) and what it wrote to standard error. Apple's
+/// tool reports a refused route there (another VPN's 0.0.0.0/1, a subnet clash) and may still exit
+/// 0, so any text is a failure, as with scutil; except `done`, which says the work was done already:
+/// "File exists" for an add, "not in table" for a delete.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn route_said(ok: bool, stderr: &str, done: &str) -> io::Result<()> {
+    let said = stderr.trim();
+    match said {
+        _ if said.contains(done) => Ok(()),
+        "" if ok => Ok(()),
+        "" => Err(io::Error::other("route failed without saying why")),
+        _ => Err(io::Error::other(said.to_string())),
+    }
+}
+
+/// The launchd job, daemon or agent: started at load, kept alive, no log paths (§22.2). Its
+/// process type is Interactive: launchd throttles the processor and I/O of a job that names none
+/// (launchd.plist(5)), and this one carries every packet of the stream someone is playing.
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn plist(exe: &Path) -> String {
     let exe = exe.display();
@@ -318,7 +385,8 @@ pub(super) fn plist(exe: &Path) -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>com.wirebond</string>
 <key>ProgramArguments</key><array><string>{exe}</string><string>run</string></array>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>ProcessType</key><string>Interactive</string></dict></plist>
 "#
     )
 }

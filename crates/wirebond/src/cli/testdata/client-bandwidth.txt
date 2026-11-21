@@ -7,9 +7,9 @@ links
 bond to gamepc · bandwidth · up · egress IPv4
   addresses: laptop 192.168.137.12 · gamepc 192.168.137.1
   flows: 12 live, 3 small
-  lane  links             group  state  rtt     dev    loss  rate    share  reorder p50/p99
-  257   wlan0 → Ethernet  1      up     22.5ms  0.8ms  0.1%  42Mbps  36%    0.4/6.5ms
-  513   usb0 → Ethernet   2      up     41.0ms  3.2ms  0.4%  72Mbps  64%    0.0/2.1ms
+  lane  links             group  state  rtt     loss  rate    share  reorder p50/p99
+  257   wlan0 → Ethernet  1      up     22.5ms  0.1%  42Mbps  36%    0.4/6.5ms
+  513   usb0 → Ethernet   2      up     41.0ms  0.4%  72Mbps  64%    0.0/2.1ms
 
 Moonlight: add the host 192.168.137.1 to stream from gamepc
 

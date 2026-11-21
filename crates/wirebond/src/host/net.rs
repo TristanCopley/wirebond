@@ -74,7 +74,8 @@ pub struct TunConfig {
 /// What capture routes into the device (§5.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Routes {
-    /// Everything: the default routes (Linux) or the four /1 routes (macOS, Windows).
+    /// Everything: the default routes (Linux), the four /1 routes (Windows) or the sixteen routes
+    /// that leave out the all-zero keys (macOS).
     All,
     /// Only the bond's subnets: the anchor has no egress (§5.2, `no_egress`).
     BondOnly,
@@ -119,6 +120,8 @@ pub struct EgressOn {
     pub addr4: Net4,
     /// The interface of the default route, which NAT follows (re-checked every LINK_SCAN).
     pub uplink: Option<String>,
+    /// Why there is no egress, when there is none and the host can say: status's `no_egress`.
+    pub why: Option<String>,
 }
 
 /// A support's sharing (§8): `uplink` shared to `cable` with the OS's own sharing.

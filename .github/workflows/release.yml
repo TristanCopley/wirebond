@@ -120,6 +120,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # The attestation: a signing certificate for this run, and somewhere to keep what it signs.
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -135,6 +139,17 @@ jobs:
           have=(*)
           [ "${have[*]}" = "${want[*]}" ] || { echo "the assets are not SPEC §22.1's: ${have[*]}"; exit 1; }
           sha256sum wirebond-* > SHA256SUMS && cat SHA256SUMS
+      # Build provenance (SLSA): which commit and which run of this workflow made each executable,
+      # signed through Sigstore and kept by GitHub. README's command is run here on one of them, so
+      # that a release never goes out with an attestation its readers cannot verify.
+      - name: Attest that this run built the executables
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/wirebond-*
+      - name: The attestation verifies as README says
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify dist/wirebond-Linux-x86_64 --repo "$GITHUB_REPOSITORY"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

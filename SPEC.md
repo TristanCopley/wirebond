@@ -138,7 +138,7 @@ If the anchor has no IPv4 egress and no IPv6 egress, the client routes only the 
 
 **macOS**
 - **Device:** a `utun` interface from a `PF_SYSTEM`/`SYSPROTO_CONTROL` socket connected to `com.apple.net.utun_control`. It needs root.
-- **Routes:** `0.0.0.0/1`, `128.0.0.0/1`, `::/1` and `8000::/1` point to the utun. They cover the default without replacing it. Any more specific route keeps winning, including the local subnets and the mesh's 100.64.0.0/10 and fd7a:115c:a1e0::/48 on Tailscale's own utun.
+- **Routes:** sixteen routes point to the utun: `1.0.0.0/8`, `2.0.0.0/7`, `4.0.0.0/6` and so on to `128.0.0.0/1`, and `100::/8`, `200::/7` and so on to `8000::/1`. They cover everything but `0.0.0.0/8` and `::/8` without replacing the default, and none has an all-zero key. macOS takes a route keyed `0.0.0.0` or `::` for the default whatever its mask: under `0.0.0.0/1`, a socket pinned to the primary interface (the Wi-Fi lane's, the mesh's own) has no route to any destination it has not already reached. Any more specific route keeps winning, including the local subnets and the mesh's 100.64.0.0/10 and fd7a:115c:a1e0::/48 on Tailscale's own utun.
 - **Lane sockets:** pinned with `IP_BOUND_IF` / `IPV6_BOUND_IF`.
 
 **Windows**
@@ -147,7 +147,7 @@ If the anchor has no IPv4 egress and no IPv6 egress, the client routes only the 
 - **Routes:** `0.0.0.0/1`, `128.0.0.0/1`, `::/1` and `8000::/1` through `CreateIpForwardEntry2`.
 - **Lane sockets:** bound to the link's address, with `IP_UNICAST_IF` / `IPV6_UNICAST_IF`.
 
-**The mesh's own packets on macOS and Windows.** tailscaled is expected to bind its underlay sockets to the physical default interface, as its own exit nodes require, so they bypass the `/1` routes. Tailscale's documentation does not state this, so the daemon checks it once the bond is up. If the mesh's traffic appears inside the interface, it removes capture and reports `mesh_captured`.
+**The mesh's own packets on macOS and Windows.** tailscaled is expected to bind its underlay sockets to the physical default interface, as its own exit nodes require, so they bypass the capture routes. Tailscale's documentation does not state this, so the daemon checks it once the bond is up. If the mesh's traffic appears inside the interface, it removes capture and reports `mesh_captured`.
 
 ### 5.4 Installing and removing capture
 
@@ -195,7 +195,7 @@ On Windows, ICS serves one shared adapter at a time. If it is already in use (Mo
 - It relays each answer back to the client that asked.
 - Limits: at most `DNS_INFLIGHT` (256) queries per bond; a query with no answer after `DNS_TIMEOUT` (5 s) is dropped. It caches nothing and reads only the 2-byte query ID.
 
-**The client** points its resolver at the anchor's bond address while bonded:
+**The client** points its resolver at the anchor's bond address while bonded, unless the anchor offers no egress: no relay answers there, so the client leaves its resolver alone.
 
 | OS | How |
 | --- | --- |
@@ -502,8 +502,8 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 | Event | Behaviour |
 | --- | --- |
 | Anchor unreachable at start | No capture; traffic goes direct. Problem `anchor_unreachable`. Redial with backoff from `REDIAL_MIN` (1 s) to `REDIAL_MAX` (30 s). |
-| Bond lost | Every lane down and the channel down for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. Capture returns when a lane validates again; direct connections opened meanwhile break then. |
-| Captive portal | On link up, the node fetches `http://captive.apple.com/hotspot-detect.html` over that link. Anything but `Success` marks the link captive, and it carries no lane. If the bond is up through another link, the login page would go through the anchor, so status shows `captive_portal <link>`: run `wirebond client off`, log in, then `wirebond client <anchor>`. |
+| Bond lost | Every lane down and the channel down for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
+| Captive portal | On link up, and at every link scan while the link is marked captive, the node fetches `http://captive.apple.com/hotspot-detect.html` over that link. Anything but `Success` marks the link captive, and it carries no lane. If the bond is up through another link, the login page would go through the anchor, so status shows `captive_portal <link>`: run `wirebond client off`, log in, then `wirebond client <anchor>`. |
 | Sleep and wake | Wake detection (§11.4): re-punch, fresh estimates, keys kept. |
 | A link appears or vanishes | Rescan within 2 s, re-punch, recompute groups. |
 | Mesh down, lanes up | Direct lanes keep carrying the bond. Keys ratchet by derivation. The channel redials. |
@@ -612,6 +612,8 @@ wirebond run                               the daemon (started by the service ma
 }
 ```
 
+A lane's `links` are the client's link, then the anchor's, each by its label. `dev_ms` is left out until the engine reports it.
+
 What each role sees:
 - **Anchor:** an `anchor` object listing its bonds, each client's addresses, bytes egressed and delivered locally, and its uplink.
 - **Support:** its cable, its uplink and the bytes it carried.
@@ -710,6 +712,8 @@ Every role runs as a system service:
 | Windows | service `wirebond`, plus a firewall rule for its executable | `%ProgramFiles%\wirebond\wirebond.exe`, its folder on the machine's PATH |
 
 - **Requirements checked at install:** Linux needs `ip` and `nft`, and `nmcli` for `support`. macOS needs nothing extra.
+- **Stopping:** a service stop runs the teardown of §3.2: capture is removed, then the bond is closed. On Windows the service manager's stop request starts it; on macOS and Linux, SIGTERM (launchd, systemd), and SIGINT at a terminal.
+- **Log:** the daemon appends its events, each with its time, to `wirebond.log` in the state directory, which holds at most about 256 KB: past that it keeps its newer half.
 - **On PATH:** the link and the PATH entry are made only where nothing of someone else's is; without them the CLI names the executable's full path.
 - **`wirebond uninstall`** removes the service, binary, its link or PATH entry, config, routes, rules, NAT, DNS settings and the Wintun adapter.
 

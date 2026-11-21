@@ -82,7 +82,7 @@ fn usable_fabricated() {
         fab(5, "en5", "up mac", 1500, &["100.64.5.5"]),
         // A public IPv4 address wins over a private one.
         fab(6, "en6", "up mac", 1500, &["10.0.0.6", "198.51.100.6", "198.51.100.7"]),
-        fab(7, "pdp_ip0", "p2p", 1500, &["192.0.0.2", "192.0.0.7"]), // 464XLAT only
+        fab(7, "pdp_ip0", "p2p", 1500, &["192.0.0.2", "192.0.0.7"]), // a modem's own 464XLAT address
         fab(10, "en9", "down mac", 1500, &["192.168.3.3"]),
         fab(11, "ppp0", "p2p", 1492, &["203.0.113.7"]), // point-to-point, no mesh address
         fab(14, "Tailscale", "up", 1280, &["100.101.1.3"]), // Windows: not point-to-point
@@ -103,6 +103,10 @@ fn usable_fabricated() {
         fab(26, "br-3f2a9c1d7e44", "up mac", 1500, &["172.18.0.1"]), // Docker, libvirt
         fab(27, "virbr0", "up mac", 1500, &["192.168.122.1"]),
         fab(28, "eth1", "down mac", 1500, &["192.168.9.9"]), // up without carrier
+        // The iPhone on USB on an IPv6-only carrier: the Mac's own 464XLAT address, and IPv6.
+        fab(31, "en7", "up mac", 1500, &["fe80::31", "192.0.0.2", "2607:fb90::31"]),
+        // An IPv6-mostly Wi-Fi network gives the same address: Wi-Fi, not a phone.
+        fab(32, "en2", "up mac wifi", 1500, &["192.0.0.2", "2001:db8:6::2"]),
     ];
     let (links, mesh) = usable(&ifs, &tailnet(), Some(ip("192.168.1.20")));
     assert_eq!(links, [
@@ -112,11 +116,16 @@ fn usable_fabricated() {
         link(9, "en8", "2607:fb90::1", "iPhone", true),
         link(5, "en5", "100.64.5.5", "Ethernet", false),
         link(6, "en6", "198.51.100.6", "Ethernet", false),
+        link(7, "pdp_ip0", "192.0.0.2", "pdp_ip0", false),
         link(11, "ppp0", "203.0.113.7", "ppp0", false),
         link(22, "en1", "172.20.10.3", "iPhone", true),
         link(23, "vEthernet (External)", "192.168.1.20", "Ethernet", false),
         link(24, "wwan0", "100.70.1.2", "wwan0", false),
         link(24, "wwan0", "2607:fb90::9", "wwan0", false),
+        link(31, "en7", "192.0.0.2", "iPhone", true),
+        link(31, "en7", "2607:fb90::31", "iPhone", true),
+        link(32, "en2", "192.0.0.2", "Wi-Fi", false),
+        link(32, "en2", "2001:db8:6::2", "Wi-Fi", false),
     ]);
     assert_eq!(mesh, [
         link(12, "utun4", "100.101.1.2", "utun4", false),
@@ -223,6 +232,86 @@ fn run_service_never_stops() {
     run_service(run).unwrap();
 }
 
+/// SIGTERM (launchd's bootout, systemctl stop) and SIGINT fire `stop`, so the daemon runs its
+/// shutdown, and when it has returned the signals end the process again. In a child of this test
+/// binary: the handlers are the process's.
+#[cfg(unix)]
+#[test]
+fn run_service_stops_on_sigterm_and_sigint() {
+    if let Some(sig) = std::env::var("WIREBOND_TEST_STOP").ok().and_then(|s| s.parse::<i32>().ok()) {
+        let handler = || {
+            // SAFETY: sigaction with no new action only reads the current one into old.
+            let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) }, 0);
+            old.sa_sigaction
+        };
+        assert_eq!(handler(), libc::SIG_DFL);
+        let stopped = run_service(|stop| {
+            assert_ne!(handler(), libc::SIG_DFL);
+            // SAFETY: kill sends this process the signal, which run_service handles.
+            assert_eq!(unsafe { libc::kill(libc::getpid(), sig) }, 0);
+            stop.recv_timeout(Duration::from_secs(5)).map_err(io::Error::other)
+        });
+        assert!(stopped.is_ok(), "stop fired: {stopped:?}");
+        assert_eq!(handler(), libc::SIG_DFL, "the default again once the daemon has returned");
+        return;
+    }
+    for sig in [libc::SIGTERM, libc::SIGINT] {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "host::tests::run_service_stops_on_sigterm_and_sigint"])
+            .env("WIREBOND_TEST_STOP", sig.to_string())
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&child.stdout);
+        assert!(child.status.success() && out.contains("1 passed"), "signal {sig}: {out}");
+    }
+}
+
+/// macOS's `route` says a refusal on standard error and may exit 0 all the same: any text there
+/// fails, but for the message that the route is there already (add) or gone already (delete).
+#[cfg(unix)]
+#[test]
+fn route_fails_on_what_it_says_whatever_its_exit_code() {
+    let (exists, gone) =
+        ("route: writing to routing socket: File exists\n", "route: writing to routing socket: not in table\n");
+    for ok in [true, false] {
+        assert!(unix::route_said(ok, exists, "File exists").is_ok(), "an add of a route that is there");
+        assert!(unix::route_said(ok, gone, "not in table").is_ok(), "a delete of a route that is gone");
+        // The other one's message is a failure: a delete cannot find the route exists.
+        assert!(
+            unix::route_said(ok, gone, "File exists").is_err() && unix::route_said(ok, exists, "not in table").is_err()
+        );
+        let refused = "route: writing to routing socket: Network is unreachable\n";
+        let e = unix::route_said(ok, refused, "File exists").unwrap_err();
+        assert_eq!(e.to_string(), refused.trim(), "refused, exit code {ok}");
+    }
+    assert!(unix::route_said(true, " \n", "File exists").is_ok(), "silent and exit 0: done");
+    assert!(unix::route_said(false, "", "File exists").is_err(), "silent and a failing exit code");
+}
+
+/// macOS's capture routes: every first byte from 1 to 255 once in each family, the rest of each
+/// key zero, and no key all zeros, which the kernel would take for the default route.
+#[cfg(unix)]
+#[test]
+fn macos_capture_routes_cover_everything_but_the_zero_keys() {
+    let routes = unix::capture_routes();
+    for v4 in [true, false] {
+        let mut covered = Vec::new();
+        for (net, bits) in routes.iter().filter(|(net, _)| net.is_ipv4() == v4) {
+            assert!(!net.is_unspecified() && (1..=8).contains(bits), "{net}/{bits}");
+            let (first, rest) = match net {
+                IpAddr::V4(a) => (a.octets()[0], a.to_bits() & 0x00ff_ffff != 0),
+                IpAddr::V6(a) => (a.octets()[0], a.to_bits() << 8 != 0),
+            };
+            assert!(!rest && first.trailing_zeros() >= u32::from(8 - bits), "{net}/{bits} is a network");
+            covered.extend((0..1u16 << (8 - bits)).map(|i| u16::from(first) + i));
+        }
+        covered.sort_unstable();
+        assert_eq!(covered, (1..=255).collect::<Vec<u16>>(), "IPv4: {v4}");
+    }
+    assert!(routes.contains(&("128.0.0.0".parse().unwrap(), 1)) && routes.contains(&("2000::".parse().unwrap(), 3)));
+}
+
 #[cfg(unix)]
 #[test]
 fn run_service_raises_the_descriptor_limit() {
@@ -302,7 +391,7 @@ fn plist_text() {
     let text = p.split('>').filter_map(|s| s.split('<').next()).map(str::trim);
     let text: Vec<_> = text.filter(|t| !t.is_empty()).collect();
     let want = ["Label", "com.wirebond", "ProgramArguments", "/Users/a/.local/bin/wirebond", "run"];
-    assert_eq!(text, [&want[..], &["RunAtLoad", "KeepAlive"]].concat());
+    assert_eq!(text, [&want[..], &["RunAtLoad", "KeepAlive", "ProcessType", "Interactive"]].concat());
     assert!(p.contains("<key>RunAtLoad</key><true/>") && p.contains("<key>KeepAlive</key><true/>"));
     assert!(p.ends_with("</dict></plist>\n") && !p.contains("Path"), "{p}");
 }
@@ -915,8 +1004,13 @@ mod on_linux {
         let _tun = Tun::open(&tun_config(TUN_NAME, [10, 77, 0, 1], "fd77:b0d::1")).unwrap();
         sh("ip", "-4 route add default dev lo"); // an uplink for it to find
         let on = egress_enable(&egress()).unwrap();
-        let want =
-            EgressOn { v4: true, v6: false, addr4: (Ipv4Addr::new(10, 77, 0, 1), 24), uplink: Some("lo".into()) };
+        let want = EgressOn {
+            v4: true,
+            v6: false,
+            addr4: (Ipv4Addr::new(10, 77, 0, 1), 24),
+            uplink: Some("lo".into()),
+            why: None,
+        };
         assert_eq!(on, want);
         assert_eq!(egress_enable(&egress()).unwrap(), want, "enabled twice");
         let t = sh("nft", "list table inet wirebond");

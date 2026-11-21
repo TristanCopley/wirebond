@@ -525,9 +525,11 @@ fn put<T>(m: &Mutex<Option<T>>, v: Option<T>) -> Option<T> {
 /// Runs the daemon, `wirebond run`. Started by the service manager, it reports running and fires
 /// stop on a stop or shutdown request; otherwise it calls run, and stop never fires. The
 /// manager's dispatcher, which calls back into this process, runs on a thread of its own, so run
-/// stays on the caller's. First it asks for 1 ms timers (`fine_timers`).
+/// stays on the caller's. First it asks for 1 ms timers (`fine_timers`) and the high priority class
+/// (`high_priority`).
 pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Result<()> {
     let _ms = fine_timers();
+    high_priority();
     let ((ready, started), (stop, stopped)) = (mpsc::channel(), mpsc::channel());
     put(&READY, Some(ready.clone()));
     put(&STOP, Some(stop));
@@ -554,6 +556,16 @@ pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Resu
     status(SERVICE_STOPPED, 0, put(&STOP, None).is_some().into());
     let _ = dispatcher.join();
     r
+}
+
+/// Puts this process in the high priority class; whether Windows agreed. An anchor is often the PC
+/// whose game is being streamed: the daemon forwards that stream's packets while the game and the
+/// encoder load the processor, and Sunshine raises its own priority for the same reason. The
+/// daemon's work is a few percent of one core, so it has little to take from anything else.
+pub(super) fn high_priority() -> bool {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, HIGH_PRIORITY_CLASS, SetPriorityClass};
+    // SAFETY: the pseudo handle of this process, and a constant.
+    unsafe { SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS) != 0 }
 }
 
 /// Asks for 1 ms timers until the guard drops or the process exits (review: windows timer). Since
@@ -663,6 +675,7 @@ mod v2 {
     use std::process::Command;
     use std::ptr::{null, null_mut};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use std::{env, mem, slice};
 
@@ -845,7 +858,9 @@ mod v2 {
                 address(&tun.luid, IpAddr::V4(a), bits)?;
             }
             if let Some((a, bits)) = c.addr6 {
-                address(&tun.luid, IpAddr::V6(a), bits)?;
+                // A PC with IPv6 turned off has no IPv6 interface: the device opens on IPv4 alone,
+                // as with the MTU above.
+                let _ = address(&tun.luid, IpAddr::V6(a), bits);
             }
             Ok(tun)
         }
@@ -1061,16 +1076,18 @@ mod v2 {
     /// hands it to its clients as its own, and what they send there must reach this device.
     pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
         let uplink = uplink();
-        let v4 = match &uplink {
-            Some(up) => ics(up, &e.tun, true).is_ok(),
-            None => false,
+        // Why not, in a line: PowerShell's error starts with the message and goes on with where.
+        let why = match &uplink {
+            Some(up) => ics(up, &e.tun, true).err().map(|e| e.to_string().lines().next().unwrap_or_default().into()),
+            None => Some("no default route".to_string()),
         };
+        let v4 = why.is_none();
         let addr4 = egress_addr4(v4, e.net4);
         if let Some(luid) = luid_of(&e.tun) {
             // There already unless ICS has yet to set it, or took the other when it came or went.
             address(&luid, IpAddr::V4(addr4.0), addr4.1)?;
         }
-        Ok(EgressOn { v4, v6: false, addr4, uplink })
+        Ok(EgressOn { v4, v6: false, addr4, uplink, why })
     }
 
     /// The anchor's own address: ICS's while it shares, else the first of the bond's subnet `net4`.
@@ -1105,9 +1122,22 @@ mod v2 {
     /// with `enable` false, ends the sharing whose private side is `private`. ICS serves one shared
     /// pair at a time: a pair of ours moves to the new public side (the uplink changed); one in use by
     /// something else, Mobile Hotspot included, is an error and stays.
+    ///
+    /// This process's first sharing turns the pair off and on (`ics_script`'s `fresh`): Windows
+    /// keeps the pair's flags across a reboot, but shares nothing for an adapter made anew until
+    /// then. Later calls change only what differs.
     fn ics(public: &str, private: &str, enable: bool) -> io::Result<()> {
+        static SHARED: AtomicBool = AtomicBool::new(false);
+        let fresh = enable && !SHARED.load(Ordering::Relaxed);
+        powershell(&ics_script(public, private, enable, fresh))?;
+        SHARED.fetch_or(enable, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// `ics`'s script. `fresh`: sharing the pair already shows is turned off first, then on.
+    pub(super) fn ics_script(public: &str, private: &str, enable: bool, fresh: bool) -> String {
         let q = |s: &str| s.replace('\'', "''");
-        let script = format!(
+        format!(
             "$ErrorActionPreference = 'Stop'\n\
              $m = New-Object -ComObject HNetCfg.HNetShare\n\
              $pub = $null; $priv = $null; $others = @()\n\
@@ -1122,6 +1152,11 @@ mod v2 {
                if (-not $pub -or -not $priv) {{ throw 'no connection named {pub} or {priv}' }}\n\
                if ($others -and -not $ours) {{ throw 'Internet Connection Sharing is in use by another connection' }}\n\
                foreach ($s in $others) {{ $s.DisableSharing() }}\n\
+               if ({fresh}) {{\n\
+                 if ($priv.SharingEnabled) {{ $priv.DisableSharing() }}\n\
+                 if ($pub.SharingEnabled) {{ $pub.DisableSharing() }}\n\
+                 $ours = $false\n\
+               }}\n\
                if (-not ($pub.SharingEnabled -and $pub.SharingConnectionType -eq 0)) {{ $pub.EnableSharing(0) }}\n\
                if (-not $ours) {{ $priv.EnableSharing(1) }}\n\
              }} elseif ($ours) {{\n\
@@ -1132,8 +1167,8 @@ mod v2 {
             pub = q(public),
             priv = q(private),
             enable = if enable { "$true" } else { "$false" },
-        );
-        powershell(&script)
+            fresh = if fresh { "$true" } else { "$false" },
+        )
     }
 
     /// Runs a PowerShell script without a window or a profile; its error becomes ours.

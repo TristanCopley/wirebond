@@ -36,10 +36,9 @@ as a support needs nothing. From then on the daemon updates itself from GitHub r
 each download's hash and rolling back a version that does not stay healthy; running the installer
 again also updates.
 
-`sudo wirebond uninstall` removes the service, the executable, its PATH entry and its settings.
-Turn the role off first (`wirebond client off`, `anchor off` or `support off`): on macOS and Linux,
-uninstalling while a role is on leaves that role's routing rules, NAT rules or sharing in place
-(NOTES.md, known limitations).
+`sudo wirebond uninstall` stops the daemon, which undoes what its role set up on the network, and
+removes the service, the executable, its PATH entry and its settings. A support's sharing is the
+exception: turn it off first with `wirebond support off`.
 
 Linux needs systemd (the installer stops without it), `ip` and `nft` (the iproute2 and nftables
 packages), `curl` for the daemon's self-update (the installer can download with `wget`; the daemon
@@ -64,6 +63,11 @@ with the asset's line in `SHA256SUMS`, then run `.\wirebond-Windows-AMD64.exe in
 are named as `uname -sm` prints the machine: `wirebond-Linux-x86_64`, `-aarch64`, `-armv7l`,
 `-armv6l` (static), `wirebond-Darwin-arm64`, `-x86_64`, `wirebond-Windows-AMD64.exe`, `-ARM64.exe`
 (Wintun inside).
+
+A file a browser downloaded on macOS is also quarantined: `xattr -d com.apple.quarantine
+wirebond-Darwin-arm64` lets it run (the installer's `curl` download is not). From 2.0.0-rc.2 on,
+each executable carries a signed record of the commit and the workflow run that built it, which
+GitHub's CLI checks: `gh attestation verify wirebond-Linux-x86_64 --repo TristanCopley/wirebond`.
 
 | OS | Service | Executable |
 | --- | --- | --- |

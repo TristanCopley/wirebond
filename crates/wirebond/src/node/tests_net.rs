@@ -16,6 +16,17 @@ struct Knobs {
     slept: i64,
     dns_local: bool,
     uplink: String,
+    /// Why enabling egress fails, when it does, and why it enables none, when it does that.
+    egress_err: Option<String>,
+    egress_why: Option<String>,
+    /// Why capture cannot be installed, when it cannot, and how often it was tried.
+    capture_err: Option<String>,
+    captures: usize,
+    /// The label of every link, where the links are not labelled after their interfaces.
+    label: Option<String>,
+    /// Why the TUN device does not open, when it does not, and how often it opened.
+    tun_err: Option<String>,
+    tuns: usize,
 }
 
 /// A fake TUN device: what the test writes for the daemon to read, and what the daemon wrote.
@@ -54,10 +65,20 @@ struct Host {
 
 impl Platform for Host {
     fn open_tun(&mut self, _: &host::TunConfig) -> io::Result<Box<dyn TunDev>> {
+        let mut k = self.knobs.lock().unwrap();
+        if let Some(e) = k.tun_err.clone() {
+            return Err(io::Error::other(e));
+        }
+        k.tuns += 1;
         Ok(Box::new(self.tun.clone()))
     }
 
     fn capture_install(&mut self, _: &host::Capture) -> io::Result<()> {
+        let mut k = self.knobs.lock().unwrap();
+        k.captures += 1;
+        if let Some(e) = k.capture_err.clone() {
+            return Err(io::Error::other(e));
+        }
         self.calls.lock().unwrap().push("capture on".into());
         Ok(())
     }
@@ -69,8 +90,15 @@ impl Platform for Host {
 
     fn egress_enable(&mut self, _: &host::Egress) -> io::Result<host::EgressOn> {
         let uplink = self.knobs.lock().unwrap().uplink.clone();
+        if let Some(e) = self.knobs.lock().unwrap().egress_err.clone() {
+            return Err(io::Error::other(e));
+        }
+        let addr4 = (Ipv4Addr::new(10, 77, 0, 1), 24);
+        if let Some(why) = self.knobs.lock().unwrap().egress_why.clone() {
+            return Ok(host::EgressOn { v4: false, v6: false, addr4, uplink: None, why: Some(why) });
+        }
         self.calls.lock().unwrap().push(format!("egress on {uplink}"));
-        Ok(host::EgressOn { v4: true, v6: true, addr4: (Ipv4Addr::new(10, 77, 0, 1), 24), uplink: Some(uplink) })
+        Ok(host::EgressOn { v4: true, v6: true, addr4, uplink: Some(uplink), why: None })
     }
 
     fn egress_disable(&mut self, _: &host::Egress) -> io::Result<()> {
@@ -82,7 +110,10 @@ impl Platform for Host {
     }
 
     fn links(&mut self, _: &[(IpAddr, u8)]) -> io::Result<(Vec<host::Link>, Vec<host::Link>)> {
-        Ok((self.links.clone(), vec![self.mesh.clone()]))
+        let label = self.knobs.lock().unwrap().label.clone();
+        let relabel =
+            |l: &host::Link| host::Link { label: label.clone().unwrap_or_else(|| l.label.clone()), ..l.clone() };
+        Ok((self.links.iter().map(relabel).collect(), vec![self.mesh.clone()]))
     }
 
     fn bind(&mut self, link: &host::Link, mesh: bool) -> io::Result<UdpSocket> {
@@ -313,7 +344,7 @@ fn a_wake_re_punches_and_asks_stun_again() {
     run(&mut [&mut a, &mut c], "bond up and mapped", |n| {
         n[1].d.bonds.first().is_some_and(|b| b.state == BondState::Up) && asked.load(Ordering::SeqCst) >= 1
     });
-    let wakes = |d: &Daemon| d.logs.iter().filter(|l| l.starts_with("woke from sleep")).count();
+    let wakes = |d: &Daemon| d.logs.iter().filter(|l| l.contains("Z: woke from sleep")).count();
     let (woke, before) = (wakes(&c.d), asked.load(Ordering::SeqCst));
     c.knobs.lock().unwrap().slept = 30 * SEC; // the lid closes for 30 s
     run(&mut [&mut a, &mut c], "the wake", |n| wakes(&n[1].d) > woke);
@@ -393,6 +424,24 @@ fn dns_local_is_raised_when_capture_leaves_dns_alone() {
     assert!(!c.d.status(false).problems.iter().any(|p| p.code == problem::DNS_LOCAL));
 }
 
+/// §5.2, §7: an anchor without egress runs no DNS relay, so a client that keeps its own routes
+/// keeps its own resolver too: capture names no DNS address, and `dns_local` is not raised for it.
+#[test]
+fn a_client_of_an_anchor_without_egress_leaves_dns_alone() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(70, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(70, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(70, 2))], ip(70, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(70, 1))], ip(70, 10), ccfg);
+    a.knobs.lock().unwrap().egress_err = Some("sharing is off".into());
+    c.knobs.lock().unwrap().dns_local = true; // what Linux answers when it was given no address
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    let cap = c.d.capture.clone().unwrap();
+    assert_eq!((cap.routes, cap.dns), (host::Routes::BondOnly, None), "the bond's subnets only, DNS left alone");
+    let st = c.d.status(false);
+    assert!(st.problems.iter().any(|p| p.code == problem::NO_EGRESS), "{st:?}");
+    assert!(st.problems.iter().all(|p| p.code != problem::DNS_LOCAL), "{st:?}");
+}
+
 #[test]
 fn the_anchor_follows_its_uplink() {
     let acfg = Config { role: Role::Anchor, ..Config::default() };
@@ -409,6 +458,137 @@ fn the_anchor_follows_its_uplink() {
     let until = Instant::now() + Duration::from_millis(2500);
     run(&mut [&mut a], "a scan later", |_| Instant::now() >= until);
     assert_eq!(a.calls().len(), 2);
+}
+
+/// §6.2: an anchor started before the network (a service at boot) enables egress when the default
+/// route first appears, not only when a known one moves.
+#[test]
+fn an_anchor_started_before_the_network_enables_egress_when_the_uplink_appears() {
+    let acfg = Config { role: Role::Anchor, ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(71, 2))], ip(71, 20), acfg);
+    a.knobs.lock().unwrap().egress_why = Some("no default route".into());
+    run(&mut [&mut a], "anchor on", |n| n[0].d.egress.is_some());
+    assert_eq!(a.d.status(false).anchor.unwrap().egress, Egress::None);
+    assert!(a.d.tun.is_some() && a.calls().is_empty(), "the device is open; egress was refused");
+    // §20.2: status says why under `no_egress`, and so does `wirebond anchor on`, which succeeds:
+    // the anchor still delivers to itself.
+    let why = |n: &Node| {
+        let st = n.d.status(false);
+        st.problems.iter().find(|p| p.code == problem::NO_EGRESS).map(|p| p.msg.clone()).unwrap_or_default()
+    };
+    assert!(why(&a).contains("no egress: no default route"), "{}", why(&a));
+    let r = a.d.answer(Request::AnchorOn);
+    assert!(r.ok && !r.changed && r.message.contains("no default route"), "{r:?}");
+    // `anchor on` again is the problem's next step: it tries again, here once sharing works.
+    a.knobs.lock().unwrap().egress_why = None;
+    let r = a.d.answer(Request::AnchorOn);
+    assert!(r.ok && !r.message.contains("no egress") && a.calls() == ["egress on "], "{r:?} {:?}", a.calls());
+    assert_eq!(a.d.status(false).anchor.unwrap().egress, Egress::Both);
+    a.knobs.lock().unwrap().egress_why = Some("no default route".into());
+    a.d.anchor_on();
+    assert!(why(&a).contains("no egress: no default route"), "{}", why(&a));
+    // The network comes up.
+    {
+        let mut k = a.knobs.lock().unwrap();
+        (k.default, k.uplink, k.egress_why) = (Some(ip(71, 2)), "eth0".into(), None);
+    }
+    run(&mut [&mut a], "egress on", |n| n[0].calls().contains(&"egress on eth0".to_string()));
+    let st = a.d.status(false).anchor.unwrap();
+    assert_eq!((st.egress, st.uplink.as_deref()), (Egress::Both, Some("eth0")));
+    assert_eq!(a.knobs.lock().unwrap().tuns, 1, "the device it had is kept");
+    assert_eq!(a.calls().len(), 2, "once by hand above, once when the uplink appeared");
+    assert!(!why(&a).contains("no egress"), "{}", why(&a));
+}
+
+/// §6.1: an anchor whose TUN device did not open refuses bonds, which would drop every packet, and
+/// tries the device again; the client's redial then finds it.
+#[test]
+fn an_anchor_without_a_device_refuses_bonds_and_opens_it_again() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(72, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(72, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(72, 2))], ip(72, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(72, 1))], ip(72, 10), ccfg);
+    a.knobs.lock().unwrap().tun_err = Some("the driver is not loaded".into());
+    run(&mut [&mut a, &mut c], "refused", |n| n[1].d.unreachable.as_deref().is_some_and(|u| u.contains("TUN device")));
+    assert!(a.d.bonds.is_empty() && a.d.tun.is_none() && c.d.capture.is_none());
+    assert!(a.calls().is_empty(), "no egress for a device that is not there: {:?}", a.calls());
+    // §20.2: status says why under `no_egress`; `wirebond anchor on` fails with the reason.
+    let st = a.d.status(false);
+    let p = st.problems.iter().find(|p| p.code == problem::NO_EGRESS).unwrap_or_else(|| panic!("{st:?}"));
+    assert_eq!(p.msg, "no TUN device: the driver is not loaded");
+    let r = a.d.answer(Request::AnchorOn);
+    assert!(!r.ok && r.error.as_ref().is_some_and(|e| e.msg == p.msg), "{r:?}");
+    let said = |n: &Node| n.d.logs.iter().filter(|l| l.contains("the driver is not loaded")).count();
+    let until = Instant::now() + Duration::from_nanos(HOST_RETRY as u64) + Duration::from_secs(1);
+    run(&mut [&mut a, &mut c], "a retry later", |_| Instant::now() >= until);
+    assert_eq!((said(&a), a.d.tun.is_none()), (1, true), "tried again, said once: {:?}", a.d.logs);
+    // The device opens on the next try, and the client's next dial bonds.
+    a.knobs.lock().unwrap().tun_err = None;
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    assert_eq!((a.knobs.lock().unwrap().tuns, a.calls()), (1, vec!["egress on ".to_string()]));
+}
+
+/// §20.2: a lane names the client's link and the anchor's by their labels, as the links tables do,
+/// on both ends in that order, and its first arrivals are the engine's, as a fraction of the bond's.
+#[test]
+fn status_lanes_name_links_by_label_and_count_first_arrivals() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(73, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(73, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(73, 2))], ip(73, 20), acfg);
+    let mut c = node("mac", &[("en0", ip(73, 1))], ip(73, 10), ccfg);
+    (a.knobs.lock().unwrap().label, c.knobs.lock().unwrap().label) = (Some("Ethernet".into()), Some("Wi-Fi".into()));
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    let direct =
+        |n: &Node| n.d.bonds[0].session.as_ref().unwrap().snapshot().lanes.iter().any(|l| l.id != 0 && l.validated);
+    run(&mut [&mut a, &mut c], "a direct lane", |n| direct(n[0]) && direct(n[1]));
+    for i in 0..20u8 {
+        let mut p = udp_to("1.1.1.1:53".parse().unwrap());
+        *p.last_mut().unwrap() = i;
+        c.tun.0.lock().unwrap().0.push_back(p);
+    }
+    run(&mut [&mut a, &mut c], "egress", |n| n[0].tun.0.lock().unwrap().1.len() >= 20);
+    let (cl, al) = (c.d.status(false).bond.unwrap().lanes, a.d.status(false).anchor.unwrap().bonds[0].lanes.clone());
+    let names = |ls: &[api::Lane]| ls.iter().find(|l| l.id != 0).map(|l| l.links.clone());
+    let want = Some(vec!["Wi-Fi".to_string(), "Ethernet".to_string()]);
+    assert_eq!((names(&cl), names(&al)), (want.clone(), want), "the client's link, then the anchor's");
+    // The anchor received every packet: its lanes' first arrivals are fractions that add up.
+    let firsts: Vec<f64> = al.iter().map(|l| l.first_arrivals).collect();
+    assert!(
+        (firsts.iter().sum::<f64>() - 1.0).abs() < 1e-9 && firsts.iter().all(|f| (0.0..=1.0).contains(f)),
+        "{al:?}"
+    );
+    // The client received none: no fraction to show.
+    assert!(cl.iter().all(|l| l.first_arrivals == 0.0), "{cl:?}");
+}
+
+/// A capture the host refuses (a route another VPN owns) is tried again every HOST_RETRY, not at
+/// every look at the lanes; what it did install is removed; the reason is logged once and status
+/// shows it in place of "no lane validated".
+#[test]
+fn a_refused_capture_is_tried_again_at_intervals_and_shown() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(74, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(74, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(74, 2))], ip(74, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(74, 1))], ip(74, 10), ccfg);
+    c.knobs.lock().unwrap().capture_err = Some("route: File exists on utun3".into());
+    run(&mut [&mut a, &mut c], "refused", |n| n[1].d.capture_fault.is_some());
+    // Well past LANES_BLOCKED_AFTER and many looks at the lanes, short of the next try.
+    let until = Instant::now() + Duration::from_nanos((HOST_RETRY - SEC) as u64);
+    run(&mut [&mut a, &mut c], "a while", |_| Instant::now() >= until);
+    let said = c.d.logs.iter().filter(|l| l.contains("File exists on utun3")).count();
+    assert_eq!((c.knobs.lock().unwrap().captures, said), (1, 1), "one try, said once: {:?}", c.d.logs);
+    assert_eq!(c.calls(), vec!["capture off".to_string()], "what a failed install left is removed");
+    let st = c.d.status(false);
+    let p = st.problems.iter().find(|p| p.code == problem::LANES_BLOCKED).unwrap_or_else(|| panic!("{st:?}"));
+    assert_eq!(p.msg, "capture failed (route: File exists on utun3): traffic goes direct");
+    assert!(st.bond.unwrap().lanes.iter().any(|l| l.state == api::LaneState::Up), "the lanes are up");
+    // The other VPN lets go: the next try installs capture, and the bond is up.
+    c.knobs.lock().unwrap().capture_err = None;
+    run(&mut [&mut a, &mut c], "capture", |n| n[1].d.capture.is_some());
+    let st = c.d.status(false);
+    assert_eq!(st.bond.as_ref().unwrap().state, BondState::Up);
+    assert!(st.problems.iter().all(|p| p.code != problem::LANES_BLOCKED), "{st:?}");
+    assert_eq!(c.knobs.lock().unwrap().captures, 2);
 }
 
 #[test]
