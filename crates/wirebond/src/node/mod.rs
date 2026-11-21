@@ -96,7 +96,8 @@ fn rfc3339(secs: u64) -> String {
 /// half, from a line's start. A log that cannot be written is not the daemon's failure.
 fn append_log(dir: &Path, line: &str) {
     let path = dir.join(LOG_FILE);
-    if let Ok(old) = fs::read(&path)
+    if fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX as u64)
+        && let Ok(old) = fs::read(&path)
         && old.len() > LOG_MAX
     {
         let half = old.len() - LOG_MAX / 2;
