@@ -339,6 +339,26 @@ pub(super) fn run<S: AsRef<std::ffi::OsStr>>(cmd: &str, args: &[S]) -> io::Resul
     if out.status.success() { Ok(out.stdout) } else { Err(io::Error::other(format!("{c:?}: {}", stderr.trim()))) }
 }
 
+/// macOS's capture routes (§5.3): every address but 0.0.0.0/8 and ::/8, in sixteen routes whose keys
+/// are not all zeros (1.0.0.0/8, 2.0.0.0/7, … 128.0.0.0/1, and the same of IPv6's first byte). The
+/// kernel takes a route keyed 0.0.0.0 or :: for the default whatever its mask (xnu's
+/// rt_primary_default tests the key alone). With 0.0.0.0/1 in place, a lookup scoped to the primary
+/// interface no longer finds the real default: every socket pinned to Wi-Fi with IP_BOUND_IF, the
+/// Wi-Fi lane's and the mesh's own, then gets "network is unreachable" for any destination it has
+/// no cached route to, and the bond degrades at the next Wi-Fi reconnect. sing-tun routes macOS
+/// this way for the same reason.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn capture_routes() -> [(IpAddr, u8); 16] {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    std::array::from_fn(|i| {
+        let (first, bits) = (1u8 << (i % 8), 8 - (i % 8) as u8);
+        match i < 8 {
+            true => (IpAddr::V4(Ipv4Addr::new(first, 0, 0, 0)), bits),
+            false => (IpAddr::V6(Ipv6Addr::new(u16::from(first) << 8, 0, 0, 0, 0, 0, 0, 0)), bits),
+        }
+    })
+}
+
 /// What macOS's `route` did, from how it ended (`ok`) and what it wrote to standard error. Apple's
 /// tool reports a refused route there (another VPN's 0.0.0.0/1, a subnet clash) and may still exit
 /// 0, so any text is a failure, as with scutil; except `done`, which says the work was done already:

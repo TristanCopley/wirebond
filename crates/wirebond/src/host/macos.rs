@@ -276,13 +276,6 @@ mod v2 {
         super::route_said(out.status.success(), &String::from_utf8_lossy(&out.stderr), done)
     }
 
-    /// The four /1 routes (§5.3): they cover the default without replacing it.
-    fn halves() -> [(IpAddr, u8); 4] {
-        let (v4, v6) =
-            (|b| IpAddr::V4(Ipv4Addr::new(b, 0, 0, 0)), |s| IpAddr::V6(Ipv6Addr::new(s, 0, 0, 0, 0, 0, 0, 0)));
-        [(v4(0), 1), (v4(128), 1), (v6(0), 1), (v6(0x8000), 1)]
-    }
-
     /// Runs scutil with `commands` on its standard input.
     fn scutil(commands: &str) -> io::Result<()> {
         let mut c = Command::new("scutil");
@@ -297,13 +290,13 @@ mod v2 {
         }
     }
 
-    /// 0.0.0.0/1, 128.0.0.0/1, ::/1 and 8000::/1 to the utun, and a dynamic-store DNS service
+    /// The sixteen capture routes (`capture_routes`) to the utun, and a dynamic-store DNS service
     /// through scutil (§5.3, §7). The bond's subnets are on the utun already; the mesh's more
     /// specific routes (100.64.0.0/10 and fd7a:115c:a1e0::/48 on Tailscale's utun) keep winning.
     pub fn capture_install(c: &Capture) -> io::Result<()> {
         if c.routes == Routes::All {
-            for half in halves() {
-                route(true, half, &c.tun)?;
+            for net in super::capture_routes() {
+                route(true, net, &c.tun)?;
             }
         }
         if let Some(dns) = c.dns {
@@ -316,11 +309,11 @@ mod v2 {
         Ok(())
     }
 
-    /// Deletes the four routes and the DNS service: only what capture_install made.
+    /// Deletes the capture routes and the DNS service: only what capture_install made.
     pub fn capture_remove(c: &Capture) -> io::Result<()> {
         let mut r = Ok(());
-        for half in halves() {
-            r = r.and(route(false, half, &c.tun).or_else(|e| if gone(&c.tun) { Ok(()) } else { Err(e) }));
+        for net in super::capture_routes() {
+            r = r.and(route(false, net, &c.tun).or_else(|e| if gone(&c.tun) { Ok(()) } else { Err(e) }));
         }
         r.and(scutil(&format!("remove {DNS_KEY}\nquit\n")))
     }

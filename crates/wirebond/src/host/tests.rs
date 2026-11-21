@@ -280,6 +280,29 @@ fn route_fails_on_what_it_says_whatever_its_exit_code() {
     assert!(unix::route_said(false, "", "File exists").is_err(), "silent and a failing exit code");
 }
 
+/// macOS's capture routes: every first byte from 1 to 255 once in each family, the rest of each
+/// key zero, and no key all zeros, which the kernel would take for the default route.
+#[cfg(unix)]
+#[test]
+fn macos_capture_routes_cover_everything_but_the_zero_keys() {
+    let routes = unix::capture_routes();
+    for v4 in [true, false] {
+        let mut covered = Vec::new();
+        for (net, bits) in routes.iter().filter(|(net, _)| net.is_ipv4() == v4) {
+            assert!(!net.is_unspecified() && (1..=8).contains(bits), "{net}/{bits}");
+            let (first, rest) = match net {
+                IpAddr::V4(a) => (a.octets()[0], a.to_bits() & 0x00ff_ffff != 0),
+                IpAddr::V6(a) => (a.octets()[0], a.to_bits() << 8 != 0),
+            };
+            assert!(!rest && first.trailing_zeros() >= u32::from(8 - bits), "{net}/{bits} is a network");
+            covered.extend((0..1u16 << (8 - bits)).map(|i| u16::from(first) + i));
+        }
+        covered.sort_unstable();
+        assert_eq!(covered, (1..=255).collect::<Vec<u16>>(), "IPv4: {v4}");
+    }
+    assert!(routes.contains(&("128.0.0.0".parse().unwrap(), 1)) && routes.contains(&("2000::".parse().unwrap(), 3)));
+}
+
 #[cfg(unix)]
 #[test]
 fn run_service_raises_the_descriptor_limit() {
