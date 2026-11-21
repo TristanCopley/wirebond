@@ -82,7 +82,7 @@ fn usable_fabricated() {
         fab(5, "en5", "up mac", 1500, &["100.64.5.5"]),
         // A public IPv4 address wins over a private one.
         fab(6, "en6", "up mac", 1500, &["10.0.0.6", "198.51.100.6", "198.51.100.7"]),
-        fab(7, "pdp_ip0", "p2p", 1500, &["192.0.0.2", "192.0.0.7"]), // 464XLAT only
+        fab(7, "pdp_ip0", "p2p", 1500, &["192.0.0.2", "192.0.0.7"]), // a modem's own 464XLAT address
         fab(10, "en9", "down mac", 1500, &["192.168.3.3"]),
         fab(11, "ppp0", "p2p", 1492, &["203.0.113.7"]), // point-to-point, no mesh address
         fab(14, "Tailscale", "up", 1280, &["100.101.1.3"]), // Windows: not point-to-point
@@ -103,6 +103,10 @@ fn usable_fabricated() {
         fab(26, "br-3f2a9c1d7e44", "up mac", 1500, &["172.18.0.1"]), // Docker, libvirt
         fab(27, "virbr0", "up mac", 1500, &["192.168.122.1"]),
         fab(28, "eth1", "down mac", 1500, &["192.168.9.9"]), // up without carrier
+        // The iPhone on USB on an IPv6-only carrier: the Mac's own 464XLAT address, and IPv6.
+        fab(31, "en7", "up mac", 1500, &["fe80::31", "192.0.0.2", "2607:fb90::31"]),
+        // An IPv6-mostly Wi-Fi network gives the same address: Wi-Fi, not a phone.
+        fab(32, "en2", "up mac wifi", 1500, &["192.0.0.2", "2001:db8:6::2"]),
     ];
     let (links, mesh) = usable(&ifs, &tailnet(), Some(ip("192.168.1.20")));
     assert_eq!(links, [
@@ -112,11 +116,16 @@ fn usable_fabricated() {
         link(9, "en8", "2607:fb90::1", "iPhone", true),
         link(5, "en5", "100.64.5.5", "Ethernet", false),
         link(6, "en6", "198.51.100.6", "Ethernet", false),
+        link(7, "pdp_ip0", "192.0.0.2", "pdp_ip0", false),
         link(11, "ppp0", "203.0.113.7", "ppp0", false),
         link(22, "en1", "172.20.10.3", "iPhone", true),
         link(23, "vEthernet (External)", "192.168.1.20", "Ethernet", false),
         link(24, "wwan0", "100.70.1.2", "wwan0", false),
         link(24, "wwan0", "2607:fb90::9", "wwan0", false),
+        link(31, "en7", "192.0.0.2", "iPhone", true),
+        link(31, "en7", "2607:fb90::31", "iPhone", true),
+        link(32, "en2", "192.0.0.2", "Wi-Fi", false),
+        link(32, "en2", "2001:db8:6::2", "Wi-Fi", false),
     ]);
     assert_eq!(mesh, [
         link(12, "utun4", "100.101.1.2", "utun4", false),

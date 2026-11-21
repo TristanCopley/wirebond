@@ -143,10 +143,14 @@ struct Iface {
 const IPHONE: (IpAddr, u8) = (IpAddr::V4(Ipv4Addr::new(172, 20, 10, 0)), 28);
 /// Tailscale's, but a hotel or a carrier may hand it out too.
 const CGNAT: (IpAddr, u8) = (IpAddr::V4(Ipv4Addr::new(100, 64, 0, 0)), 10);
-/// Never a link's address: T-Mobile's 464XLAT address, which no peer can reach, and Teredo's and
-/// 6to4's, which reach peers only through public relays.
-const NEVER: [(IpAddr, u8); 3] = [
-    (IpAddr::V4(Ipv4Addr::new(192, 0, 0, 0)), 29),
+/// 464XLAT's address on the device (RFC 7335): the network behind the link is IPv6 only, and the
+/// device translates its own IPv4. No peer can reach it, but a lane from it goes out through the
+/// carrier's translator like any other behind a NAT. An iPhone on such a carrier (T-Mobile US)
+/// may hand a Mac this, with IPv6, in place of an IPHONE address: left out, the phone had no IPv4
+/// link, and no link at all towards an anchor without IPv6.
+const CLAT: (IpAddr, u8) = (IpAddr::V4(Ipv4Addr::new(192, 0, 0, 0)), 29);
+/// Never a link's address: Teredo's and 6to4's, which reach peers only through public relays.
+const NEVER: [(IpAddr, u8); 2] = [
     (IpAddr::V6(Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0)), 32),
     (IpAddr::V6(Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0)), 16),
 ];
@@ -176,7 +180,10 @@ pub fn links(mesh: &[(IpAddr, u8)]) -> io::Result<(Vec<Link>, Vec<Link>)> {
 fn usable(ifs: &[Iface], mesh: &[(IpAddr, u8)], def: Option<IpAddr>) -> (Vec<Link>, Vec<Link>) {
     let (mut links, mut meshes) = (Vec::new(), Vec::new());
     for ifc in ifs {
-        let metered = ifc.addrs.iter().any(|&a| in_ranges(a, &[IPHONE]));
+        // A phone's hotspot: Apple's subnet, or a CLAT address on a cable (on Wi-Fi it is an
+        // IPv6-mostly network's, and on a point-to-point interface a modem's own).
+        let has = |r| ifc.addrs.iter().any(|&a| in_ranges(a, &[r]));
+        let metered = has(IPHONE) || has(CLAT) && ifc.mac && !ifc.p2p && !ifc.wifi;
         let label = match () {
             _ if metered => "iPhone",
             _ if ifc.wifi => "Wi-Fi",
