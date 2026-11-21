@@ -551,10 +551,10 @@ lanes_until() {
 	done
 }
 
-# a7: the bond down for 10 s (SPEC §23.3 A7, §17). Every path is blocked at once, so every lane is
-# down DOWN_AFTER (2 s) after the block (§11.4: no echo for DOWN_AFTER), and the bond is fully down
-# once the channel is too; fail open (bond_down, capture removed) comes within FAIL_OPEN_AFTER + 1 s
-# of that, and not before FAIL_OPEN_AFTER. The lane states the status shows are recorded beside it
+# a7: the bond down for 10 s (SPEC §23.3 A7, §17). Every path is blocked at once, so no lane has an
+# echo from then on, and the bond is lost once the channel is down too, which comes later (the
+# client closes it when every lane has been down for ALL_LANES_DOWN); fail open (bond_down, capture
+# removed) comes within FAIL_OPEN_AFTER + 1 s of that, and not before FAIL_OPEN_AFTER. The lane states the status shows are recorded beside it
 # (lanes_down_ms: none up or suspect) and in polls.txt. Then traffic goes direct: a new stream
 # reaches the server from the hotel. The paths come back 10 s after the bond went down: capture
 # within 3 s of a lane validating, and a new stream goes through the anchor again. A stream opened
@@ -592,8 +592,7 @@ a7() {
 	done
 	f="\"lanes_down_ms\":$(ms_between "$t0" "${tl:-$now}"),\"chan_down_ms\":$(ms_between "$t0" "${tc:-$now}")"
 	if [ -n "$tc" ]; then
-		td=$((t0 + 2000000000)) # DOWN_AFTER
-		[ "$tc" -le "$td" ] || td=$tc
+		td=$tc
 		f="$f,\"down_ms\":$(ms_between "$t0" "$td")"
 	fi
 	if [ -z "$to" ]; then

@@ -9,13 +9,16 @@
 //!   client only packets for it (§6.3, §10.5 rule 6); bond-to-bond traffic is dropped;
 //! - `pick`'s temporary bond (`measure`, §18) is the exception to one bond per client: it has no
 //!   bond addresses, so it never reaches the TUN device, the internet or capture;
-//! - a lane is down only when the engine reports it down (§17: ALL_LANES_DOWN, fail open), never
-//!   because it is merely suspect; a lane never validated has not come up.
+//! - a lane is down only when the engine reports it down (§17: ALL_LANES_DOWN), never because it
+//!   is merely suspect; a lane never validated has not come up;
+//! - a bond is lost by what the daemon observes, not by a lane's state, which says nothing of the
+//!   path while the bond idles: the channel down and nothing heard from the peer, each for
+//!   FAIL_OPEN_AFTER (§17: fail open, and an anchor freeing a bond).
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use wirebond_core::{LaneStatus, MAX_BONDS, Mode, Mono, Session};
+use wirebond_core::{FAIL_OPEN_AFTER, LaneStatus, MAX_BONDS, Mode, Mono, Session, SessionStatus};
 
 pub use crate::api::{BondState, Egress};
 
@@ -44,8 +47,12 @@ pub struct Bond {
     pub chan: Option<u64>,
     /// When the channel went down (FAIL_OPEN_AFTER); None while it is up.
     pub chan_down: Option<Mono>,
-    /// Since when no lane is up (ALL_LANES_DOWN, FAIL_OPEN_AFTER); None while one is.
+    /// Since when no lane is up (ALL_LANES_DOWN); None while one is.
     pub lanes_down: Option<Mono>,
+    /// When the peer was last heard (`heard`), as of the lifecycle's last look; None if never.
+    pub heard: Option<Mono>,
+    /// A client's, while its channel is down: when it next has its lanes probed (`life`).
+    pub probe_at: Mono,
     /// Since when only the mesh lane is up (MESH_ONLY_AFTER); None otherwise.
     pub mesh_only: Option<Mono>,
     /// A lane validated since the bond opened (LANES_BLOCKED_AFTER).
@@ -81,6 +88,8 @@ impl Bond {
             chan: None,
             chan_down: None,
             lanes_down: Some(now),
+            heard: None,
+            probe_at: 0,
             mesh_only: None,
             validated: false,
             egressed: 0,
@@ -131,6 +140,23 @@ impl Bond {
 /// suspect, dormant or re-punching lane that validated is not down.
 pub fn lane_down(l: &LaneStatus) -> bool {
     !l.validated || l.state == "down"
+}
+
+/// When the peer was last heard, from what each role can observe. A client: the newest echo of
+/// one of its probes on any lane, which shows both directions of a path. An anchor sends no probes
+/// while a bond idles, so it has no echoes then: the newest packet of the client's it authenticated.
+pub fn heard(snap: &SessionStatus, client: bool) -> Option<Mono> {
+    match client {
+        true => snap.lanes.iter().filter_map(|l| l.last_echo).max(),
+        false => snap.last_auth,
+    }
+}
+
+/// §17: whether a bond is lost at `now`: its channel has been down for FAIL_OPEN_AFTER and the
+/// peer was not heard in that time.
+pub fn lost(chan_down: Option<Mono>, heard: Option<Mono>, now: Mono) -> bool {
+    let long = |t: Option<Mono>| t.is_none_or(|t| now - t >= FAIL_OPEN_AFTER);
+    chan_down.is_some() && long(chan_down) && long(heard)
 }
 
 /// Whether lane `l` carries: validated, and up or suspect.
@@ -247,6 +273,23 @@ mod tests {
             assert!(!lane_down(&lane(s, true)), "{s} is not down");
         }
         assert!(lane_carries(&lane("suspect", true)) && !lane_carries(&lane("dormant", true)));
+    }
+
+    /// §17: a bond is lost by the channel and the echoes, whatever the lanes' states: the lanes
+    /// of an idle bond stay dormant, and its idle-probe lane up, long after the anchor has gone.
+    #[test]
+    fn a_bond_is_lost_by_its_channel_and_what_was_heard_not_by_lane_states() {
+        let (s, t) = (wirebond_core::SEC, 100 * wirebond_core::SEC);
+        assert!(lost(Some(t - 5 * s), Some(t - 5 * s), t) && lost(Some(t - 5 * s), None, t));
+        assert!(!lost(None, Some(t - 60 * s), t), "the channel is up");
+        assert!(!lost(Some(t - 4 * s), Some(t - 60 * s), t), "the channel went down under 5 s ago");
+        assert!(!lost(Some(t - 60 * s), Some(t - 4 * s), t), "an echo under 5 s ago");
+        let lane = |state, last_echo| LaneStatus { state, validated: true, last_echo, ..LaneStatus::default() };
+        let lanes = vec![lane("dormant", Some(t - 30 * s)), lane("up", Some(t - 7 * s)), lane("punching", None)];
+        let snap = SessionStatus { lanes, last_auth: Some(t - 6 * s), ..SessionStatus::default() };
+        assert!(!snap.lanes.iter().all(lane_down), "by their states these lanes are not down");
+        assert_eq!((heard(&snap, true), heard(&snap, false)), (Some(t - 7 * s), Some(t - 6 * s)));
+        assert!(lost(Some(t - 5 * s), heard(&snap, true), t));
     }
 
     #[test]

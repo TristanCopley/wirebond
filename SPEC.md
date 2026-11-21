@@ -324,6 +324,7 @@ Overhead is 11 + 6 + 16 = **33 bytes**, plus 28 (IPv4/UDP) or 48 (IPv6/UDP) for 
 | --- | --- |
 | Data flowed within `IDLE_AFTER` (5 s) | every lane, every `PROBE_ACTIVE` (20 ms) |
 | Punching | every candidate pair, every 200 ms, for 5 s |
+| A client's channel down, no data flowing | as punching, round after round, until the channel is back or the bond is lost (§17) |
 | Idle | one probe every `PROBE_IDLE` (25 s) on one direct lane; down after `IDLE_MISSES` (3) misses |
 
 ### 11.2 Probe and echo
@@ -502,11 +503,11 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 | Event | Behaviour |
 | --- | --- |
 | Anchor unreachable at start | No capture; traffic goes direct. Problem `anchor_unreachable`. Redial with backoff from `REDIAL_MIN` (1 s) to `REDIAL_MAX` (30 s). |
-| Bond lost | Every lane down and the channel down for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
+| Bond lost | The channel down and no echo on any lane, each for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. The lanes' states do not decide it: an idle bond's lanes are dormant, never down. While its channel is down a client keeps its lanes probed (§11.1), so an idle bond is judged as a busy one is. An anchor frees a bond whose channel is down and from which no packet came, each for `FAIL_OPEN_AFTER`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
 | Captive portal | On link up, and at every link scan while the link is marked captive, the node fetches `http://captive.apple.com/hotspot-detect.html` over that link. Anything but `Success` marks the link captive, and it carries no lane. If the bond is up through another link, the login page would go through the anchor, so status shows `captive_portal <link>`: run `wirebond client off`, log in, then `wirebond client <anchor>`. |
 | Sleep and wake | Wake detection (§11.4): re-punch, fresh estimates, keys kept. |
 | A link appears or vanishes | Rescan within 2 s, re-punch, recompute groups. |
-| Mesh down, lanes up | Direct lanes keep carrying the bond. Keys ratchet by derivation. The channel redials. |
+| Mesh down, lanes up | Direct lanes keep carrying the bond, idle or not: the client's probes (§11.1) tell each side the other is there. Keys ratchet by derivation. The channel redials. |
 | Every lane down, channel up for `ALL_LANES_DOWN` (2 s) | Redial the channel, then re-punch. |
 | Only the mesh lane after `MESH_ONLY_AFTER` (30 s) | Problem `mesh_only`: the bond gives no gain over the baseline. |
 | No lane validated `LANES_BLOCKED_AFTER` (3 s) after connect | Problem `lanes_blocked`. |

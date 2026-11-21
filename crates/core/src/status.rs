@@ -52,6 +52,7 @@ impl Session {
             barred: now < x.bar_until,
             sock: x.sock,
             peer: x.peer,
+            last_echo: (x.last_echo > 0).then_some(x.last_echo),
             out: LaneOut {
                 id: x.id,
                 role: self.lane_role(l).to_string(),

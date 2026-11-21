@@ -139,7 +139,7 @@ fn explain(p: &Problem, anchor: &str) -> (String, String) {
             format!("check {anchor} is on and on the mesh: wirebond status {anchor}"),
         ),
         problem::BOND_DOWN => (
-            "every lane and the channel are down; traffic goes direct",
+            "the channel is down and no lane has an echo; traffic goes direct",
             "wait: capture returns when a lane validates".into(),
         ),
         problem::CAPTIVE_PORTAL => (
