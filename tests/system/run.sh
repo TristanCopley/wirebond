@@ -770,12 +770,16 @@ perf() {
 	measure "$C" udp --to "$SERVER4:47998" --mbps 30 --size "$FIT4" --duration "$secs" --pids "$p" \
 		--label "$name: UDP 30 Mbit/s to the server" || true
 	measure "$C" tcp --duration "$secs" --to "$SERVER4:47989" --pids "$p" --label "$name: TCP to the server" || true
+	# What the stream gets with no bond at all: the anchor's mesh address is never captured.
+	measure "$C" video --to "$MESH_A:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" \
+		--label "$name: video straight over the mesh, no bond (informative)" || true
 	direct_blocked on "$A"
 	lanes_until "$name" 15 "the baseline: the mesh lane alone" -eq 1 || true
 	measure "$C" video --to "$BOND_A4:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" --pids "$p" \
 		--label "$name: baseline video (mesh lane)" || true
 	base=$(tail -n 1 "$results")
-	# A percentile a run has none of (no frame decodable) counts as endless.
+	# load counts a frame never decodable as endlessly late: a percentile that reaches such frames
+	# is null in the result and endless here.
 	for f in frame_p50_ms frame_p99_ms frame_p999_ms; do
 		jq -en --argjson bond "$bond" --argjson base "$base" --arg f "$f" \
 			'($bond[$f] // infinite) <= ($base[$f] // infinite)' >/dev/null || worse="$worse $f"

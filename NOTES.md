@@ -26,13 +26,17 @@ notes) are gone; their history stays in git.
   shards plus 20% Reed–Solomon parity (Sunshine's default, as netsim models it), each frame a burst
   at its frame time. A frame is decodable once as many shards as it has data shards came back; a
   shard of a later frame purges every earlier incomplete frame and a shard of a passed frame is
-  late, as in Moonlight's RtpVideoQueue. Frame delay is the frame's send to its last needed shard.
+  late, as in Moonlight's RtpVideoQueue. Frame delay is the frame's send to its last needed shard,
+  and its percentiles are over every frame sent: one never decodable is endlessly late, as netsim's
+  A11 counts it, so a baseline that delivers 2 frames of 1,200 has no median to beat.
 - **The echo counts by source address,** which is how the harness tells NAT at the anchor (the
   anchor's uplink address), local delivery (the client's bond address) and forged sources apart.
 - **Checks travel with the results.** Each measurement records its `--check` verdicts on its JSON
   line; `load table` prints and re-evaluates them, and the exit status is the verdict.
 - **The harness's baseline is the bond on its mesh lane alone** (direct lanes dropped at the
-  anchor), the same daemons and traffic: SPEC P1's baseline, and netsim's.
+  anchor), the same daemons and traffic: SPEC P1's baseline, and netsim's. The harness also sends
+  the same video straight to the anchor's mesh address, which is never captured: what the stream
+  gets with no bond at all, reported and not judged.
 - **The mesh rides the hotel,** so the harness shapes the mesh bridge's ports as it shapes the hotel.
 - **Daemons run as installed:** in each namespace, `/var/lib`, `/var/run` and `/usr/local/bin` are
   bound over from the run directory in a private mount namespace, and `/etc/resolv.conf` names the

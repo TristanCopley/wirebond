@@ -7,7 +7,7 @@ use crate::args::{Args, duration};
 use crate::json::{self, Json, obj};
 use crate::report::{self, check, glob, rfc3339, split};
 use crate::stats::{parse_pids, pct, quantiles, stat_ticks, status_rss_kb};
-use crate::udp::{Frames, Stamp, VideoConfig, longest_gap, shards};
+use crate::udp::{Frames, Stamp, VideoConfig, frame_delays, longest_gap, shards};
 
 #[test]
 fn json_writes_and_parses_back() {
@@ -186,6 +186,21 @@ fn frames_assemble_purge_and_reject_late_shards() {
     assert_eq!(f.late, 1);
     f.arrive(9, 60); // beyond the run: ignored
     assert_eq!(f.late, 1);
+}
+
+#[test]
+fn a_frame_never_decodable_is_endlessly_late() {
+    // Four frames sent 10 ms apart; the second and the fourth never became decodable.
+    let (done, starts) = ([Some(12_000_000), None, Some(27_000_000), None], [0, 10_000_000, 20_000_000, 30_000_000]);
+    let mut delays = frame_delays(&done, &starts);
+    assert_eq!(delays, [12.0, f64::INFINITY, 7.0, f64::INFINITY]);
+    // Half the frames arrived, so the median is one of theirs and p99 is endless: null in a result,
+    // which no `<=` check passes.
+    let [p50, p99, ..] = quantiles(&mut delays);
+    assert_eq!((p50, p99), (12.0, f64::INFINITY));
+    assert_eq!(Json::from(p99).to_string(), "null");
+    let flat = obj([("frame_p99_ms", p99.into())]).flatten();
+    assert!(!check(&flat, "frame_p99_ms<=1000").unwrap().0);
 }
 
 #[test]
