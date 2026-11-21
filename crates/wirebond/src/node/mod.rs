@@ -59,6 +59,8 @@ const IDLE_WAIT: Duration = Duration::from_millis(500);
 const LIFE_EVERY: Mono = 20 * MS;
 /// How often an anchor resolves the names on its allow-list again.
 const RESOLVE_EVERY: Mono = 30 * SEC;
+/// How often an anchor whose TUN device did not open tries again.
+const ANCHOR_RETRY: Mono = 5 * SEC;
 /// ICMPv6 unreachables a client writes a second at most (§5.5).
 const ICMP6_RATE: u32 = 100;
 /// Packets read from one source per loop turn at most, so no source starves the others.
@@ -231,6 +233,10 @@ pub struct Daemon {
     dns: Option<IpAddr>,
     /// An anchor's egress: what was asked and what it achieved.
     egress: Option<(host::Egress, Option<host::EgressOn>)>,
+    /// Why an anchor has no TUN device, while it has none: it refuses bonds, and opens the device
+    /// again at `anchor_retry`.
+    anchor_fault: Option<String>,
+    anchor_retry: Mono,
     /// An anchor's DNS relay (§7).
     dns_relay: Option<dns::Relay>,
     /// Allow-list names and the addresses they resolved to, and when.
@@ -488,6 +494,8 @@ impl Daemon {
             capture: None,
             dns: None,
             egress: None,
+            anchor_fault: None,
+            anchor_retry: 0,
             dns_relay: None,
             resolved: HashMap::new(),
             view_waiting: HashMap::new(),
@@ -963,8 +971,9 @@ impl Daemon {
 
     /// The default route (§6.2, §8), re-checked every LINK_SCAN while it is on one of my links:
     /// the link carrying the mesh, whose group the mesh lane takes, and an anchor's uplink, whose
-    /// egress is enabled again when it moves (macOS's pf rules and Windows' ICS name it; Linux's
-    /// rules name no interface, so enabling them again changes nothing there).
+    /// egress is enabled again when it appears (the anchor started before the network) or moves
+    /// (macOS's pf rules and Windows' ICS name it; Linux's rules name no interface, but what they
+    /// achieve follows the default route).
     fn follow_default(&mut self) {
         let Some(a) = self.plat.default_addr() else { return };
         let Some(name) = self.socks.iter().find(|s| s.id != 0 && s.link.addr == a).map(|s| s.link.name.clone()) else {
@@ -974,22 +983,13 @@ impl Daemon {
         if was == Some(a) {
             return;
         }
-        if let Some(was) = was {
-            self.log(format!("default route moved from {was} to {name} {a}"));
+        match was {
+            Some(was) => self.log(format!("default route moved from {was} to {name} {a}")),
+            None => self.log(format!("default route on {name} {a}")),
         }
-        if was.is_some()
-            && self.cfg.role == Role::Anchor
-            && let Some((e, _)) = self.egress.take()
-        {
-            let on = match self.plat.egress_enable(&e) {
-                Ok(on) => Some(on),
-                Err(err) => {
-                    self.host_failed("egress", &err);
-                    None
-                }
-            };
-            self.log(format!("uplink moved: egress enabled again, {:?}", on.as_ref().map(|o| &o.uplink)));
-            self.egress = Some((e, on));
+        // Before the anchor's first `anchor_on` (the daemon's first turn) there is nothing to redo.
+        if self.cfg.role == Role::Anchor && self.egress.is_some() {
+            self.anchor_on();
         }
         self.links_changed();
     }
@@ -1335,6 +1335,11 @@ impl Daemon {
             self.log(format!("{} ({peer}) is not on the allow-list", link::clean(&h.name, link::LABEL_MAX)));
             return self.refuse(id, ErrorCode::NotAllowed, "not on the allow-list");
         };
+        if self.tun.is_none() {
+            // Every packet of the bond would be dropped: the client redials, and by then the
+            // device may have opened (`anchor_on`).
+            return self.refuse(id, ErrorCode::Busy, "the anchor has no TUN device yet");
+        }
         let existing = self.bonds.iter().position(|b| b.peer_addr == peer && !b.measure);
         if existing.is_none() && !bond::room(self.bonds.iter().filter(|b| !b.measure).count()) {
             return self.refuse(id, ErrorCode::TooManyBonds, "MAX_BONDS bonds already");
@@ -1763,8 +1768,8 @@ impl Daemon {
                 self.send_bond(0, &Msg::Mode { mode });
             }
         }
-        // The anchor's TUN device and egress (§6).
-        if role == Role::Anchor && self.egress.is_none() {
+        // The anchor's TUN device and egress (§6): at once, and again while it has no device.
+        if role == Role::Anchor && (self.egress.is_none() || self.tun.is_none() && now >= self.anchor_retry) {
             self.anchor_on();
         } else if role != Role::Anchor && self.egress.is_some() {
             self.anchor_off();
@@ -1772,8 +1777,12 @@ impl Daemon {
         self.support_tick();
     }
 
-    /// Opens the anchor's TUN device with its bond addresses and enables egress (§6).
+    /// Opens the anchor's TUN device with its bond addresses, enables egress (§6) and starts the
+    /// DNS relay (§7). Called again, it keeps the device it has and does the rest anew: when the
+    /// uplink appears or moves, and every ANCHOR_RETRY while the device does not open.
     fn anchor_on(&mut self) {
+        let first = self.egress.is_none();
+        self.anchor_retry = self.now() + ANCHOR_RETRY;
         let net4 = self.cfg.bond_nets().0.and_then(|(a, b)| match network(a, b) {
             IpAddr::V4(n) => Some((n, b)),
             IpAddr::V6(_) => None,
@@ -1787,12 +1796,23 @@ impl Daemon {
         let first6 = net6.map(|(n, b)| (Ipv6Addr::from_bits(n.to_bits() | 1), b));
         let cfg =
             host::TunConfig { name: host::TUN_NAME.into(), mtu: TUN_MTU, addr4: Some((first4, net4.1)), addr6: first6 };
-        match self.plat.open_tun(&cfg) {
-            Ok(t) => self.tun = Some(t),
-            Err(e) => self.host_failed("TUN device", &e),
-        }
+        let fault = match &self.tun {
+            Some(_) => None,
+            None => self.plat.open_tun(&cfg).map(|t| self.tun = Some(t)).err(),
+        };
         let tun = self.tun.as_ref().map_or_else(|| host::TUN_NAME.to_string(), |t| t.name().to_string());
         let e = host::Egress { tun, net4, net6 };
+        if let Some(err) = fault {
+            // Without the device there is nothing to forward for: egress and the relay wait for it.
+            // Said once, not at every retry.
+            let fault = Some(err.to_string());
+            if self.anchor_fault != fault {
+                self.host_failed("TUN device", &err);
+            }
+            (self.anchor_fault, self.egress) = (fault, Some((e, None)));
+            return;
+        }
+        self.anchor_fault = None;
         let on = match self.plat.egress_enable(&e) {
             Ok(on) => Some(on),
             Err(err) => {
@@ -1800,8 +1820,11 @@ impl Daemon {
                 None
             }
         };
-        self.log(format!("anchor on: egress {:?}", on.as_ref().map(|o| (o.v4, o.v6))));
+        let what = if first { "anchor on" } else { "anchor on again" };
+        self.log(format!("{what}: egress {:?}", on.as_ref().map(|o| (o.v4, o.v6, &o.uplink))));
         self.egress = Some((e, on));
+        // The relay listens where there is egress, and asks the uplink's resolver: anew each time.
+        self.dns_relay = None;
         let (own, _) = self.anchor_nets();
         let on = self.egress.as_ref().and_then(|(_, on)| on.as_ref()).map_or((false, false), |on| (on.v4, on.v6));
         let own: Vec<IpAddr> = own.into_iter().filter(|a| if a.is_ipv4() { on.0 } else { on.1 }).collect();

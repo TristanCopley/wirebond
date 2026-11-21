@@ -18,6 +18,9 @@ struct Knobs {
     uplink: String,
     /// Why enabling egress fails, when it does.
     egress_err: Option<String>,
+    /// Why the TUN device does not open, when it does not, and how often it opened.
+    tun_err: Option<String>,
+    tuns: usize,
 }
 
 /// A fake TUN device: what the test writes for the daemon to read, and what the daemon wrote.
@@ -56,6 +59,11 @@ struct Host {
 
 impl Platform for Host {
     fn open_tun(&mut self, _: &host::TunConfig) -> io::Result<Box<dyn TunDev>> {
+        let mut k = self.knobs.lock().unwrap();
+        if let Some(e) = k.tun_err.clone() {
+            return Err(io::Error::other(e));
+        }
+        k.tuns += 1;
         Ok(Box::new(self.tun.clone()))
     }
 
@@ -432,6 +440,49 @@ fn the_anchor_follows_its_uplink() {
     let until = Instant::now() + Duration::from_millis(2500);
     run(&mut [&mut a], "a scan later", |_| Instant::now() >= until);
     assert_eq!(a.calls().len(), 2);
+}
+
+/// §6.2: an anchor started before the network (a service at boot) enables egress when the default
+/// route first appears, not only when a known one moves.
+#[test]
+fn an_anchor_started_before_the_network_enables_egress_when_the_uplink_appears() {
+    let acfg = Config { role: Role::Anchor, ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(71, 2))], ip(71, 20), acfg);
+    a.knobs.lock().unwrap().egress_err = Some("no default route".into());
+    run(&mut [&mut a], "anchor on", |n| n[0].d.egress.is_some());
+    assert_eq!(a.d.status(false).anchor.unwrap().egress, Egress::None);
+    assert!(a.d.tun.is_some() && a.calls().is_empty(), "the device is open; egress was refused");
+    // The network comes up.
+    {
+        let mut k = a.knobs.lock().unwrap();
+        (k.default, k.uplink, k.egress_err) = (Some(ip(71, 2)), "eth0".into(), None);
+    }
+    run(&mut [&mut a], "egress on", |n| n[0].calls().contains(&"egress on eth0".to_string()));
+    let st = a.d.status(false).anchor.unwrap();
+    assert_eq!((st.egress, st.uplink.as_deref()), (Egress::Both, Some("eth0")));
+    assert_eq!(a.knobs.lock().unwrap().tuns, 1, "the device it had is kept");
+}
+
+/// §6.1: an anchor whose TUN device did not open refuses bonds, which would drop every packet, and
+/// tries the device again; the client's redial then finds it.
+#[test]
+fn an_anchor_without_a_device_refuses_bonds_and_opens_it_again() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(72, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(72, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(72, 2))], ip(72, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(72, 1))], ip(72, 10), ccfg);
+    a.knobs.lock().unwrap().tun_err = Some("the driver is not loaded".into());
+    run(&mut [&mut a, &mut c], "refused", |n| n[1].d.unreachable.as_deref().is_some_and(|u| u.contains("TUN device")));
+    assert!(a.d.bonds.is_empty() && a.d.tun.is_none() && c.d.capture.is_none());
+    assert!(a.calls().is_empty(), "no egress for a device that is not there: {:?}", a.calls());
+    let said = |n: &Node| n.d.logs.iter().filter(|l| l.contains("the driver is not loaded")).count();
+    let until = Instant::now() + Duration::from_nanos(ANCHOR_RETRY as u64) + Duration::from_secs(1);
+    run(&mut [&mut a, &mut c], "a retry later", |_| Instant::now() >= until);
+    assert_eq!((said(&a), a.d.tun.is_none()), (1, true), "tried again, said once: {:?}", a.d.logs);
+    // The device opens on the next try, and the client's next dial bonds.
+    a.knobs.lock().unwrap().tun_err = None;
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    assert_eq!((a.knobs.lock().unwrap().tuns, a.calls()), (1, vec!["egress on ".to_string()]));
 }
 
 #[test]
