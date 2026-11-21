@@ -136,6 +136,11 @@ pub fn uninstall(s: Scope) -> io::Result<(bool, String)> {
     let (exe, dir) = s.paths();
     let made = Config::load(&dir).is_ok_and(|c| c.made_bin);
     let (mut changed, note) = os::unregister(s, &exe)?;
+    // What a daemon that was killed, or had no time to stop, left of its routes, rules and
+    // resolver (§5.4), while the state directory still says what to put back. The tests' service
+    // is a fake one, and they leave this device's network alone.
+    #[cfg(not(test))]
+    let _ = os::cleanup_stale();
     if dir.exists() {
         fs::remove_dir_all(&dir)?;
         changed = true;

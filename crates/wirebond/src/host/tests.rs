@@ -236,6 +236,41 @@ fn run_service_never_stops() {
     run_service(run).unwrap();
 }
 
+/// SIGTERM (launchd's bootout, systemctl stop) and SIGINT fire `stop`, so the daemon runs its
+/// shutdown, and when it has returned the signals end the process again. In a child of this test
+/// binary: the handlers are the process's.
+#[cfg(unix)]
+#[test]
+fn run_service_stops_on_sigterm_and_sigint() {
+    if let Some(sig) = std::env::var("WIREBOND_TEST_STOP").ok().and_then(|s| s.parse::<i32>().ok()) {
+        let handler = || {
+            // SAFETY: sigaction with no new action only reads the current one into old.
+            let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) }, 0);
+            old.sa_sigaction
+        };
+        assert_eq!(handler(), libc::SIG_DFL);
+        let stopped = run_service(|stop| {
+            assert_ne!(handler(), libc::SIG_DFL);
+            // SAFETY: kill sends this process the signal, which run_service handles.
+            assert_eq!(unsafe { libc::kill(libc::getpid(), sig) }, 0);
+            stop.recv_timeout(Duration::from_secs(5)).map_err(io::Error::other)
+        });
+        assert!(stopped.is_ok(), "stop fired: {stopped:?}");
+        assert_eq!(handler(), libc::SIG_DFL, "the default again once the daemon has returned");
+        return;
+    }
+    for sig in [libc::SIGTERM, libc::SIGINT] {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "host::tests::run_service_stops_on_sigterm_and_sigint"])
+            .env("WIREBOND_TEST_STOP", sig.to_string())
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&child.stdout);
+        assert!(child.status.success() && out.contains("1 passed"), "signal {sig}: {out}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn run_service_raises_the_descriptor_limit() {

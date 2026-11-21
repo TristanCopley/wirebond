@@ -70,7 +70,7 @@ const BURST: usize = 512;
 const SLEPT: Duration = Duration::from_micros(10);
 
 /// The daemon. `wirebond run` calls it inside host::run_service; `version` is the build's. It
-/// returns when `stop` fires (Windows' service stop; SIGTERM ends the process elsewhere).
+/// returns when `stop` fires (Windows' service stop; SIGTERM and SIGINT elsewhere).
 pub fn run(version: &str, stop: Receiver<()>) -> io::Result<()> {
     let scope = host::need(false);
     let (_exe, dir) = scope.paths();

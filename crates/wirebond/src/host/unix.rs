@@ -12,9 +12,10 @@ use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::prelude::*;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
-use std::{io, ptr};
+use std::{io, ptr, thread};
 
 /// The interfaces as getifaddrs lists them, Wi-Fi as the OS's `wifi` tells it.
 pub(super) fn ifaces() -> io::Result<Vec<Iface>> {
@@ -174,12 +175,41 @@ pub fn admin() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Runs the daemon directly: launchd and systemd stop it with SIGTERM, whose default action ends
-/// the process, so `stop` never fires. First it raises the descriptor limit (`raise_nofile`).
+/// Where SIGTERM and SIGINT write a byte while the daemon runs (`run_service`).
+static STOP: AtomicI32 = AtomicI32::new(-1);
+
+/// SIGTERM's and SIGINT's handler: one byte to STOP, and nothing else.
+extern "C" fn on_stop(_: c_int) {
+    // SAFETY: write is async-signal-safe, and STOP is a nonblocking socket open while this is set.
+    unsafe { libc::write(STOP.load(Ordering::Relaxed), [0u8].as_ptr().cast(), 1) };
+}
+
+/// Runs the daemon directly. launchd (`bootout`), systemd (`systemctl stop`) and a terminal stop
+/// it with SIGTERM or SIGINT: `stop` then fires, so the daemon removes capture and closes its
+/// bonds before it exits (§5.4), where the signal's default action would end it at once and leave
+/// the routes and the resolver pointing at a device that is gone. First it raises the descriptor
+/// limit (`raise_nofile`).
 pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Result<()> {
     raise_nofile();
-    let (_never, stop) = mpsc::channel();
-    run(stop)
+    let (tx, stop) = mpsc::channel();
+    let (from, to) = wake_pair()?;
+    STOP.store(to.into_raw_fd(), Ordering::Relaxed);
+    from.set_nonblocking(false)?;
+    thread::spawn(move || {
+        // A signal may interrupt the wait it ends.
+        while from.recv(&mut [0]).is_err_and(|e| e.kind() == io::ErrorKind::Interrupted) {}
+        let _ = tx.send(());
+    });
+    let on = |h: libc::sighandler_t| {
+        for sig in [libc::SIGTERM, libc::SIGINT] {
+            // SAFETY: on_stop only calls write, and SIG_DFL is the default again.
+            unsafe { libc::signal(sig, h) };
+        }
+    };
+    on(on_stop as extern "C" fn(c_int) as libc::sighandler_t);
+    let r = run(stop);
+    on(libc::SIG_DFL);
+    r
 }
 
 /// Raises the soft RLIMIT_NOFILE to the hard limit, as Go's runtime did at start (review:

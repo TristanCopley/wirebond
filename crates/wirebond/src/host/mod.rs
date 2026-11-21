@@ -94,7 +94,7 @@ pub use os::{
 // node calls on its forward, server flow and fallback UDP sockets (`no_reset(&SockRef::from(&u))`),
 // a no-op elsewhere; the next datagram waiting on a UDP socket, without blocking, for node's loop
 // (Poll below); and the daemon as the service manager's entry point, `wirebond run`, where `stop`
-// fires on a Windows stop request and SIGTERM from launchd or systemd ends the process elsewhere.
+// fires on a Windows stop request, and elsewhere on SIGTERM (launchd, systemd) and SIGINT.
 #[allow(unused_imports)] // boot, no_reset, recv_now: 2.0 wave 2 (wake detection, the lane pump)
 pub use os::{admin, boot, hostname, no_reset, recv_now, run_service};
 // Windows' wait (§4.3): WSAEventSelect, Wintun's read event and a waitable timer.
