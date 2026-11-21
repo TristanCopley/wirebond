@@ -407,8 +407,7 @@ jobs:
             if ($LASTEXITCODE) { throw "uninstall: exit code $LASTEXITCODE" }
             if (Get-NetAdapter -Name wirebond -ErrorAction SilentlyContinue) { throw 'the adapter remains' }
             if (Get-NetRoute | Where-Object InterfaceAlias -eq wirebond) { throw 'a route to the adapter remains' }
-            netsh advfirewall firewall show rule name=wirebond | Out-Null
-            if (-not $LASTEXITCODE) { throw 'the firewall rule remains' }
+            if (Get-NetFirewallRule -DisplayName wirebond -ErrorAction SilentlyContinue) { throw 'the firewall rule remains' }
             $after = & $shared
             if ($after -ne $before) { throw "before the anchor, $before; after uninstall, $after" }
             Start-Sleep 6 # the folder goes about 2 s after the CLI has exited

@@ -898,6 +898,29 @@ mod win {
             );
             ok.that(reached > 0, "no target answers this runner");
             ok.that(back.is_some(), "a client's packet was not forwarded, translated and answered");
+            // Sharing brings its own DNS proxy on the shared address: who holds port 53 there, and
+            // whether a client's query to the anchor's address is answered with no relay of ours.
+            show(
+                "port 53",
+                &ps(
+                    "Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | % { \"udp $($_.LocalAddress) $((Get-Process -Id $_.OwningProcess).Name) $($_.OwningProcess)\" }\n\
+                 Get-NetTCPConnection -LocalPort 53 -State Listen -ErrorAction SilentlyContinue | % { \"tcp $($_.LocalAddress) $((Get-Process -Id $_.OwningProcess).Name) $($_.OwningProcess)\" }",
+                ),
+            );
+            eprintln!(
+                "binding {}:53, {:?} after egress_enable: {:?}",
+                on.addr4.0,
+                at.elapsed(),
+                UdpSocket::bind((on.addr4.0, 53))
+            );
+            let asker = SocketAddr::from(([192, 168, 137, 7], 40001));
+            let relay = SocketAddr::from((on.addr4.0, 53));
+            tun.write(&udp(asker, relay, &ts.last().unwrap().ask)).unwrap();
+            let answer = from_tun(&tun, Duration::from_secs(3), |s, d, _| d == asker && s == relay);
+            eprintln!(
+                "a client's query to {relay}: the answer out of the device: {:?}",
+                answer.map(|a| (a.0, a.1, a.2))
+            );
             let again = egress_enable(&e);
             eprintln!("egress_enable again: {again:?}");
             ok.that(again.is_ok_and(|a| a == on), "enabled twice, two answers");
