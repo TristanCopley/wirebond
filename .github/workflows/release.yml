@@ -1,4 +1,4 @@
-# Release (SPEC §15.1): on a tag vX.Y.Z, every check of ci.yml plus netsim's full acceptance set and
+# Release (SPEC §22.1): on a tag vX.Y.Z, every check of ci.yml plus netsim's full acceptance set and
 # system.yml, then the executables, SHA256SUMS and a GitHub release. A manual run builds them and
 # keeps the assets as a workflow artifact, with no checks and no release.
 name: release
@@ -21,7 +21,7 @@ jobs:
     with:
       long: true
 
-  # The build is published only once its daemons pass tests/system (SPEC §17.1 tier 3).
+  # The build is published only once its daemons pass tests/system (SPEC §23.1 tier 3).
   system:
     if: github.event_name == 'push'
     uses: ./.github/workflows/system.yml
@@ -63,9 +63,9 @@ jobs:
         if: startsWith(matrix.os, 'windows')
         shell: bash
         run: .github/scripts/wintun.sh
-      - name: Build with the release profile, which strips (SPEC §15.1)
+      - name: Build with the release profile, which strips (SPEC §22.5)
         run: cargo build -p wirebond --release --locked --target "$TARGET"
-      - name: It runs and reports the tag, as an update's smoke test requires (SPEC §15.5 step 3)
+      - name: It runs and reports the tag, as an update's smoke test requires (SPEC §22.3)
         if: matrix.native
         run: |
           out=$("$EXE" --version --json) || { echo "$EXE --version --json failed"; exit 1; }
@@ -97,14 +97,14 @@ jobs:
           pattern: assets-*
           merge-multiple: true
           path: dist
-      - name: Every asset of SPEC §15.1 and nothing else, and SHA256SUMS
+      - name: Every daemon asset of SPEC §22.1 and nothing else, and SHA256SUMS
         working-directory: dist
         run: |
           export LC_ALL=C # so * sorts as want is written
           want=(wirebond-Darwin-arm64 wirebond-Darwin-x86_64 wirebond-Linux-aarch64 wirebond-Linux-armv6l
             wirebond-Linux-armv7l wirebond-Linux-x86_64 wirebond-Windows-AMD64.exe wirebond-Windows-ARM64.exe)
           have=(*)
-          [ "${have[*]}" = "${want[*]}" ] || { echo "the assets are not SPEC §15.1's: ${have[*]}"; exit 1; }
+          [ "${have[*]}" = "${want[*]}" ] || { echo "the assets are not SPEC §22.1's: ${have[*]}"; exit 1; }
           sha256sum wirebond-* > SHA256SUMS && cat SHA256SUMS
       - name: Publish
         env:

@@ -1,6 +1,6 @@
 //! windows.rs's tests. They run only on Windows (`cargo test -p wirebond` there), and leave the
-//! service, the firewall and %ProgramData% alone: what touches those is checked by hand
-//! (notes/rust.md, "host: Windows").
+//! service, the firewall and %ProgramData% alone: CI's installers job (ci.yml) installs and
+//! uninstalls for real.
 
 use super::*;
 use crate::host::net::{Capture, Routes, TunConfig};

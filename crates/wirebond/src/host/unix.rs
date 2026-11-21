@@ -4,11 +4,11 @@
 
 use super::{Iface, Scope};
 use libc::c_int;
-use socket2::{Domain, SockRef, Socket, Type};
+use socket2::{Domain, Socket, Type};
 use std::ffi::CStr;
 use std::fs::{self, Permissions};
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::IpAddr;
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::prelude::*;
 use std::path::Path;
@@ -97,11 +97,8 @@ fn cvt(r: c_int) -> io::Result<c_int> {
     if r == -1 { Err(io::Error::last_os_error()) } else { Ok(r) }
 }
 
-/// Turns off Windows' UDP resets (see windows.rs): here, as in Go, nothing changes.
-pub fn no_reset(_: &Socket) {}
-
-/// The sleep-inclusive clock (§8.4): CLOCK_BOOTTIME on Linux, and CLOCK_MONOTONIC on macOS, which
-/// counts sleep there. Rust's Instant, like Go's monotonic clock, stops in sleep on both.
+/// The sleep-inclusive clock (§11.4): CLOCK_BOOTTIME on Linux, and CLOCK_MONOTONIC on macOS, which
+/// counts sleep there. Rust's Instant stops in sleep on both.
 pub fn boot() -> i64 {
     let mut ts = MaybeUninit::<libc::timespec>::zeroed();
     // SAFETY: clock_gettime fills the timespec, which is zeroed should it fail.
@@ -112,7 +109,7 @@ pub fn boot() -> i64 {
     ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
 }
 
-/// This device's host name (status's name, §14.3), as gethostname gives it; "" should it fail.
+/// This device's host name (status's `device`, §20.2), as gethostname gives it; "" should it fail.
 pub fn hostname() -> String {
     let mut b = [0u8; 256];
     // SAFETY: gethostname writes at most b.len() bytes into b.
@@ -159,15 +156,6 @@ pub(super) fn wake_pair() -> io::Result<(WakeSock, WakeSock)> {
     Ok((tx, rx))
 }
 
-/// The next datagram waiting on u and its sender, or WouldBlock: MSG_DONTWAIT, since a read after
-/// a poll that found u readable can still block (Linux drops a bad checksum only as it reads).
-pub fn recv_now(u: &UdpSocket, b: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-    // SAFETY: MaybeUninit<u8> is laid out as u8, and recvfrom writes only initialized bytes.
-    let b = unsafe { &mut *(b as *mut [u8] as *mut [MaybeUninit<u8>]) };
-    let (n, from) = SockRef::from(u).recv_from_with_flags(b, libc::MSG_DONTWAIT)?;
-    Ok((n, from.as_socket().ok_or(io::ErrorKind::InvalidData)?))
-}
-
 /// Root may install the system service.
 pub fn admin() -> bool {
     // SAFETY: geteuid has no preconditions.
@@ -182,9 +170,9 @@ pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Resu
     run(stop)
 }
 
-/// Raises the soft RLIMIT_NOFILE to the hard limit, as Go's runtime did at start (review:
-/// fd-limit-and-splice-descriptors): launchd starts a job at 256 and systemd a service at 1,024,
-/// which forwards, splices, flows and channels can pass. The daemon waits with poll, never select,
+/// Raises the soft RLIMIT_NOFILE to the hard limit: launchd starts a job at 256 and systemd a
+/// service at 1,024, which an anchor's DNS relay over TCP (two sockets a query, DNS_INFLIGHT
+/// queries a bond) and its control channels can pass. The daemon waits with poll, never select,
 /// so descriptors past 1,024 are safe. macOS refuses a soft limit over kern.maxfilesperproc, and
 /// launchd's hard limit is unlimited: there it stops at kern.maxfilesperproc.
 fn raise_nofile() {
@@ -315,7 +303,7 @@ pub(super) fn run<S: AsRef<std::ffi::OsStr>>(cmd: &str, args: &[S]) -> io::Resul
     if out.status.success() { Ok(out.stdout) } else { Err(io::Error::other(format!("{c:?}: {}", stderr.trim()))) }
 }
 
-/// The launchd job, daemon or agent: started at load, kept alive, no log paths (§15.3).
+/// The launchd job, daemon or agent: started at load, kept alive, no log paths (§22.2).
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn plist(exe: &Path) -> String {
     let exe = exe.display();

@@ -4,8 +4,7 @@
 //! windows.rs (`os::`), and host/mod.rs re-exports them. Owners: host linux; host macos and
 //! windows (notes/2.0-build.md).
 //!
-//! Every function is idempotent and undoes only what wirebond made. One not yet written returns
-//! an `io::Error` of kind `Unsupported` whose message is [`NOT_YET`].
+//! Every function is idempotent and undoes only what wirebond made.
 //!
 //! ```text
 //! Tun::open(&TunConfig) -> io::Result<Tun>     Tun::name(&self) -> &str
@@ -17,48 +16,43 @@
 //! upstream_resolver() -> io::Result<SocketAddr>
 //! support_share(&Share) -> io::Result<()>           support_unshare(&Share) -> io::Result<()>
 //! cleanup_stale() -> io::Result<()>
-//! missing_tools() -> Vec<&'static str>              dns_local() -> bool
+//! dns_local() -> bool
 //! ```
 //!
-//! An error naming a tool the device lacks reads `missing_tool <tool>` ([`missing_tool`]).
-//! `missing_tools` lists the tools absent at start (Linux: `ip`, `nft`), and `dns_local` says the
-//! last `capture_install` left DNS alone (Linux without systemd-resolved, §7): both are Linux's,
-//! and host/mod.rs answers none and false on the other OSes.
+//! An error of a function that needs a tool the device lacks is of kind NotFound and reads
+//! `missing_tool <tool>` (Linux: `ip`, `nft`, `nmcli`). The daemon reports a TUN, capture or egress
+//! call that failed with that kind as the problem `missing_tool`. `dns_local` says the last
+//! `capture_install` left DNS alone (Linux without systemd-resolved, §7): it is Linux's, and
+//! host/mod.rs answers false on the other OSes.
 //!
-//! Lane sockets are pinned by `listen` (§5.3): on Linux SO_MARK [`LANE_MARK`] and
-//! SO_BINDTODEVICE; on macOS IP_BOUND_IF / IPV6_BOUND_IF; on Windows IP_UNICAST_IF /
-//! IPV6_UNICAST_IF.
+//! Lane sockets are pinned by `listen` (§5.3): on Linux SO_MARK 0x7849 (`LANE_MARK`) and, for
+//! IPv6, SO_BINDTODEVICE (IPv4: IP_UNICAST_IF, see linux.rs); on macOS IP_BOUND_IF /
+//! IPV6_BOUND_IF; on Windows IP_UNICAST_IF / IPV6_UNICAST_IF.
 
+#[cfg(target_os = "linux")]
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// The message of a function not yet written.
+/// The message of a function the platform at hand does not have, with kind `Unsupported`. Every
+/// function of this API is written for Linux, macOS and Windows; node returns this from its
+/// `Platform` trait's default `support_share`, which only a test's fake host leaves in place, and
+/// for the interface counters of any other OS.
 pub const NOT_YET: &str = "2.0: not yet";
 
 /// The Linux fwmark on lane sockets (§5.3): `not fwmark 0x7849` keeps them out of capture.
+#[cfg(target_os = "linux")]
 pub const LANE_MARK: u32 = 0x7849;
 /// The routing table capture uses on Linux (§5.3): table 7849, decimal, as `ip` prints it.
+#[cfg(target_os = "linux")]
 pub const TABLE: u32 = 7849;
 /// The Linux interface name; macOS takes the next utunN, Windows names its adapter `wirebond`.
 pub const TUN_NAME: &str = if cfg!(windows) { "wirebond" } else { "wb0" };
 
-/// `Err(Unsupported, NOT_YET)`.
-pub fn not_yet<T>() -> io::Result<T> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, NOT_YET))
-}
-
 /// The error of a function that needs a tool this device lacks: kind NotFound, its message
-/// starting `missing_tool <tool>` (§5.3, §6.2, §22.2).
+/// `missing_tool <tool>` (§5.3, §6.2, §22.2). Only Linux's functions run tools that may be absent.
+#[cfg(target_os = "linux")]
 pub fn missing_tool_error(tool: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, format!("missing_tool {tool}"))
-}
-
-/// The tool an error of this API names as missing, which the daemon reports as problem
-/// `missing_tool` (§5.3, §6.2); None for any other error.
-pub fn missing_tool(e: &io::Error) -> Option<String> {
-    let s = e.to_string();
-    let rest = s.strip_prefix("missing_tool ")?;
-    rest.split(|c: char| c == ':' || c.is_whitespace()).next().filter(|t| !t.is_empty()).map(str::to_owned)
 }
 
 /// An address and prefix length.

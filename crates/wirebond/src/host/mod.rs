@@ -1,28 +1,28 @@
-//! Per-OS code: link listing and lane-socket pinning, never-DF, socket buffers, the
+//! Per-OS code. Kept from 1.x: link listing and lane-socket pinning, never-DF, socket buffers, the
 //! sleep-inclusive clock, service install, the firewall rule, paths, local sockets and
-//! config.json, kept from 1.x; and the 2.0 platform API (SPEC 2.0 §5–§8): the TUN device,
-//! capture, egress and NAT, the upstream resolver, support sharing and stale-state cleanup, whose
-//! types and contract are in net.rs and whose bodies are per OS (linux.rs, macos.rs, windows.rs).
+//! config.json (SPEC §9.1, §11.4, §19, §22.2, §22.4). New in 2.0, the platform API (§5–§8): the
+//! TUN device, capture, egress and NAT, the upstream resolver, support sharing and stale-state
+//! cleanup, whose types and contract are in net.rs and whose bodies are per OS (linux.rs,
+//! macos.rs, windows.rs).
 //! Owners: host linux (linux.rs, unix.rs); host macos and windows (macos.rs, windows.rs); shared
 //! files (this one, net.rs, install.rs) by request (notes/2.0-build.md).
 //!
-//! node, the daemon, calls [`links`] every LINK_SCAN and at once on a send error or a wake,
-//! [`default_addr`] for the default link (§6.1), [`listen`] and [`listen_mesh`] for the lane
-//! sockets and [`Wake::tick`] on its 1 s tick. As `wirebond run` it runs inside [`run_service`],
-//! takes its scope from `need(false)` and opens [`listen_local`] in that scope's state directory,
-//! where [`Config::load`] and [`Config::save`] keep config.json. The CLI calls [`need`], [`admin`],
-//! [`on_path`], [`install`], [`uninstall`] and [`dial`].
+//! node, the daemon, calls [`links`] every LINK_SCAN and at once on a wake, [`default_addr`] for
+//! the default route's link (the link carrying the mesh, §8, and an anchor's uplink, §6.2),
+//! [`listen`] and [`listen_mesh`] for the lane sockets and [`Wake::tick`] on its 1 s tick. As
+//! `wirebond run` it runs inside [`run_service`], takes its scope from `need(false)` and opens
+//! [`listen_local`] in that scope's state directory, where [`Config::load`] and [`Config::save`]
+//! keep config.json. The CLI calls [`need`], [`admin`], [`on_path`], [`install`], [`uninstall`]
+//! and [`dial`].
 //!
 //! The shared code calls `os::<function>`, one set per OS: linux.rs and macos.rs, each completed
-//! by unix.rs, and windows.rs. The set is Go's per-OS set in snake_case, plus `ifaces`, the
-//! interface listing Go took from its standard library (Wi-Fi included), and `no_reset`, which
-//! Go's runtime did on Windows. The local sockets are AF_UNIX on every OS, Windows 10 included, so
+//! by unix.rs, and windows.rs. The local sockets are AF_UNIX on every OS, Windows 10 included, so
 //! they are shared.
 //!
 //! ```text
 //! ifaces() -> io::Result<Vec<Iface>>          boot() -> i64          admin() -> bool
 //! sockopts(&Socket, v6: bool, index: u32, name: &str) -> io::Result<(usize, usize)>, before bind
-//! no_reset(&Socket)                           hostname() -> String
+//! hostname() -> String
 //! paths(Scope) -> (PathBuf, PathBuf)          mk_state(dir: &Path) -> io::Result<()>
 //! private() -> a guard that restores on drop  public(path: &Path) -> io::Result<()>
 //! register(Scope, exe: &Path, restart: bool) -> io::Result<bool>
@@ -31,12 +31,11 @@
 //! run_service(impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Result<()>
 //! poll_fd(&socket) -> PollFd                  poll(&mut [PollFd], Duration) -> io::Result<()>
 //! wake_pair() -> io::Result<(WakeSock, WakeSock)>, nonblocking
-//! recv_now(&UdpSocket, &mut [u8]) -> io::Result<(usize, SocketAddr)>, never blocking
 //! ```
 
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -44,12 +43,8 @@ use wirebond_core::{PORT, WAKE_GAP, WAKE_JUMP};
 
 mod config;
 // The 2.0 platform API's types (§5–§8); the functions are per OS, below.
-#[allow(dead_code)] // 2.0 wave 2: the daemon's pumps and bond logic use them
-mod net;
-// Only the CLI installs and uninstalls, and the CLI's tests fake both: a test build on macOS,
-// which has no install tests of its own (Linux's use a fake systemctl), calls neither.
-#[cfg_attr(all(test, target_os = "macos"), allow(dead_code))]
 mod install;
+mod net;
 // The per-OS set: one file per OS, as `os`.
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
@@ -61,51 +56,40 @@ mod tests;
 mod unix;
 
 pub use config::{Config, SupportConfig};
-#[allow(unused_imports)] // 2.0 wave 2: the daemon's pumps and bond logic use them
-pub use net::{Capture, Egress, EgressOn, NOT_YET, Routes, Share, TUN_NAME, TunConfig, missing_tool};
-// Linux's only: the tools absent at start, and DNS left alone at the last capture (net.rs).
+pub use net::{Capture, Egress, EgressOn, NOT_YET, Routes, Share, TUN_NAME, TunConfig};
+// Linux's only: whether the last capture left DNS alone (net.rs).
 #[cfg(target_os = "linux")]
-#[allow(unused_imports)] // 2.0 wave 2: the daemon reports them as problems
-pub use os::{dns_local, missing_tools};
-/// The tools this OS needs that are absent: none outside Linux (net.rs).
-#[cfg(not(target_os = "linux"))]
-#[allow(dead_code)] // 2.0 wave 2: the daemon reports them as problems
-pub fn missing_tools() -> Vec<&'static str> {
-    Vec::new()
-}
+pub use os::dns_local;
 /// Whether the last capture left DNS alone: never outside Linux (net.rs).
 #[cfg(not(target_os = "linux"))]
-#[allow(dead_code)] // 2.0 wave 2: the daemon reports it as a problem
 pub fn dns_local() -> bool {
     false
 }
+// Install and uninstall, the scope they need, and whether `wirebond` on PATH is the installed
+// executable (install.rs).
+pub use install::{create, install, need, on_path, uninstall};
 // The 2.0 platform API per OS (host/net.rs): the TUN device, capture, egress, the upstream resolver,
 // support sharing and stale-state cleanup.
-#[allow(unused_imports)] // on_path: 1.x's macOS user scope, which goes with the login agent (open)
-pub use install::{create, install, need, on_path, uninstall};
-#[allow(unused_imports)] // 2.0 wave 2
 pub use os::{
     Tun, capture_install, capture_remove, cleanup_stale, egress_disable, egress_enable, support_share, support_unshare,
     upstream_resolver,
 };
 // Per OS, one signature everywhere: whether this process may install a system service (root, or
 // elevated on Windows); the sleep-inclusive clock in nanoseconds (Linux CLOCK_BOOTTIME, macOS
-// CLOCK_MONOTONIC, Windows GetTickCount64); the host name; Windows' UDP resets turned off, which
-// node calls on its forward, server flow and fallback UDP sockets (`no_reset(&SockRef::from(&u))`),
-// a no-op elsewhere; the next datagram waiting on a UDP socket, without blocking, for node's loop
-// (Poll below); and the daemon as the service manager's entry point, `wirebond run`, where `stop`
-// fires on a Windows stop request and SIGTERM from launchd or systemd ends the process elsewhere.
-#[allow(unused_imports)] // boot, no_reset, recv_now: 2.0 wave 2 (wake detection, the lane pump)
-pub use os::{admin, boot, hostname, no_reset, recv_now, run_service};
+// CLOCK_MONOTONIC, Windows GetTickCount64); the host name; and the daemon as the service
+// manager's entry point, `wirebond run`, where `stop` fires on a Windows stop request and SIGTERM
+// from launchd or systemd ends the process elsewhere.
+pub use os::{admin, boot, hostname, run_service};
 // Windows' wait (§4.3): WSAEventSelect, Wintun's read event and a waitable timer.
 #[cfg(windows)]
-#[allow(unused_imports)] // 2.0 wave 2: the daemon's loop on Windows
 pub use os::EventLoop;
 // Windows' 1 ms timers, which `run_service` asks for the daemon; node's daemon tests ask too.
 #[cfg(all(windows, test))]
 pub use os::fine_timers;
 
-/// Where wirebond runs (§15.3): a system service started at boot, or a macOS login agent.
+/// Where wirebond runs (§22.2): a system service started at boot. `User` is 1.x's macOS login
+/// agent, which §25 removes: only install and uninstall still name it, to replace one that is
+/// there with the system service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     System,
@@ -113,23 +97,18 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// "system" or "user", as status prints it.
-    pub fn as_str(self) -> &'static str {
-        if self == Scope::System { "system" } else { "user" }
-    }
-
     /// The installed executable's path and the state directory for this scope.
     pub fn paths(self) -> (PathBuf, PathBuf) {
         os::paths(self)
     }
 }
 
-/// The files in the state directory (§15.3).
+/// The files in the state directory: config.json (§22.4) and the two local sockets (§19).
 pub const CONFIG_FILE: &str = "config.json";
 pub const CTL_SOCK: &str = "ctl.sock"; // changes: only the scope's owner can connect
 pub const STATUS_SOCK: &str = "status.sock"; // reads only: anyone can connect
 
-/// One usable link, one interface and one address family (§6.1), or one mesh address.
+/// One usable link, one interface and one address family (§9.1), or one mesh address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     /// The interface's index; an iPhone on USB gets a new one on every reconnect.
@@ -140,7 +119,7 @@ pub struct Link {
     pub addr: IpAddr,
     /// "iPhone", "Wi-Fi", "Ethernet" or the name.
     pub label: String,
-    /// An iPhone hotspot: the only metered heuristic (§6.2).
+    /// An iPhone hotspot: the only metered heuristic (`links`' `metered`, §16).
     pub metered: bool,
 }
 
@@ -152,7 +131,7 @@ struct Iface {
     /// Up and with carrier.
     up: bool,
     p2p: bool,
-    /// 0 when unknown, which counts as under 1,500 (Go's -1).
+    /// 0 when unknown, which counts as under 1,500.
     mtu: u32,
     /// A 6-byte hardware address.
     mac: bool,
@@ -176,7 +155,7 @@ const NEVER: [(IpAddr, u8); 3] = [
 const SKIP: &str = "utun ipsec gif stf awdl llw anpi ap bridge br- virbr lxdbr incusbr podman cni \
                     flannel cali tun tap wg docker veth vmnet vEthernet wb0 wirebond";
 
-/// This device's usable links and its mesh addresses (§6.2). `mesh` is config.json's ranges
+/// This device's usable links and its mesh addresses (§9.1). `mesh` is config.json's ranges
 /// ([`Config::mesh_ranges`]). No mesh address means the mesh is down. A failed listing is an
 /// error, never an empty list (R1-31): node keeps the links it has and lists again.
 pub fn links(mesh: &[(IpAddr, u8)]) -> io::Result<(Vec<Link>, Vec<Link>)> {
@@ -184,7 +163,7 @@ pub fn links(mesh: &[(IpAddr, u8)]) -> io::Result<(Vec<Link>, Vec<Link>)> {
 }
 
 /// Picks from `ifs` the links, at most one per interface and family (a public address before a
-/// private one), and the mesh interface's addresses (§6.2). `def` is the default route's local
+/// private one), and the mesh interface's addresses (§9.1). `def` is the default route's local
 /// address.
 ///
 /// Only an interface that is up and has carrier counts. An address in a mesh range makes its
@@ -239,7 +218,7 @@ pub fn in_ranges(a: IpAddr, ranges: &[(IpAddr, u8)]) -> bool {
 }
 
 /// Go's IsGlobalUnicast: not unspecified, loopback, multicast, broadcast or link-local. node's
-/// filter keeps a peer's candidate only on such an address (§6.3 step 3), once unmapped.
+/// filter keeps a peer's candidate only on such an address (§9.3), once unmapped.
 pub fn global(a: IpAddr) -> bool {
     let local = matches!(a, IpAddr::V4(a) if a.is_broadcast() || a.is_link_local())
         || matches!(a, IpAddr::V6(a) if a.is_unicast_link_local());
@@ -259,7 +238,7 @@ pub fn default_addr() -> io::Result<IpAddr> {
     Ok(s.local_addr()?.ip())
 }
 
-/// A link's UDP socket (§5.4, §6.2): bound to its address on PORT, else an ephemeral port, pinned
+/// A link's UDP socket (§5.3, §9.1): bound to its address on PORT, else an ephemeral port, pinned
 /// to its interface before bind, never-DF, asking for SOCK_BUF buffers. Returns the socket and the
 /// receive and send buffer sizes the OS granted, for status to report when they fall short. node
 /// reopens it when the link's index or address changes.
@@ -267,7 +246,7 @@ pub fn listen(link: &Link) -> io::Result<(UdpSocket, usize, usize)> {
     bind(link.addr, link.index, &link.name)
 }
 
-/// The Tailscale lane's socket on a mesh address: like `listen`, not pinned.
+/// The mesh lane's socket on a mesh address: like `listen`, not pinned.
 pub fn listen_mesh(addr: IpAddr) -> io::Result<(UdpSocket, usize, usize)> {
     bind(addr, 0, "")
 }
@@ -284,8 +263,8 @@ fn bind(addr: IpAddr, index: u32, name: &str) -> io::Result<(UdpSocket, usize, u
 }
 
 /// The sockets node's loop waits on together (ppoll on Linux, poll on macOS, WSAPoll): every UDP
-/// socket it reads, which it then reads with [`recv_now`], and its [`Waker`]. A datagram wakes the
-/// loop itself, as Go's netpoller wakes the goroutine that reads it.
+/// socket it reads, the TUN device on macOS and Linux, and its [`Waker`]. A datagram wakes the
+/// loop itself, which then reads each source that is ready without blocking.
 #[derive(Default)]
 pub struct Poll {
     fds: Vec<os::PollFd>,
@@ -303,9 +282,8 @@ impl Poll {
     }
 
     /// Adds the TUN device as `add` adds a socket (§4.3). Windows waits on [`Tun::read_event`] instead
-    /// (WaitForMultipleObjects, 2.0 wave 2).
+    /// (WaitForMultipleObjects, windows.rs's `EventLoop`).
     #[cfg(unix)]
-    #[allow(dead_code)] // 2.0 wave 2: the TUN pump
     pub fn add_tun(&mut self, t: &Tun) {
         self.fds.push(os::poll_fd(t));
     }
@@ -353,7 +331,7 @@ impl Waker {
     }
 }
 
-/// Detects a wake from sleep on node's 1 s tick (§8.4). The default value is ready.
+/// Detects a wake from sleep on node's 1 s tick (§11.4). The default value is ready.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Wake {
     mono: i64,
@@ -373,13 +351,13 @@ impl Wake {
     }
 }
 
-/// A local socket listener (§15.3): a Unix socket, which Windows 10 has too.
+/// A listener of the local API (§20.1): a Unix socket, which Windows 10 has too.
 pub struct LocalListener(Socket);
 
 /// One connection on a local socket.
 pub trait LocalStream: io::Read + io::Write + Send {
-    /// Bounds every read and write from now on, as Go's deadlines bound both ends of §15.3's one
-    /// request line and one reply line; None waits forever.
+    /// Bounds every read and write from now on, both ends of §20.1's one request line and one
+    /// reply line; None waits forever.
     fn set_timeout(&self, t: Option<Duration>) -> io::Result<()>;
 }
 
@@ -397,7 +375,7 @@ impl LocalListener {
 }
 
 /// The daemon's two local sockets in the state directory `dir`, which it creates or checks first
-/// (§15.3): ctl.sock (only the scope's owner) and status.sock (anyone), each with its permissions
+/// (§19): ctl.sock (only the scope's owner) and status.sock (anyone), each with its permissions
 /// from the moment it exists. Stale socket files go first. Call it before starting threads that
 /// create files: on macOS and Linux it sets the process umask while it binds.
 pub fn listen_local(dir: &Path) -> io::Result<(LocalListener, LocalListener)> {
@@ -411,7 +389,7 @@ pub fn listen_local(dir: &Path) -> io::Result<(LocalListener, LocalListener)> {
 }
 
 /// Connects to the local socket `name` (CTL_SOCK or STATUS_SOCK) of scope `s`'s daemon. The CLI
-/// sends one JSON line and reads one back (§15.3).
+/// sends one JSON line and reads one back (§20.1).
 pub fn dial(s: Scope, name: &str) -> io::Result<Box<dyn LocalStream>> {
     Ok(Box::new(local(&s.paths().1.join(name), false)?))
 }
@@ -422,12 +400,4 @@ fn local(path: &Path, listen: bool) -> io::Result<Socket> {
     let (s, at) = (Socket::new(Domain::UNIX, Type::STREAM, None)?, SockAddr::unix(path)?);
     let r = if listen { s.bind(&at).and_then(|()| s.listen(128)) } else { s.connect(&at) };
     r.map(|()| s)
-}
-
-/// Waits until `ln` has a connection to accept or `t` has passed, as `Poll::wait` does: whether one
-/// waits. node's accept loops wait on their nonblocking listeners with it, so that they also see
-/// stop.
-pub fn wait_readable(ln: &TcpListener, t: Duration) -> io::Result<bool> {
-    let mut p = [os::poll_fd(ln)];
-    os::poll(&mut p, t).map(|()| p[0].revents != 0)
 }

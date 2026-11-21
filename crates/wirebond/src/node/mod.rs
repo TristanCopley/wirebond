@@ -2075,8 +2075,10 @@ impl Daemon {
             Request::Status { device: None } => {
                 return Reply { ok: true, status: Some(Box::new(self.status(false))), ..Reply::default() };
             }
+            // `call` answers these three itself, since each waits on something (a peer's view, a
+            // pick's measurements, a download): none reaches here.
             Request::Status { device: Some(_) } | Request::Pick { .. } | Request::Update => {
-                return Reply::fail("failed", "2.0: not yet");
+                return Reply::fail("failed", "internal error: answer was given a verb that call handles");
             }
             Request::Client { anchor, mode } => {
                 (c.role, c.anchor) = (Role::Client, Some(anchor));
