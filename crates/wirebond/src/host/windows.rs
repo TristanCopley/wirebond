@@ -1041,14 +1041,26 @@ mod v2 {
 
     /// Internet Connection Sharing (HNetCfg.HNetShare) from the uplink to the adapter, which ICS
     /// readdresses to 192.168.137.1/24: `EgressOn::addr4` says so. IPv4 only; ICS busy or refused
-    /// gives v4 false and local delivery only (§6.2).
+    /// gives v4 false and local delivery only (§6.2), at the address of the bond's own subnet that
+    /// the adapter was opened with. Either way the adapter has the address this reports: the anchor
+    /// hands it to its clients as its own, and what they send there must reach this device.
     pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
         let uplink = uplink();
         let v4 = match &uplink {
             Some(up) => ics(up, &e.tun, true).is_ok(),
             None => false,
         };
-        Ok(EgressOn { v4, v6: false, addr4: ICS_ADDR, uplink })
+        let addr4 = egress_addr4(v4, e.net4);
+        if let Some(luid) = luid_of(&e.tun) {
+            // There already unless ICS has yet to set it, or took the other when it came or went.
+            address(&luid, IpAddr::V4(addr4.0), addr4.1)?;
+        }
+        Ok(EgressOn { v4, v6: false, addr4, uplink })
+    }
+
+    /// The anchor's own address: ICS's while it shares, else the first of the bond's subnet `net4`.
+    pub(super) fn egress_addr4(ics: bool, net4: (Ipv4Addr, u8)) -> (Ipv4Addr, u8) {
+        if ics { ICS_ADDR } else { (Ipv4Addr::from(u32::from(net4.0) | 1), net4.1) }
     }
 
     /// Turns off the sharing whose private side is the adapter: only what egress_enable made.

@@ -200,6 +200,9 @@ fn opens_the_wintun_adapter_as_administrator() {
     };
     assert_eq!(t.name(), "wirebond-test");
     assert!(!t.read_event().is_null());
+    // The address is on the adapter at once: a socket binds it. An anchor's clients send to the
+    // address it reports as its own (egress_enable), which only reaches this device if it is here.
+    UdpSocket::bind((Ipv4Addr::new(10, 77, 0, 2), 0)).expect("the adapter has its address");
     let mut b = [0u8; 2048];
     match t.read(&mut b) {
         Err(e) => assert_eq!(e.kind(), io::ErrorKind::WouldBlock),
@@ -219,4 +222,15 @@ fn opens_the_wintun_adapter_as_administrator() {
     capture_install(&cap).unwrap(); // idempotent
     capture_remove(&cap).unwrap();
     capture_remove(&cap).unwrap();
+}
+
+/// The address an anchor reports as its own (§6.1): ICS's while it shares, and without ICS the
+/// first of the bond's subnet, which the adapter was opened with, never ICS's.
+#[test]
+fn an_anchor_without_ics_keeps_the_bond_subnets_address() {
+    let ics = (Ipv4Addr::new(192, 168, 137, 1), 24);
+    let net = (Ipv4Addr::new(10, 77, 0, 0), 24);
+    assert_eq!(v2::egress_addr4(true, net), ics);
+    assert_eq!(v2::egress_addr4(false, net), (Ipv4Addr::new(10, 77, 0, 1), 24));
+    assert_eq!(v2::egress_addr4(false, (Ipv4Addr::new(10, 99, 5, 0), 24)), (Ipv4Addr::new(10, 99, 5, 1), 24));
 }
