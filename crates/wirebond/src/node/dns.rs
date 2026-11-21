@@ -334,7 +334,11 @@ mod tests {
                 }
             }
         });
-        let (mut r, _) = Relay::new(&["127.0.41.1".parse().unwrap()], 0, up).unwrap();
+        // The relay binds UDP port 0, then TCP on the port UDP got, which something else on the
+        // machine may hold (CI's Windows runner, once): then it serves UDP alone, and the test
+        // makes another relay, on another port.
+        let relay = || Relay::new(&["127.0.41.1".parse().unwrap()], 0, up).unwrap().0;
+        let mut r = (0..50).map(|_| relay()).find(|r| !r.tcp.is_empty()).expect("a relay listening on TCP too");
         let at = r.tcp[0];
         let me: IpAddr = "127.0.41.2".parse().unwrap();
         r.pump(0, &[me]);
