@@ -185,7 +185,7 @@ fn bond_end_to_end(net: u8, mode: Mode) {
     assert!(acalls.lock().unwrap().contains(&"egress on".to_string()));
     assert_eq!(a.status(false).anchor.unwrap().bonds[0].addr4.as_deref(), Some("10.77.0.2"));
     assert_eq!(a.bonds[0].mode, mode, "bond open carries the mode");
-    assert_eq!(c.logs.iter().filter(|l| l.starts_with("bond ok")).count(), 1, "one connect: {:?}", c.logs);
+    assert_eq!(c.logs.iter().filter(|l| l.contains("Z: bond ok: ")).count(), 1, "one connect: {:?}", c.logs);
 
     // `wirebond mode` reaches the anchor's side of the bond (§14, §16 `mode`), and back.
     let other = if mode == Mode::Performance { Mode::Bandwidth } else { Mode::Performance };
@@ -330,6 +330,41 @@ fn config_verbs_change_the_config() {
     assert_eq!(d.cfg.role, Role::None);
     let st = d.answer(Request::Status { device: None }).status.unwrap();
     assert_eq!((st.role, st.version.as_str()), (Role::None, "2.0.0"));
+}
+
+/// Every event has its time, in status and in the state directory's log, which keeps its newer
+/// half once it is past LOG_MAX.
+#[test]
+fn events_are_timed_and_kept_in_a_capped_log_file() {
+    assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+    assert_eq!(rfc3339(951_782_399), "2000-02-28T23:59:59Z");
+    assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z", "a leap day");
+    assert_eq!(rfc3339(1_795_270_625), "2026-11-21T14:17:05Z");
+    assert_eq!(rfc3339(4_107_542_399), "2100-02-28T23:59:59Z");
+    assert_eq!(rfc3339(4_107_542_400), "2100-03-01T00:00:00Z", "2100 is no leap year");
+
+    let dir = std::env::temp_dir().join(format!("wirebond-log-{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    let (mut d, _, _) = node("mac", ip(48, 1), ip(48, 10), Config::default());
+    d.dir = Some(dir.clone());
+    d.log("the first event".into());
+    let timed = |l: &str, what: &str| {
+        let (at, rest) = l.split_at(20);
+        at.ends_with('Z') && at.as_bytes()[10] == b'T' && rest == format!(": {what}")
+    };
+    let read = || fs::read_to_string(dir.join(LOG_FILE)).unwrap();
+    assert!(timed(&d.status(false).events[0], "the first event"), "{:?}", d.logs);
+    assert!(timed(read().trim_end(), "the first event"), "{}", read());
+    // Far more than LOG_MAX of events: the file stays near it and holds whole lines, the newest.
+    let line = "x".repeat(1000);
+    for i in 0..2 * LOG_MAX / 1000 {
+        d.log(format!("{i} {line}"));
+    }
+    let (log, last) = (read(), format!("{} {line}", 2 * LOG_MAX / 1000 - 1));
+    assert!(log.len() > LOG_MAX / 2 && log.len() <= LOG_MAX + 1100, "{}", log.len());
+    assert!(log.lines().all(|l| timed(l, &l[22..]) && l.ends_with(&line)), "whole lines only");
+    assert!(timed(log.lines().last().unwrap(), &last) && !log.contains("the first event"));
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

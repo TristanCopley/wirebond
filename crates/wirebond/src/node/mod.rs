@@ -35,11 +35,11 @@ mod tests_net;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{fs, thread};
 
 use wirebond_core::{
     self as core, ALL_LANES_DOWN, FAIL_OPEN_AFTER, IDLE_AFTER, LANES_BLOCKED_AFTER, LINK_SCAN, LOG_LINES, MAX_CANDS,
@@ -69,6 +69,45 @@ const BURST: usize = 512;
 /// work waiting returns in a few microseconds.
 const SLEPT: Duration = Duration::from_micros(10);
 
+/// The daemon's log in the state directory, which `uninstall` removes: every event with its time,
+/// kept across restarts, where status shows the last STATUS_EVENTS of this run.
+const LOG_FILE: &str = "wirebond.log";
+/// The log's size at most, give or take a line.
+const LOG_MAX: usize = 256 << 10;
+
+/// Now as RFC 3339 in UTC, to the second.
+fn stamp() -> String {
+    rfc3339(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()))
+}
+
+/// `secs` since 1970 as RFC 3339 in UTC (the days as a civil date: Howard Hinnant's algorithm).
+fn rfc3339(secs: u64) -> String {
+    let (z, s) = (secs / 86_400 + 719_468, secs % 86_400);
+    let (era, doe) = (z / 146_097, z % 146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let y = yoe + era * 400 + u64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", s / 3_600, s % 3_600 / 60, s % 60)
+}
+
+/// Appends `line` to the log in `dir`. One file, no rotation: once past LOG_MAX it keeps its newer
+/// half, from a line's start. A log that cannot be written is not the daemon's failure.
+fn append_log(dir: &Path, line: &str) {
+    let path = dir.join(LOG_FILE);
+    if let Ok(old) = fs::read(&path)
+        && old.len() > LOG_MAX
+    {
+        let half = old.len() - LOG_MAX / 2;
+        let from = old[half..].iter().position(|&b| b == b'\n').map_or(old.len(), |i| half + i + 1);
+        let _ = fs::write(&path, &old[from..]);
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// The daemon. `wirebond run` calls it inside host::run_service; `version` is the build's. It
 /// returns when `stop` fires (Windows' service stop; SIGTERM and SIGINT elsewhere).
 pub fn run(version: &str, stop: Receiver<()>) -> io::Result<()> {
@@ -78,7 +117,14 @@ pub fn run(version: &str, stop: Receiver<()>) -> io::Result<()> {
         Ok(cfg) => (cfg, None),
         Err(e) => (Config::default(), Some(e)),
     };
+    // A panic's message goes to the log before the process does: a service has no terminal.
+    let (at, hook) = (dir.clone(), std::panic::take_hook());
+    std::panic::set_hook(Box::new(move |p| {
+        append_log(&at, &format!("{}: {p}", stamp()));
+        hook(p);
+    }));
     let mut d = Daemon::new(version, Some(dir), cfg, Box::new(plat::Real))?;
+    d.log(format!("wirebond {version} started"));
     // §22.3: the update's trial bookkeeping comes first, and may roll back.
     d.updater.exe = Some(_exe.clone());
     let sdir = d.dir.clone();
@@ -544,7 +590,12 @@ impl Daemon {
         self.start.elapsed().as_nanos() as Mono
     }
 
+    /// One event, with its time: to the log file, and to the lines status shows.
     fn log(&mut self, line: String) {
+        let line = format!("{}: {line}", stamp());
+        if let Some(dir) = &self.dir {
+            append_log(dir, &line);
+        }
         if self.logs.len() == LOG_LINES {
             self.logs.pop_front();
         }

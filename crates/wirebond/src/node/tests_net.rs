@@ -336,7 +336,7 @@ fn a_wake_re_punches_and_asks_stun_again() {
     run(&mut [&mut a, &mut c], "bond up and mapped", |n| {
         n[1].d.bonds.first().is_some_and(|b| b.state == BondState::Up) && asked.load(Ordering::SeqCst) >= 1
     });
-    let wakes = |d: &Daemon| d.logs.iter().filter(|l| l.starts_with("woke from sleep")).count();
+    let wakes = |d: &Daemon| d.logs.iter().filter(|l| l.contains("Z: woke from sleep")).count();
     let (woke, before) = (wakes(&c.d), asked.load(Ordering::SeqCst));
     c.knobs.lock().unwrap().slept = 30 * SEC; // the lid closes for 30 s
     run(&mut [&mut a, &mut c], "the wake", |n| wakes(&n[1].d) > woke);
