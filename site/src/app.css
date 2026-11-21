@@ -159,6 +159,13 @@ footer.site p {
 	min-width: 0;
 }
 
+/* A page's text stands in the middle of the frame the header and footer span, so a wide screen
+   reads as a page rather than a document hung on the left; the docs centre their contents and
+   text together on the same axis. */
+main > .prose {
+	margin-inline: auto;
+}
+
 .prose h1 {
 	font-size: clamp(1.75rem, 1.2rem + 2.5vw, 2.5rem);
 	line-height: 1.2;
@@ -377,6 +384,8 @@ details summary {
 	.doc {
 		grid-template-columns: 16rem minmax(0, 1fr);
 		gap: 2.5rem;
+		max-width: calc(16rem + 2.5rem + var(--measure));
+		margin-inline: auto;
 	}
 
 	.doc > .prose {
