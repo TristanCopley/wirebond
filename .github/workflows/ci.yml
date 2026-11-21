@@ -331,6 +331,7 @@ jobs:
           fi
           sudo wirebond uninstall
           if [ "$RUNNER_OS" = macOS ]; then
+            pgrep -fl 'wirebond run' || echo 'no daemon runs'
             ifconfig | tee ifaces
             { sudo pfctl -a com.apple/wirebond -s nat 2>/dev/null || true; } | tee nat
             echo 'show State:/Network/Service/com.wirebond/DNS' | scutil | tee key

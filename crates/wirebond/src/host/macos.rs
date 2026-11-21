@@ -103,12 +103,24 @@ pub(super) fn relink(s: Scope, exe: &Path) -> bool {
     s == Scope::System && link(Path::new(LINK), exe).unwrap_or(false)
 }
 
-/// Boots the job out and removes its plist, LINK, and the application firewall's entry for `exe`.
-/// That needs root; while the firewall still lists `exe`, the note is the command for the CLI to
-/// print (§22.2).
+/// Boots the job out, waits for it to be gone, and removes its plist, LINK, and the application
+/// firewall's entry for `exe`. That needs root; while the firewall still lists `exe`, the note is
+/// the command for the CLI to print (§22.2).
+///
+/// `launchctl bootout` sends SIGTERM and may return while the daemon is still in its teardown
+/// ("Operation now in progress"): uninstall would then remove the state directory under a daemon
+/// that still holds its utun. launchd forgets the job once its process has exited, which
+/// `launchctl print` then says; the wait is at most 10 s, as Windows waits for its service.
 pub(super) fn unregister(s: Scope, exe: &Path) -> io::Result<(bool, String)> {
     let (_, job, dom) = layout(s);
-    let _ = run("launchctl", &["bootout", &format!("{dom}/com.wirebond")]);
+    let target = format!("{dom}/com.wirebond");
+    let _ = run("launchctl", &["bootout", &target]);
+    for _ in 0..100 {
+        if run("launchctl", &["print", &target]).is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     let unlinked = s == Scope::System && unlink(Path::new(LINK), exe)?;
     let changed = remove([&job])? || unlinked;
     let _ = run(FW, &[OsStr::new("--remove"), exe.as_ref()]); // fails without root, or when not listed
