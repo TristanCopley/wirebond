@@ -54,7 +54,7 @@ Decisions for the owner:
    - `a5_bandwidth`, 15 of 20 seeds: the longest frame gap is 615-628 ms against 130 ms.
    - `a6_bandwidth`, 19 of 20 seeds: about 47 frames stay unrecovered from 1 s after the drops begin, against at most 1.
 
-   Reproduce one: `WIREBOND_LONG=1 WIREBOND_SEED=1 cargo test -p wirebond-netsim --release --test accept -- --exact a5_bandwidth`. Either fix bandwidth's failover over every seed, or run the full set only for final releases (tags without `-`) and tag `v2.0.0-rc.1` now. Until a release exists, the one-line installers have nothing to download.
+   Reproduce one: `WIREBOND_LONG=1 WIREBOND_SEED=1 cargo test -p wirebond-netsim --release --test accept -- --exact a5_bandwidth`. Either fix bandwidth's failover over every seed, or run the full set only for final releases (tags without `-`) and tag `v2.0.0-rc.1` now. Until a release exists, the one-line installers have nothing to download. Meanwhile a release candidate can go out by hand: a manual run of `release.yml` given a tag (Actions, release, Run workflow, `tag`) publishes after `ci.yml`'s checks and `system.yml`, without the full set, and says so in the release's notes. A pushed tag is gated as before.
 
 Known limitations and gaps:
 

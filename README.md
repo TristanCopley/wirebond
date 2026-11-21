@@ -132,4 +132,6 @@ sudo tests/system/run.sh                      # the system harness in network na
 
 Rust 1.99.1. The crates: `crates/core` (the pure engine), `crates/wirebond` (daemon, OS layer,
 CLI), `crates/netsim` (simulator and acceptance), `crates/load` (the harness's load and echo tool).
-A tag `v*.*.*` builds, tests and publishes a release (`.github/workflows/release.yml`).
+A tag `v*.*.*` builds, tests and publishes a release (`.github/workflows/release.yml`). A manual
+run of that workflow given a tag publishes one too, after the same checks less the simulator's
+full set: how a release candidate goes out.
