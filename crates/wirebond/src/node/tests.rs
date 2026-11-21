@@ -68,7 +68,13 @@ impl Platform for Fake {
 
     fn egress_enable(&mut self, _: &host::Egress) -> io::Result<host::EgressOn> {
         self.calls.lock().unwrap().push("egress on".into());
-        Ok(host::EgressOn { v4: true, v6: true, addr4: (Ipv4Addr::new(10, 77, 0, 1), 24), uplink: Some("eth0".into()) })
+        Ok(host::EgressOn {
+            v4: true,
+            v6: true,
+            addr4: (Ipv4Addr::new(10, 77, 0, 1), 24),
+            uplink: Some("eth0".into()),
+            why: None,
+        })
     }
 
     fn egress_disable(&mut self, _: &host::Egress) -> io::Result<()> {
@@ -179,7 +185,7 @@ fn bond_end_to_end(net: u8, mode: Mode) {
     assert!(acalls.lock().unwrap().contains(&"egress on".to_string()));
     assert_eq!(a.status(false).anchor.unwrap().bonds[0].addr4.as_deref(), Some("10.77.0.2"));
     assert_eq!(a.bonds[0].mode, mode, "bond open carries the mode");
-    assert_eq!(c.logs.iter().filter(|l| l.starts_with("bond ok")).count(), 1, "one connect: {:?}", c.logs);
+    assert_eq!(c.logs.iter().filter(|l| l.contains("Z: bond ok: ")).count(), 1, "one connect: {:?}", c.logs);
 
     // `wirebond mode` reaches the anchor's side of the bond (§14, §16 `mode`), and back.
     let other = if mode == Mode::Performance { Mode::Bandwidth } else { Mode::Performance };
@@ -255,6 +261,24 @@ fn a_device_off_the_allow_list_is_refused() {
     assert!(!ccalls.lock().unwrap().iter().any(|c| c.starts_with("capture on")), "no capture without a bond");
 }
 
+/// §10.1: a name on the allow-list keeps the addresses it resolved to while it is resolved again
+/// and when that lookup finds nothing; only a new answer replaces them.
+#[test]
+fn an_allow_list_name_keeps_its_addresses_while_it_is_resolved_again() {
+    let name = "mac.wirebond.invalid".to_string();
+    let acfg = Config { role: Role::Anchor, allow: vec![name.clone()], ..Config::default() };
+    let (mut a, _, _) = node("xanth", ip(47, 2), ip(47, 20), acfg);
+    let (mac, moved) = (ip(47, 10), ip(47, 11));
+    a.resolved.insert(name.clone(), (vec![mac], -RESOLVE_EVERY));
+    a.step(&mut host::Poll::default(), Duration::from_millis(1)).unwrap();
+    assert!(a.resolved[&name].1 >= 0, "the first scan asks again");
+    assert_eq!(a.allowed(mac), Some(name.clone()), "allowed while the lookup is out");
+    a.event(ctl::Ev::Resolved { name: name.clone(), addrs: Vec::new() });
+    assert_eq!(a.allowed(mac), Some(name.clone()), "allowed after a lookup that found nothing");
+    a.event(ctl::Ev::Resolved { name: name.clone(), addrs: vec![moved] });
+    assert_eq!((a.allowed(moved), a.allowed(mac)), (Some(name), None), "a new answer replaces the old");
+}
+
 #[test]
 fn an_unreachable_anchor_backs_off() {
     let ccfg = Config { role: Role::Client, anchor: Some(ip(34, 20).to_string()), ..Config::default() };
@@ -308,6 +332,41 @@ fn config_verbs_change_the_config() {
     assert_eq!((st.role, st.version.as_str()), (Role::None, "2.0.0"));
 }
 
+/// Every event has its time, in status and in the state directory's log, which keeps its newer
+/// half once it is past LOG_MAX.
+#[test]
+fn events_are_timed_and_kept_in_a_capped_log_file() {
+    assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+    assert_eq!(rfc3339(951_782_399), "2000-02-28T23:59:59Z");
+    assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z", "a leap day");
+    assert_eq!(rfc3339(1_795_270_625), "2026-11-21T14:17:05Z");
+    assert_eq!(rfc3339(4_107_542_399), "2100-02-28T23:59:59Z");
+    assert_eq!(rfc3339(4_107_542_400), "2100-03-01T00:00:00Z", "2100 is no leap year");
+
+    let dir = std::env::temp_dir().join(format!("wirebond-log-{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    let (mut d, _, _) = node("mac", ip(48, 1), ip(48, 10), Config::default());
+    d.dir = Some(dir.clone());
+    d.log("the first event".into());
+    let timed = |l: &str, what: &str| {
+        let (at, rest) = l.split_at(20);
+        at.ends_with('Z') && at.as_bytes()[10] == b'T' && rest == format!(": {what}")
+    };
+    let read = || fs::read_to_string(dir.join(LOG_FILE)).unwrap();
+    assert!(timed(&d.status(false).events[0], "the first event"), "{:?}", d.logs);
+    assert!(timed(read().trim_end(), "the first event"), "{}", read());
+    // Far more than LOG_MAX of events: the file stays near it and holds whole lines, the newest.
+    let line = "x".repeat(1000);
+    for i in 0..2 * LOG_MAX / 1000 {
+        d.log(format!("{i} {line}"));
+    }
+    let (log, last) = (read(), format!("{} {line}", 2 * LOG_MAX / 1000 - 1));
+    assert!(log.len() > LOG_MAX / 2 && log.len() <= LOG_MAX + 1100, "{}", log.len());
+    assert!(log.lines().all(|l| timed(l, &l[22..]) && l.ends_with(&line)), "whole lines only");
+    assert!(timed(log.lines().last().unwrap(), &last) && !log.contains("the first event"));
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[test]
 fn config_verbs_save_config_json() {
     let dir = std::env::temp_dir().join(format!("wirebond-node-{}", std::process::id()));
@@ -348,6 +407,34 @@ fn a_lost_bond_fails_open_after_fail_open_after() {
     assert_eq!(ccalls.lock().unwrap().last().map(String::as_str), Some("capture off"));
     assert!(c.capture.is_none());
     assert!(c.status(false).problems.iter().any(|p| p.code == problem::BOND_DOWN));
+}
+
+/// §17, §5.4: an anchor's goodbye (`anchor off`, a clean stop or reboot) ends the client's bond,
+/// so its capture goes at once: nothing would carry what it captures. The client keeps redialing,
+/// and capture returns with the next bond's first validated lane.
+#[test]
+fn an_anchors_goodbye_removes_capture_at_once_and_the_next_bond_brings_it_back() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(40, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(40, 20).to_string()), ..Config::default() };
+    let (mut a, _, _) = node("xanth", ip(40, 2), ip(40, 20), acfg);
+    let (mut c, _, ccalls) = node("mac", ip(40, 1), ip(40, 10), ccfg);
+    let captures = || ccalls.lock().unwrap().iter().filter(|c| c.starts_with("capture on")).count();
+    run(&mut a, &mut c, "bond up", |_, c| c.bonds.first().is_some_and(|b| b.state == BondState::Up));
+    assert!(c.capture.is_some() && captures() == 1);
+
+    assert!(a.answer(Request::AnchorOff).changed);
+    let t = Instant::now();
+    run(&mut a, &mut c, "the goodbye arrives", |_, c| c.bonds.is_empty());
+    assert!(t.elapsed() < Duration::from_secs(1), "at once, not after FAIL_OPEN_AFTER: {:?}", t.elapsed());
+    assert!(c.capture.is_none() && c.tun.is_none(), "no capture without a bond");
+    assert_eq!(ccalls.lock().unwrap().last().map(String::as_str), Some("capture off"));
+    assert_eq!(c.cfg.role, Role::Client, "still a client: it redials");
+    assert!(c.status(false).problems.iter().any(|p| p.code == problem::ANCHOR_UNREACHABLE));
+
+    assert!(a.answer(Request::AnchorOn).changed);
+    run(&mut a, &mut c, "bond back", |_, c| c.bonds.first().is_some_and(|b| b.state == BondState::Up));
+    assert!(c.capture.is_some() && captures() == 2, "capture returns with the new bond");
+    assert!(c.status(false).problems.iter().all(|p| p.code != problem::ANCHOR_UNREACHABLE));
 }
 
 #[test]
@@ -391,6 +478,47 @@ fn a_captive_link_carries_no_lane() {
     let st = d.status(false);
     assert!(st.links[0].captive);
     assert!(st.problems.iter().any(|p| p.code == problem::CAPTIVE_PORTAL && p.link.as_deref() == Some("lo-a")));
+}
+
+/// §17: a link flagged behind a portal is checked again, so after the login it is offered without
+/// toggling the link or restarting the daemon.
+#[test]
+fn a_captive_link_is_checked_again_and_offered_after_the_login() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let ln = std::net::TcpListener::bind((ip(41, 80), 0)).unwrap();
+    let port = ln.local_addr().unwrap().port();
+    let (logged_in, asked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let (li, n) = (logged_in.clone(), asked.clone());
+    thread::spawn(move || {
+        for mut s in ln.incoming().flatten() {
+            let _ = io::Read::read(&mut s, &mut [0u8; 1024]);
+            n.fetch_add(1, Ordering::SeqCst);
+            let _ = s.write_all(match li.load(Ordering::SeqCst) {
+                false => b"HTTP/1.0 302 Found\r\nLocation: http://login.hotel/\r\n\r\n".as_slice(),
+                true => b"HTTP/1.0 200 OK\r\n\r\n<HTML><BODY>Success</BODY></HTML>".as_slice(),
+            });
+        }
+    });
+    let (mut d, _, _) = node("mac", ip(41, 1), ip(41, 10), Config::default());
+    d.captive_url = Some((ip(41, 80).to_string(), port, "/hotspot-detect.html".into()));
+    let mut p = host::Poll::default();
+    let t = Instant::now();
+    let mut until = |d: &mut Daemon, what: &str, done: &dyn Fn(&Daemon) -> bool| {
+        while !done(d) {
+            assert!(t.elapsed() < Duration::from_secs(20), "{what}: {:?}", d.logs);
+            d.step(&mut p, Duration::from_millis(5)).unwrap();
+        }
+    };
+    until(&mut d, "flagged", &|d| !d.captive.is_empty());
+    // Still behind the portal: asked again, a scan apart, and still held back.
+    until(&mut d, "asked again", &|_| asked.load(Ordering::SeqCst) >= 2);
+    assert!(!d.captive.is_empty() && d.offer().links.is_empty());
+    assert!(t.elapsed() >= Duration::from_nanos(LINK_SCAN as u64), "one check a scan, not a storm");
+    logged_in.store(true, Ordering::SeqCst);
+    until(&mut d, "cleared", &|d| d.captive.is_empty());
+    assert_eq!(d.offer().links.len(), 1, "the link is offered again");
+    let st = d.status(false);
+    assert!(!st.links[0].captive && st.problems.iter().all(|p| p.code != problem::CAPTIVE_PORTAL), "{st:?}");
 }
 
 /// Runs `req` on `c` until its reply comes.

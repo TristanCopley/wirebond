@@ -12,9 +12,10 @@ use std::net::IpAddr;
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::prelude::*;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
-use std::{io, ptr};
+use std::{io, ptr, thread};
 
 /// The interfaces as getifaddrs lists them, Wi-Fi as the OS's `wifi` tells it.
 pub(super) fn ifaces() -> io::Result<Vec<Iface>> {
@@ -168,12 +169,41 @@ pub fn terminal() -> bool {
     io::IsTerminal::is_terminal(&io::stdout())
 }
 
-/// Runs the daemon directly: launchd and systemd stop it with SIGTERM, whose default action ends
-/// the process, so `stop` never fires. First it raises the descriptor limit (`raise_nofile`).
+/// Where SIGTERM and SIGINT write a byte while the daemon runs (`run_service`).
+static STOP: AtomicI32 = AtomicI32::new(-1);
+
+/// SIGTERM's and SIGINT's handler: one byte to STOP, and nothing else.
+extern "C" fn on_stop(_: c_int) {
+    // SAFETY: write is async-signal-safe, and STOP is a nonblocking socket open while this is set.
+    unsafe { libc::write(STOP.load(Ordering::Relaxed), [0u8].as_ptr().cast(), 1) };
+}
+
+/// Runs the daemon directly. launchd (`bootout`), systemd (`systemctl stop`) and a terminal stop
+/// it with SIGTERM or SIGINT: `stop` then fires, so the daemon removes capture and closes its
+/// bonds before it exits (§5.4), where the signal's default action would end it at once and leave
+/// the routes and the resolver pointing at a device that is gone. First it raises the descriptor
+/// limit (`raise_nofile`).
 pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Result<()> {
     raise_nofile();
-    let (_never, stop) = mpsc::channel();
-    run(stop)
+    let (tx, stop) = mpsc::channel();
+    let (from, to) = wake_pair()?;
+    STOP.store(to.into_raw_fd(), Ordering::Relaxed);
+    from.set_nonblocking(false)?;
+    thread::spawn(move || {
+        // A signal may interrupt the wait it ends.
+        while from.recv(&mut [0]).is_err_and(|e| e.kind() == io::ErrorKind::Interrupted) {}
+        let _ = tx.send(());
+    });
+    let on = |h: libc::sighandler_t| {
+        for sig in [libc::SIGTERM, libc::SIGINT] {
+            // SAFETY: on_stop only calls write, and SIG_DFL is the default again.
+            unsafe { libc::signal(sig, h) };
+        }
+    };
+    on(on_stop as extern "C" fn(c_int) as libc::sighandler_t);
+    let r = run(stop);
+    on(libc::SIG_DFL);
+    r
 }
 
 /// Raises the soft RLIMIT_NOFILE to the hard limit: launchd starts a job at 256 and systemd a
@@ -307,6 +337,21 @@ pub(super) fn run<S: AsRef<std::ffi::OsStr>>(cmd: &str, args: &[S]) -> io::Resul
     let out = c.args(args).output()?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if out.status.success() { Ok(out.stdout) } else { Err(io::Error::other(format!("{c:?}: {}", stderr.trim()))) }
+}
+
+/// What macOS's `route` did, from how it ended (`ok`) and what it wrote to standard error. Apple's
+/// tool reports a refused route there (another VPN's 0.0.0.0/1, a subnet clash) and may still exit
+/// 0, so any text is a failure, as with scutil; except `done`, which says the work was done already:
+/// "File exists" for an add, "not in table" for a delete.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn route_said(ok: bool, stderr: &str, done: &str) -> io::Result<()> {
+    let said = stderr.trim();
+    match said {
+        _ if said.contains(done) => Ok(()),
+        "" if ok => Ok(()),
+        "" => Err(io::Error::other("route failed without saying why")),
+        _ => Err(io::Error::other(said.to_string())),
+    }
 }
 
 /// The launchd job, daemon or agent: started at load, kept alive, no log paths (§22.2).

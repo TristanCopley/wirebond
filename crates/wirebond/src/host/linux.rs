@@ -294,7 +294,9 @@ mod v2 {
         forward(v6, up6.as_deref()).inspect_err(|_| drop(egress_disable(e)))?;
         let (a, p) = e.net4;
         let first = Ipv4Addr::from_bits(mask4(a, p).to_bits() | 1);
-        Ok(EgressOn { v4: up4.is_some(), v6: up6.is_some(), addr4: (first, p), uplink: up4.or(up6) })
+        let (v4, v6, uplink) = (up4.is_some(), up6.is_some(), up4.or(up6));
+        let why = uplink.is_none().then(|| "no default route".to_string());
+        Ok(EgressOn { v4, v6, addr4: (first, p), uplink, why })
     }
 
     /// ip_forward, and IPv6 forwarding, saved and set (§6.2). IPv6 forwarding makes the kernel

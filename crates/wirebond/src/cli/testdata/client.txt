@@ -9,11 +9,11 @@ links
 bond to xanth · performance · up · egress IPv4 and IPv6
   addresses: mac 10.77.0.2 fd77:b0d::2 · xanth 10.77.0.1 fd77:b0d::1
   flows: 143 live, 9 small
-  lane  links             group  state     rtt     dev    loss  rate    share  first  rescues
-  0     mesh              1      up        64.2ms  1.4ms  0.0%  12Mbps  0%     2%     0/min
-  257   Wi-Fi → eth       1      up        61.0ms  1.1ms  0.0%  38Mbps  50%    71%    12/min
-  513   iPhone USB → eth  2      suspect   70.4ms  6.3ms  0.5%  80Mbps  50%    27%    31/min
-  769   en7 → eth         3      punching  -       -      -     -       -      -      0/min
+  lane  links             group  state     rtt     loss  rate    share  first  rescues
+  0     mesh              1      up        64.2ms  0.0%  12Mbps  0%     2%     0/min
+  257   Wi-Fi → eth       1      up        61.0ms  0.0%  38Mbps  50%    71%    12/min
+  513   iPhone USB → eth  2      suspect   70.4ms  0.5%  80Mbps  50%    27%    31/min
+  769   en7 → eth         3      punching  -       -     -       -      -      0/min
 
 Moonlight: add the host 10.77.0.1 to stream from xanth
 

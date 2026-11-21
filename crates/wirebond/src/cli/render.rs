@@ -87,15 +87,16 @@ fn anchor_bond(b: &AnchorBond) -> String {
     head + &more + &lanes(&b.lanes, b.mode, "    ")
 }
 
-/// One row per lane (§11.5, §20.4): delay (RTT), jitter (dev), loss, rate and share, then what
-/// the mode measures: first arrivals and rescues in performance, reorder wait in bandwidth. The
-/// one-way delays and tx/rx rates are in --json; a row stays within 100 columns.
+/// One row per lane (§11.5, §20.4): delay (RTT), loss, rate and share, then what the mode
+/// measures: first arrivals and rescues in performance, reorder wait in bandwidth. The one-way
+/// delays are in --json; a row stays within 100 columns. No jitter column: the daemon has no
+/// figure for it (`Lane::dev_ms`), and a column of zeros would read as none measured.
 fn lanes(ls: &[Lane], mode: Mode, indent: &str) -> String {
     if ls.is_empty() {
         return format!("{indent}no lanes yet\n");
     }
     let tail = if mode == Mode::Performance { "first\trescues" } else { "reorder p50/p99" };
-    let mut rows = vec![format!("lane\tlinks\tgroup\tstate\trtt\tdev\tloss\trate\tshare\t{tail}")];
+    let mut rows = vec![format!("lane\tlinks\tgroup\tstate\trtt\tloss\trate\tshare\t{tail}")];
     for l in ls {
         let name = if l.id == 0 { "mesh".to_string() } else { l.links.join(" → ") };
         // A lane never measured shows no numbers rather than zeros.
@@ -106,10 +107,10 @@ fn lanes(ls: &[Lane], mode: Mode, indent: &str) -> String {
             Mode::Performance => format!("{}\t{}/min", pct(l.first_arrivals), l.rescues_per_min),
             Mode::Bandwidth => num(format!("{:.1}/{:.1}ms", l.reorder_p50_ms, l.reorder_p99_ms)),
         };
-        let (rtt, dev) = (num(format!("{:.1}ms", l.rtt_ms)), num(format!("{:.1}ms", l.dev_ms)));
+        let rtt = num(format!("{:.1}ms", l.rtt_ms));
         let (loss, rate) = (num(format!("{:.1}%", 100.0 * l.loss)), num(format!("{:.0}Mbps", l.rate_mbps)));
         let (id, group, state, share) = (l.id, l.group, l.state.as_str(), pct(l.share));
-        rows.push(format!("{id}\t{name}\t{group}\t{state}\t{rtt}\t{dev}\t{loss}\t{rate}\t{share}\t{end}"));
+        rows.push(format!("{id}\t{name}\t{group}\t{state}\t{rtt}\t{loss}\t{rate}\t{share}\t{end}"));
     }
     table(&rows, indent)
 }

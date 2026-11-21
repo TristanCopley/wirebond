@@ -35,11 +35,11 @@ mod tests_net;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{fs, thread};
 
 use wirebond_core::{
     self as core, ALL_LANES_DOWN, FAIL_OPEN_AFTER, IDLE_AFTER, LANES_BLOCKED_AFTER, LINK_SCAN, LOG_LINES, MAX_CANDS,
@@ -59,6 +59,8 @@ const IDLE_WAIT: Duration = Duration::from_millis(500);
 const LIFE_EVERY: Mono = 20 * MS;
 /// How often an anchor resolves the names on its allow-list again.
 const RESOLVE_EVERY: Mono = 30 * SEC;
+/// How often a host call that failed is tried again: an anchor's TUN device, a client's capture.
+const HOST_RETRY: Mono = 5 * SEC;
 /// ICMPv6 unreachables a client writes a second at most (§5.5).
 const ICMP6_RATE: u32 = 100;
 /// Packets read from one source per loop turn at most, so no source starves the others.
@@ -67,8 +69,48 @@ const BURST: usize = 512;
 /// work waiting returns in a few microseconds.
 const SLEPT: Duration = Duration::from_micros(10);
 
+/// The daemon's log in the state directory, which `uninstall` removes: every event with its time,
+/// kept across restarts, where status shows the last STATUS_EVENTS of this run.
+const LOG_FILE: &str = "wirebond.log";
+/// The log's size at most, give or take a line.
+const LOG_MAX: usize = 256 << 10;
+
+/// Now as RFC 3339 in UTC, to the second.
+fn stamp() -> String {
+    rfc3339(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()))
+}
+
+/// `secs` since 1970 as RFC 3339 in UTC (the days as a civil date: Howard Hinnant's algorithm).
+fn rfc3339(secs: u64) -> String {
+    let (z, s) = (secs / 86_400 + 719_468, secs % 86_400);
+    let (era, doe) = (z / 146_097, z % 146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let y = yoe + era * 400 + u64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", s / 3_600, s % 3_600 / 60, s % 60)
+}
+
+/// Appends `line` to the log in `dir`. One file, no rotation: once past LOG_MAX it keeps its newer
+/// half, from a line's start. A log that cannot be written is not the daemon's failure.
+fn append_log(dir: &Path, line: &str) {
+    let path = dir.join(LOG_FILE);
+    if fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX as u64)
+        && let Ok(old) = fs::read(&path)
+        && old.len() > LOG_MAX
+    {
+        let half = old.len() - LOG_MAX / 2;
+        let from = old[half..].iter().position(|&b| b == b'\n').map_or(old.len(), |i| half + i + 1);
+        let _ = fs::write(&path, &old[from..]);
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// The daemon. `wirebond run` calls it inside host::run_service; `version` is the build's. It
-/// returns when `stop` fires (Windows' service stop; SIGTERM ends the process elsewhere).
+/// returns when `stop` fires (Windows' service stop; SIGTERM and SIGINT elsewhere).
 pub fn run(version: &str, stop: Receiver<()>) -> io::Result<()> {
     let scope = host::need(false);
     let (_exe, dir) = scope.paths();
@@ -76,7 +118,14 @@ pub fn run(version: &str, stop: Receiver<()>) -> io::Result<()> {
         Ok(cfg) => (cfg, None),
         Err(e) => (Config::default(), Some(e)),
     };
+    // A panic's message goes to the log before the process does: a service has no terminal.
+    let (at, hook) = (dir.clone(), std::panic::take_hook());
+    std::panic::set_hook(Box::new(move |p| {
+        append_log(&at, &format!("{}: {p}", stamp()));
+        hook(p);
+    }));
     let mut d = Daemon::new(version, Some(dir), cfg, Box::new(plat::Real))?;
+    d.log(format!("wirebond {version} started"));
     // §22.3: the update's trial bookkeeping comes first, and may roll back.
     d.updater.exe = Some(_exe.clone());
     let sdir = d.dir.clone();
@@ -227,10 +276,16 @@ pub struct Daemon {
     tun: Option<Box<dyn TunDev>>,
     /// A client's capture while installed.
     capture: Option<host::Capture>,
+    /// Why a client's capture could not be installed, and when it is tried again.
+    capture_fault: Option<(String, Mono)>,
     /// A client's resolver at the anchor (`bond ok`'s dns).
     dns: Option<IpAddr>,
     /// An anchor's egress: what was asked and what it achieved.
     egress: Option<(host::Egress, Option<host::EgressOn>)>,
+    /// What an anchor lacks and why (its TUN device, egress, the DNS relay): status's `no_egress`.
+    /// Without the device it refuses bonds, and opens it again at `anchor_retry`.
+    anchor_fault: Option<String>,
+    anchor_retry: Mono,
     /// An anchor's DNS relay (§7).
     dns_relay: Option<dns::Relay>,
     /// Allow-list names and the addresses they resolved to, and when.
@@ -241,6 +296,8 @@ pub struct Daemon {
     view_waiting: HashMap<u64, Sender<Reply>>,
     /// The links a captive portal answered on (§17): they carry no lane.
     captive: Vec<IpAddr>,
+    /// The links whose captive-portal check is in flight: one at a time each.
+    captive_checks: Vec<IpAddr>,
     /// Where the captive-portal check goes; None turns it off (tests).
     captive_url: Option<(String, u16, String)>,
     /// §5.5's rate limit: the current second's start and the unreachables sent in it.
@@ -449,6 +506,18 @@ fn kind(l: &host::Link) -> LinkKind {
     }
 }
 
+/// A peer's link as the links table names it: its support, or the label its kind came from
+/// (`kind`), with its id where the kind says no more.
+fn peer_label(o: &proto::LinkOffer) -> String {
+    match (&o.support, o.kind) {
+        (Some(name), _) => name.clone(),
+        (None, LinkKind::Wifi) => "Wi-Fi".into(),
+        (None, LinkKind::Ethernet) => "Ethernet".into(),
+        (None, LinkKind::Usb) => "iPhone".into(),
+        (None, k) => format!("{}{}", k.as_str(), o.id),
+    }
+}
+
 impl Daemon {
     pub fn new(version: &str, dir: Option<PathBuf>, cfg: Config, plat: Box<dyn Platform>) -> io::Result<Daemon> {
         let (ev_tx, ev_rx) = mpsc::channel();
@@ -484,13 +553,17 @@ impl Daemon {
             unreachable: None,
             tun: None,
             capture: None,
+            capture_fault: None,
             dns: None,
             egress: None,
+            anchor_fault: None,
+            anchor_retry: 0,
             dns_relay: None,
             resolved: HashMap::new(),
             view_waiting: HashMap::new(),
             pick: None,
             captive: Vec::new(),
+            captive_checks: Vec::new(),
             captive_url: Some((link::CAPTIVE_URL.0.into(), link::CAPTIVE_URL.1, link::CAPTIVE_URL.2.into())),
             icmp6: (0, 0),
             host_problems: Vec::new(),
@@ -521,7 +594,12 @@ impl Daemon {
         self.start.elapsed().as_nanos() as Mono
     }
 
+    /// One event, with its time: to the log file, and to the lines status shows.
     fn log(&mut self, line: String) {
+        let line = format!("{}: {line}", stamp());
+        if let Some(dir) = &self.dir {
+            append_log(dir, &line);
+        }
         if self.logs.len() == LOG_LINES {
             self.logs.pop_front();
         }
@@ -870,11 +948,22 @@ impl Daemon {
         true
     }
 
+    /// Resolves `name` again, off the loop, when its addresses are older than `every` (10 s while
+    /// it has none). The addresses it had stay until new ones arrive.
+    fn resolve(&mut self, name: &str, now: Mono, every: Mono) {
+        let old = self.resolved.get(name);
+        if old.is_none_or(|(a, at)| now - at >= if a.is_empty() { 10 * SEC } else { every }) {
+            let keep = old.map(|(a, _)| a.clone()).unwrap_or_default();
+            self.resolved.insert(name.to_string(), (keep, now));
+            ctl::resolve(name.to_string(), self.ev_tx.clone(), self.waker.clone());
+        }
+    }
+
     /// The configured STUN servers' addresses (§9.2): literal ones, and names resolved off the
-    /// loop, again every STUN_EVERY (every 10 s while a name resolves to nothing).
+    /// loop, again every STUN_EVERY.
     fn stun_servers(&mut self, now: Mono) -> Vec<SocketAddr> {
         let mut out = Vec::new();
-        for e in &self.cfg.stun {
+        for e in self.cfg.stun.clone() {
             if let Ok(a) = e.parse::<SocketAddr>() {
                 out.push(link::unmap(a));
                 continue;
@@ -883,12 +972,7 @@ impl Daemon {
             let Ok(port) = port.parse::<u16>() else { continue };
             let old = self.resolved.get(name);
             out.extend(old.iter().flat_map(|(a, _)| a.iter().map(|&ip| SocketAddr::new(ip.to_canonical(), port))));
-            let again = old.is_none_or(|(a, at)| now - at >= if a.is_empty() { 10 * SEC } else { STUN_EVERY });
-            if again {
-                let keep = old.map(|(a, _)| a.clone()).unwrap_or_default();
-                self.resolved.insert(name.to_string(), (keep, now));
-                ctl::resolve(name.to_string(), self.ev_tx.clone(), self.waker.clone());
-            }
+            self.resolve(name, now, STUN_EVERY);
         }
         out
     }
@@ -954,8 +1038,9 @@ impl Daemon {
 
     /// The default route (§6.2, §8), re-checked every LINK_SCAN while it is on one of my links:
     /// the link carrying the mesh, whose group the mesh lane takes, and an anchor's uplink, whose
-    /// egress is enabled again when it moves (macOS's pf rules and Windows' ICS name it; Linux's
-    /// rules name no interface, so enabling them again changes nothing there).
+    /// egress is enabled again when it appears (the anchor started before the network) or moves
+    /// (macOS's pf rules and Windows' ICS name it; Linux's rules name no interface, but what they
+    /// achieve follows the default route).
     fn follow_default(&mut self) {
         let Some(a) = self.plat.default_addr() else { return };
         let Some(name) = self.socks.iter().find(|s| s.id != 0 && s.link.addr == a).map(|s| s.link.name.clone()) else {
@@ -965,22 +1050,13 @@ impl Daemon {
         if was == Some(a) {
             return;
         }
-        if let Some(was) = was {
-            self.log(format!("default route moved from {was} to {name} {a}"));
+        match was {
+            Some(was) => self.log(format!("default route moved from {was} to {name} {a}")),
+            None => self.log(format!("default route on {name} {a}")),
         }
-        if was.is_some()
-            && self.cfg.role == Role::Anchor
-            && let Some((e, _)) = self.egress.take()
-        {
-            let on = match self.plat.egress_enable(&e) {
-                Ok(on) => Some(on),
-                Err(err) => {
-                    self.host_failed("egress", &err);
-                    None
-                }
-            };
-            self.log(format!("uplink moved: egress enabled again, {:?}", on.as_ref().map(|o| &o.uplink)));
-            self.egress = Some((e, on));
+        // Before the anchor's first `anchor_on` (the daemon's first turn) there is nothing to redo.
+        if self.cfg.role == Role::Anchor && self.egress.is_some() {
+            self.anchor_on();
         }
         self.links_changed();
     }
@@ -1093,20 +1169,27 @@ impl Daemon {
             ctl::Ev::Down { id } => self.chan_down(id),
             ctl::Ev::Egress { id, ms } => self.measure_egress(id, ms),
             ctl::Ev::Captive { addr, captive } => {
+                self.captive_checks.retain(|a| *a != addr);
                 let was = self.captive.contains(&addr);
                 if captive == Some(true) && !was {
                     self.captive.push(addr);
                     self.log(format!("captive portal on {addr}: the link carries no lane"));
                 } else if captive == Some(false) && was {
                     self.captive.retain(|a| *a != addr);
+                    self.log(format!("captive portal on {addr} passed: the link carries lanes"));
                 } else {
                     return;
                 }
                 self.links_changed();
             }
             ctl::Ev::Resolved { name, addrs } => {
+                // A lookup that found nothing (the resolver is away) keeps the last answer.
                 let now = self.now();
-                self.resolved.insert(name, (addrs, now));
+                let e = self.resolved.entry(name).or_default();
+                if !addrs.is_empty() {
+                    e.0 = addrs;
+                }
+                e.1 = now;
             }
         }
     }
@@ -1179,7 +1262,14 @@ impl Daemon {
             Msg::Bond(proto::Bond::Close) => {
                 if let Some(bi) = self.bonds.iter().position(|b| b.chan == Some(id)) {
                     self.log(format!("{} closed the bond", self.bonds[bi].peer));
-                    self.end_bond(bi, false);
+                    if self.cfg.role == Role::Client {
+                        // §17: a bond the anchor ended fails open at once (no bond is left to
+                        // count FAIL_OPEN_AFTER on); the redial brings capture back (§5.4).
+                        self.client_close(false);
+                        self.unreachable = Some("the anchor closed the bond".into());
+                    } else {
+                        self.end_bond(bi, false);
+                    }
                 }
             }
             Msg::Key(k) => {
@@ -1312,6 +1402,11 @@ impl Daemon {
             self.log(format!("{} ({peer}) is not on the allow-list", link::clean(&h.name, link::LABEL_MAX)));
             return self.refuse(id, ErrorCode::NotAllowed, "not on the allow-list");
         };
+        if self.tun.is_none() {
+            // Every packet of the bond would be dropped: the client redials, and by then the
+            // device may have opened (`anchor_on`).
+            return self.refuse(id, ErrorCode::Busy, "the anchor has no TUN device yet");
+        }
         let existing = self.bonds.iter().position(|b| b.peer_addr == peer && !b.measure);
         if existing.is_none() && !bond::room(self.bonds.iter().filter(|b| !b.measure).count()) {
             return self.refuse(id, ErrorCode::TooManyBonds, "MAX_BONDS bonds already");
@@ -1395,7 +1490,11 @@ impl Daemon {
             };
             match self.plat.open_tun(&cfg) {
                 Ok(t) => self.tun = Some(t),
-                Err(e) => self.host_failed("TUN device", &e),
+                Err(e) => {
+                    // No device, no capture for this bond: status says so (`lanes_blocked`).
+                    self.host_failed("TUN device", &e);
+                    self.capture_fault = Some((format!("no TUN device: {e}"), Mono::MAX));
+                }
             }
         }
         let b = &mut self.bonds[0];
@@ -1624,9 +1723,13 @@ impl Daemon {
         }
     }
 
-    /// Starts the captive-portal check over link `l` (§17), off the loop.
-    fn check_captive(&self, l: &host::Link) {
+    /// Starts the captive-portal check over link `l` (§17), off the loop, unless one is in flight.
+    fn check_captive(&mut self, l: &host::Link) {
         let Some((host, port, path)) = self.captive_url.clone() else { return };
+        if self.captive_checks.contains(&l.addr) {
+            return;
+        }
+        self.captive_checks.push(l.addr);
         let (addr, name, tx, waker) = (l.addr, l.name.clone(), self.ev_tx.clone(), self.waker.clone());
         thread::spawn(move || {
             use std::net::ToSocketAddrs;
@@ -1661,14 +1764,18 @@ impl Daemon {
             self.next_scan = now + LINK_SCAN;
             self.scan();
             self.follow_default();
+            // §17: a link behind a portal is checked again on every scan, one check at a time, so
+            // it carries lanes once someone has logged in.
+            let held: Vec<host::Link> =
+                self.socks.iter().filter(|s| self.captive.contains(&s.link.addr)).map(|s| s.link.clone()).collect();
+            for l in &held {
+                self.check_captive(l);
+            }
             self.stun_tick(now);
             self.pool.keep(&self.cfg.allow);
             if self.cfg.role == Role::Anchor {
-                for name in self.cfg.allow.iter().filter(|e| e.parse::<IpAddr>().is_err()) {
-                    if self.resolved.get(name).is_none_or(|(_, at)| now - at >= RESOLVE_EVERY) {
-                        self.resolved.insert(name.clone(), (Vec::new(), now));
-                        ctl::resolve(name.clone(), self.ev_tx.clone(), self.waker.clone());
-                    }
+                for name in self.cfg.allow.clone().iter().filter(|e| e.parse::<IpAddr>().is_err()) {
+                    self.resolve(name, now, RESOLVE_EVERY);
                 }
             }
         }
@@ -1732,8 +1839,8 @@ impl Daemon {
                 self.send_bond(0, &Msg::Mode { mode });
             }
         }
-        // The anchor's TUN device and egress (§6).
-        if role == Role::Anchor && self.egress.is_none() {
+        // The anchor's TUN device and egress (§6): at once, and again while it has no device.
+        if role == Role::Anchor && (self.egress.is_none() || self.tun.is_none() && now >= self.anchor_retry) {
             self.anchor_on();
         } else if role != Role::Anchor && self.egress.is_some() {
             self.anchor_off();
@@ -1741,8 +1848,12 @@ impl Daemon {
         self.support_tick();
     }
 
-    /// Opens the anchor's TUN device with its bond addresses and enables egress (§6).
+    /// Opens the anchor's TUN device with its bond addresses, enables egress (§6) and starts the
+    /// DNS relay (§7). Called again, it keeps the device it has and does the rest anew: when the
+    /// uplink appears or moves, and every HOST_RETRY while the device does not open.
     fn anchor_on(&mut self) {
+        let first = self.egress.is_none();
+        self.anchor_retry = self.now() + HOST_RETRY;
         let net4 = self.cfg.bond_nets().0.and_then(|(a, b)| match network(a, b) {
             IpAddr::V4(n) => Some((n, b)),
             IpAddr::V6(_) => None,
@@ -1756,32 +1867,57 @@ impl Daemon {
         let first6 = net6.map(|(n, b)| (Ipv6Addr::from_bits(n.to_bits() | 1), b));
         let cfg =
             host::TunConfig { name: host::TUN_NAME.into(), mtu: TUN_MTU, addr4: Some((first4, net4.1)), addr6: first6 };
-        match self.plat.open_tun(&cfg) {
-            Ok(t) => self.tun = Some(t),
-            Err(e) => self.host_failed("TUN device", &e),
-        }
+        let fault = match &self.tun {
+            Some(_) => None,
+            None => self.plat.open_tun(&cfg).map(|t| self.tun = Some(t)).err(),
+        };
         let tun = self.tun.as_ref().map_or_else(|| host::TUN_NAME.to_string(), |t| t.name().to_string());
         let e = host::Egress { tun, net4, net6 };
+        if let Some(err) = fault {
+            // Without the device there is nothing to forward for: egress and the relay wait for it.
+            // Said once, not at every retry.
+            let fault = Some(format!("no TUN device: {err}"));
+            if self.anchor_fault != fault {
+                self.host_failed("TUN device", &err);
+            }
+            (self.anchor_fault, self.egress) = (fault, Some((e, None)));
+            return;
+        }
+        let mut faults = Vec::new();
         let on = match self.plat.egress_enable(&e) {
-            Ok(on) => Some(on),
+            Ok(on) => {
+                if !on.v4 && !on.v6 {
+                    faults.push(format!("no egress: {}", on.why.as_deref().unwrap_or("the host enabled none")));
+                }
+                Some(on)
+            }
             Err(err) => {
                 self.host_failed("egress", &err);
+                faults.push(format!("no egress: {err}"));
                 None
             }
         };
-        self.log(format!("anchor on: egress {:?}", on.as_ref().map(|o| (o.v4, o.v6))));
+        let what = if first { "anchor on" } else { "anchor on again" };
+        self.log(format!("{what}: egress {:?}", on.as_ref().map(|o| (o.v4, o.v6, &o.uplink))));
         self.egress = Some((e, on));
+        // The relay listens where there is egress, and asks the uplink's resolver: anew each time.
+        self.dns_relay = None;
         let (own, _) = self.anchor_nets();
         let on = self.egress.as_ref().and_then(|(_, on)| on.as_ref()).map_or((false, false), |on| (on.v4, on.v6));
         let own: Vec<IpAddr> = own.into_iter().filter(|a| if a.is_ipv4() { on.0 } else { on.1 }).collect();
-        match self.plat.upstream_resolver().and_then(|up| dns::Relay::new(&own, 53, up)) {
-            Ok((r, skipped)) => {
-                for (a, e) in skipped {
-                    self.log(format!("DNS relay on {a}: {e}"));
+        // No egress, no relay: the clients keep their own resolvers (§5.2).
+        if !own.is_empty() {
+            match self.plat.upstream_resolver().and_then(|up| dns::Relay::new(&own, 53, up)) {
+                Ok((r, skipped)) => {
+                    faults.extend(skipped.iter().map(|(a, e)| format!("no DNS relay on {a}: {e}")));
+                    self.dns_relay = Some(r);
                 }
-                self.dns_relay = Some(r);
+                Err(e) => faults.push(format!("no DNS relay: {e}")),
             }
-            Err(e) => self.log(format!("DNS relay: {e}")),
+        }
+        self.anchor_fault = (!faults.is_empty()).then(|| faults.join("; "));
+        if let Some(f) = self.anchor_fault.clone() {
+            self.log(f);
         }
         self.socks_changed();
     }
@@ -1796,8 +1932,7 @@ impl Daemon {
         {
             self.log(format!("egress off: {err}"));
         }
-        self.dns_relay = None;
-        self.tun = None;
+        (self.dns_relay, self.tun, self.anchor_fault) = (None, None, None);
         self.log("anchor off".into());
     }
 
@@ -1850,6 +1985,10 @@ impl Daemon {
         if self.mesh_captured.is_some() {
             return false; // §5.3: off for this bond
         }
+        let now = self.now();
+        if self.capture_fault.as_ref().is_some_and(|(_, again)| now < *again) {
+            return false;
+        }
         let Some(b) = self.bonds.first() else { return false };
         let Some(tun) = self.tun.as_ref().map(|t| t.name().to_string()) else { return false };
         let c = host::Capture {
@@ -1859,21 +1998,30 @@ impl Daemon {
             bond6: b.addr6.map(|a| (Ipv6Addr::from_bits(a.to_bits() & !0xffff_ffff_ffff_ffff), 64)),
             exclude: self.cfg.mesh_ranges(),
             links: self.socks.iter().filter(|s| s.id != 0).map(|s| s.link.name.clone()).collect(),
-            dns: self.dns,
+            // §5.2, §7: an anchor without egress runs no relay, and the client keeps its routes:
+            // its lookups stay with its own resolver.
+            dns: self.dns.filter(|_| b.egress != Egress::None),
         };
         match self.plat.capture_install(&c) {
             Ok(()) => {
-                self.capture = Some(c);
-                self.log("capture installed".into());
                 // §7: without a way to point the resolver at the anchor, DNS stays local.
-                self.dns_local = self.plat.dns_local();
+                self.dns_local = c.dns.is_some() && self.plat.dns_local();
+                (self.capture, self.capture_fault) = (Some(c), None);
+                self.log("capture installed".into());
                 if self.dns_local {
                     self.log("DNS left alone: queries go to the local resolver".into());
                 }
                 true
             }
             Err(e) => {
-                self.host_failed("capture", &e);
+                // What it did install goes; it is tried again every HOST_RETRY, not at every look
+                // at the lanes (LIFE_EVERY), and said once.
+                let _ = self.plat.capture_remove(&c);
+                let why = e.to_string();
+                if self.capture_fault.as_ref().is_none_or(|(w, _)| *w != why) {
+                    self.host_failed("capture", &e);
+                }
+                self.capture_fault = Some((why, now + HOST_RETRY));
                 false
             }
         }
@@ -1881,7 +2029,7 @@ impl Daemon {
 
     /// Removes the client's capture, if installed (§5.4).
     fn capture_off(&mut self) {
-        self.dns_local = false;
+        (self.dns_local, self.capture_fault) = (false, None);
         if let Some(c) = self.capture.take() {
             match self.plat.capture_remove(&c) {
                 Ok(()) => self.log("capture removed".into()),
@@ -2069,7 +2217,7 @@ impl Daemon {
     /// loop acts on the new config in `reconcile`.
     fn answer(&mut self, req: Request) -> Reply {
         let before = self.cfg.clone();
-        let support_on = matches!(req, Request::SupportOn { .. });
+        let (support_on, anchor_on) = (matches!(req, Request::SupportOn { .. }), req == Request::AnchorOn);
         let c = &mut self.cfg;
         match req {
             Request::Status { device: None } => {
@@ -2130,12 +2278,23 @@ impl Daemon {
         }
         if changed {
             self.reconcile();
+        } else if anchor_on && self.cfg.role == Role::Anchor && self.anchor_fault.is_some() {
+            // `anchor on` again, on an anchor that lacks something: tried again now.
+            self.anchor_on();
         }
         // §8: when the OS refuses to share, the command prints the manual steps.
         if let Some(steps) = self.support.refused.clone().filter(|_| support_on) {
             return Reply { changed, ..Reply::fail("failed", steps) };
         }
-        Reply { ok: true, changed, ..Reply::default() }
+        // §6: what the anchor lacks is said where it was turned on. Without its device it serves
+        // nobody, so the command fails; without egress or the relay it still delivers locally.
+        match self.anchor_fault.clone().filter(|_| anchor_on) {
+            Some(why) if self.tun.is_none() => {
+                let message = "the role is saved: the daemon tries the device again every few seconds".into();
+                Reply { changed, message, ..Reply::fail("failed", why) }
+            }
+            why => Reply { ok: true, changed, message: why.unwrap_or_default(), ..Reply::default() },
+        }
     }
 
     /// One session's lanes as status shows them (§20.2).
@@ -2153,12 +2312,24 @@ impl Daemon {
             let theirs = theirs.map_or(link, |o| if o.group == 0 { o.id } else { o.group });
             at.filter(|_| mine).map_or(theirs, |i| groups[i])
         };
+        // The client's link and the anchor's, as the links tables label them: the engine's labels
+        // are its groups' (`feed_links`). A link that has gone keeps the engine's.
+        let mine = self.cfg.role == Role::Client;
+        let links = |l: &core::LaneStatus| {
+            let (c, a) = ((l.id >> 8) as u8, l.id as u8);
+            let (own, peer) = if mine { (c, a) } else { (a, c) };
+            let own = self.socks.iter().find(|s| s.id == own && l.id != 0).map(|s| s.link.label.clone());
+            let peer = b.offer.iter().find(|o| o.id == peer && l.id != 0).map(peer_label);
+            let (own, peer) = (own.unwrap_or_else(|| l.local.clone()), peer.unwrap_or_else(|| l.remote.clone()));
+            if mine { vec![own, peer] } else { vec![peer, own] }
+        };
+        let firsts: u64 = snap.lanes.iter().map(|l| l.first_arrivals).sum();
         let lanes = snap
             .lanes
             .iter()
             .map(|l| api::Lane {
                 id: l.id,
-                links: vec![l.local.clone(), l.remote.clone()],
+                links: links(l),
                 group: group(l.id),
                 state: match l.state {
                     "up" => api::LaneState::Up,
@@ -2172,6 +2343,7 @@ impl Daemon {
                 loss: l.out.loss,
                 rate_mbps: l.out.rate_mbps,
                 share: if total == 0 { 0.0 } else { l.out.sent_bytes as f64 / total as f64 },
+                first_arrivals: if firsts == 0 { 0.0 } else { l.first_arrivals as f64 / firsts as f64 },
                 rescues_per_min: l.rescues,
                 reorder_p50_ms: l.reorder_wait_p50 as f64 / MS as f64,
                 reorder_p99_ms: l.reorder_wait_p99 as f64 / MS as f64,
@@ -2195,6 +2367,9 @@ impl Daemon {
         if let Some(e) = &self.cfg_bad {
             v.push(p(problem::CONFIG_INVALID, None, e.clone()));
         }
+        if let Some(why) = self.anchor_fault.as_ref().filter(|_| self.cfg.role == Role::Anchor) {
+            v.push(p(problem::NO_EGRESS, Some("wirebond anchor on"), why.clone()));
+        }
         if self.cfg.role == Role::Client {
             if let Some(e) = &self.unreachable {
                 v.push(p(problem::ANCHOR_UNREACHABLE, None, e.clone()));
@@ -2204,7 +2379,18 @@ impl Daemon {
                     v.push(p(problem::BOND_DOWN, None, "every lane and the channel down: traffic goes direct".into()));
                 }
                 if b.state == BondState::Punching && now - b.since >= LANES_BLOCKED_AFTER {
-                    v.push(p(problem::LANES_BLOCKED, None, "no lane validated".into()));
+                    v.push(match &self.capture_fault {
+                        // The lanes may well be up: what holds the bond back is this device.
+                        Some((why, _)) => {
+                            let next = "mend what the message names: capture is tried again every few seconds";
+                            p(
+                                problem::LANES_BLOCKED,
+                                Some(next),
+                                format!("capture failed ({why}): traffic goes direct"),
+                            )
+                        }
+                        None => p(problem::LANES_BLOCKED, None, "no lane validated".into()),
+                    });
                 }
                 if b.mesh_only.is_some_and(|t| now - t >= MESH_ONLY_AFTER) {
                     v.push(p(problem::MESH_ONLY, None, "only the mesh lane is up".into()));

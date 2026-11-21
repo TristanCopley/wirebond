@@ -223,6 +223,63 @@ fn run_service_never_stops() {
     run_service(run).unwrap();
 }
 
+/// SIGTERM (launchd's bootout, systemctl stop) and SIGINT fire `stop`, so the daemon runs its
+/// shutdown, and when it has returned the signals end the process again. In a child of this test
+/// binary: the handlers are the process's.
+#[cfg(unix)]
+#[test]
+fn run_service_stops_on_sigterm_and_sigint() {
+    if let Some(sig) = std::env::var("WIREBOND_TEST_STOP").ok().and_then(|s| s.parse::<i32>().ok()) {
+        let handler = || {
+            // SAFETY: sigaction with no new action only reads the current one into old.
+            let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) }, 0);
+            old.sa_sigaction
+        };
+        assert_eq!(handler(), libc::SIG_DFL);
+        let stopped = run_service(|stop| {
+            assert_ne!(handler(), libc::SIG_DFL);
+            // SAFETY: kill sends this process the signal, which run_service handles.
+            assert_eq!(unsafe { libc::kill(libc::getpid(), sig) }, 0);
+            stop.recv_timeout(Duration::from_secs(5)).map_err(io::Error::other)
+        });
+        assert!(stopped.is_ok(), "stop fired: {stopped:?}");
+        assert_eq!(handler(), libc::SIG_DFL, "the default again once the daemon has returned");
+        return;
+    }
+    for sig in [libc::SIGTERM, libc::SIGINT] {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "host::tests::run_service_stops_on_sigterm_and_sigint"])
+            .env("WIREBOND_TEST_STOP", sig.to_string())
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&child.stdout);
+        assert!(child.status.success() && out.contains("1 passed"), "signal {sig}: {out}");
+    }
+}
+
+/// macOS's `route` says a refusal on standard error and may exit 0 all the same: any text there
+/// fails, but for the message that the route is there already (add) or gone already (delete).
+#[cfg(unix)]
+#[test]
+fn route_fails_on_what_it_says_whatever_its_exit_code() {
+    let (exists, gone) =
+        ("route: writing to routing socket: File exists\n", "route: writing to routing socket: not in table\n");
+    for ok in [true, false] {
+        assert!(unix::route_said(ok, exists, "File exists").is_ok(), "an add of a route that is there");
+        assert!(unix::route_said(ok, gone, "not in table").is_ok(), "a delete of a route that is gone");
+        // The other one's message is a failure: a delete cannot find the route exists.
+        assert!(
+            unix::route_said(ok, gone, "File exists").is_err() && unix::route_said(ok, exists, "not in table").is_err()
+        );
+        let refused = "route: writing to routing socket: Network is unreachable\n";
+        let e = unix::route_said(ok, refused, "File exists").unwrap_err();
+        assert_eq!(e.to_string(), refused.trim(), "refused, exit code {ok}");
+    }
+    assert!(unix::route_said(true, " \n", "File exists").is_ok(), "silent and exit 0: done");
+    assert!(unix::route_said(false, "", "File exists").is_err(), "silent and a failing exit code");
+}
+
 #[cfg(unix)]
 #[test]
 fn run_service_raises_the_descriptor_limit() {
@@ -915,8 +972,13 @@ mod on_linux {
         let _tun = Tun::open(&tun_config(TUN_NAME, [10, 77, 0, 1], "fd77:b0d::1")).unwrap();
         sh("ip", "-4 route add default dev lo"); // an uplink for it to find
         let on = egress_enable(&egress()).unwrap();
-        let want =
-            EgressOn { v4: true, v6: false, addr4: (Ipv4Addr::new(10, 77, 0, 1), 24), uplink: Some("lo".into()) };
+        let want = EgressOn {
+            v4: true,
+            v6: false,
+            addr4: (Ipv4Addr::new(10, 77, 0, 1), 24),
+            uplink: Some("lo".into()),
+            why: None,
+        };
         assert_eq!(on, want);
         assert_eq!(egress_enable(&egress()).unwrap(), want, "enabled twice");
         let t = sh("nft", "list table inet wirebond");

@@ -270,10 +270,10 @@ mod v2 {
         let family = if net.is_ipv4() { "-inet" } else { "-inet6" };
         let op = if add { "add" } else { "delete" };
         // Not -q, which would hide the error that tells an existing or missing route apart.
-        match super::run("route", &["-n", op, family, &format!("{net}/{bits}"), "-interface", tun]) {
-            Err(e) if e.to_string().contains(if add { "File exists" } else { "not in table" }) => Ok(()),
-            r => r.map(|_| ()),
-        }
+        let out =
+            Command::new("route").args(["-n", op, family, &format!("{net}/{bits}"), "-interface", tun]).output()?;
+        let done = if add { "File exists" } else { "not in table" };
+        super::route_said(out.status.success(), &String::from_utf8_lossy(&out.stderr), done)
     }
 
     /// The four /1 routes (§5.3): they cover the default without replacing it.
@@ -369,7 +369,7 @@ mod v2 {
         }
         fs::write(egress_file(), &state)?;
         let first = Ipv4Addr::from((n4_bits(n4)) + 1);
-        Ok(EgressOn { v4: true, v6: up6, addr4: (first, e.net4.1), uplink: Some(uplink) })
+        Ok(EgressOn { v4: true, v6: up6, addr4: (first, e.net4.1), uplink: Some(uplink), why: None })
     }
 
     fn n4_bits(a: IpAddr) -> u32 {
