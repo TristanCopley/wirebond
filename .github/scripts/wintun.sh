@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Downloads Wintun 0.14.1 (SPEC 2.0 §5.3), checks the zip against crates/wirebond/wintun.sum and
-# unpacks it to crates/wirebond/wintun/, where build.rs embeds wintun/bin/<arch>/wintun.dll. Its
-# license allows redistributing the signed DLLs unmodified.
+# unpacks it to crates/wirebond/wintun/, where build.rs embeds wintun/bin/<arch>/wintun.dll. The
+# zip's own license, WireGuard LLC's "Prebuilt Binaries License", not wirebond's MIT, covers the
+# DLLs: section 3 forbids modifying them and lets them be distributed only alongside software
+# that uses them through wintun.h's API alone, as wirebond does.
 set -euo pipefail
 cd "$(dirname "$0")/../../crates/wirebond"
 # tr: a Windows checkout may end the line with CR, which curl rejects in a URL.

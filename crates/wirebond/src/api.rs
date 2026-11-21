@@ -273,17 +273,6 @@ pub enum Egress {
     None,
 }
 
-impl Egress {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Egress::V4 => "v4",
-            Egress::V6 => "v6",
-            Egress::Both => "both",
-            Egress::None => "none",
-        }
-    }
-}
-
 /// A client's bond.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -546,9 +535,6 @@ mod tests {
         }
         for s in [BondState::Connecting, BondState::Punching, BondState::Up, BondState::Down] {
             assert_eq!(s.as_str(), name(serde_json::to_value(s).unwrap()));
-        }
-        for e in [Egress::V4, Egress::V6, Egress::Both, Egress::None] {
-            assert_eq!(e.as_str(), name(serde_json::to_value(e).unwrap()));
         }
         for s in [LaneState::Punching, LaneState::Up, LaneState::Suspect, LaneState::Down, LaneState::Dormant] {
             assert_eq!(s.as_str(), name(serde_json::to_value(s).unwrap()));

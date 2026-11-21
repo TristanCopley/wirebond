@@ -1,4 +1,4 @@
-//! Linux: the Wi-Fi test, socket options, paths and the systemd unit (§6.2, §15.3). Linux has
+//! Linux: the Wi-Fi test, socket options, paths and the systemd unit (§9.1, §22.2). Linux has
 //! only the system scope. Then the 2.0 platform API (SPEC 2.0 §5.3, §5.4, §6.2, §7, §8): the TUN
 //! device, capture with `ip`, egress with nftables, DNS with resolvectl, sharing with nmcli, and
 //! stale-state cleanup. The values it changes are saved under /run/wirebond until put back.
@@ -93,7 +93,7 @@ pub(super) fn unregister(_: Scope, _: &Path) -> io::Result<(bool, String)> {
     Ok((changed, String::new()))
 }
 
-/// The systemd unit (§15.3). No start limit: a server keeps restarting, as on Windows. Type=exec
+/// The systemd unit (§22.2). No start limit: the service keeps restarting, as on Windows. Type=exec
 /// makes systemctl start fail, so install too, when the executable cannot be run (systemd 240 and
 /// later; older ones ignore it).
 pub(super) fn unit(exe: &Path) -> String {
@@ -111,7 +111,6 @@ pub(super) fn unit(exe: &Path) -> String {
 
 pub use v2::*;
 
-#[allow(dead_code)] // 2.0 wave 2: the daemon's pumps and bond logic call these
 mod v2 {
     use std::fs;
     use std::io::{self, Write as _};
@@ -407,11 +406,6 @@ mod v2 {
         restore(SAVED_CAPTURE)?;
         restore(SAVED_EGRESS)?;
         routes.and(nat)
-    }
-
-    /// The tools wirebond needs that are absent (§5.3, §6.2): `ip`, and `nft` for an anchor.
-    pub fn missing_tools() -> Vec<&'static str> {
-        ["ip", "nft"].into_iter().filter(|t| find(t).is_none()).collect()
     }
 
     // ---- helpers

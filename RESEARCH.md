@@ -2,6 +2,8 @@
 
 Eight research threads, run 2026-11-05. Each has a summary, findings with evidence and the implication for wirebond, and proposals.
 
+> **Background from before wirebond 2.0.** These threads were run for the 1.x design and its drafts. Where they say "SPEC §n", "R7" and the like they mean the 1.x specification, which is no longer in the repository; "primary", "aggregate", "stable" and "combine" are 1.x's modes. [SPEC.md](SPEC.md) is the 2.0 specification, which keeps this file and [CONTEXT.md](CONTEXT.md) as background with citations (§25). CONTEXT.md says which of the 1.x reasoning still holds, and how its citations (`[Gaming 5]`) name the sections below.
+
 
 ## Multipath scheduling and bonding
 
