@@ -1,0 +1,41 @@
+# The website in site/: type and Svelte checks, the static build, and the Playwright smoke test
+# against that build. It deploys nothing.
+name: site
+
+on:
+  push:
+    branches: ['**']
+    paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
+  pull_request:
+    paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Check
+        run: npm run check
+      - name: Build
+        run: npm run build
+      - name: Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Smoke test
+        run: npm test
