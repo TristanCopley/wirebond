@@ -24,6 +24,15 @@ fn loopback() -> Iface {
     ifs.into_iter().find(|i| i.addrs.contains(&lo)).expect("the loopback interface is listed")
 }
 
+/// run_service asks for the high priority class, which needs no privilege.
+#[test]
+fn the_daemon_asks_for_the_high_priority_class() {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetPriorityClass, HIGH_PRIORITY_CLASS};
+    assert!(high_priority());
+    // SAFETY: the pseudo handle of this process.
+    assert_eq!(unsafe { GetPriorityClass(GetCurrentProcess()) }, HIGH_PRIORITY_CLASS);
+}
+
 #[test]
 fn lists_the_loopback_interface() {
     let lo = loopback();

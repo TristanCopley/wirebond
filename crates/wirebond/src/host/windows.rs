@@ -525,9 +525,11 @@ fn put<T>(m: &Mutex<Option<T>>, v: Option<T>) -> Option<T> {
 /// Runs the daemon, `wirebond run`. Started by the service manager, it reports running and fires
 /// stop on a stop or shutdown request; otherwise it calls run, and stop never fires. The
 /// manager's dispatcher, which calls back into this process, runs on a thread of its own, so run
-/// stays on the caller's. First it asks for 1 ms timers (`fine_timers`).
+/// stays on the caller's. First it asks for 1 ms timers (`fine_timers`) and the high priority class
+/// (`high_priority`).
 pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Result<()> {
     let _ms = fine_timers();
+    high_priority();
     let ((ready, started), (stop, stopped)) = (mpsc::channel(), mpsc::channel());
     put(&READY, Some(ready.clone()));
     put(&STOP, Some(stop));
@@ -554,6 +556,16 @@ pub fn run_service(run: impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Resu
     status(SERVICE_STOPPED, 0, put(&STOP, None).is_some().into());
     let _ = dispatcher.join();
     r
+}
+
+/// Puts this process in the high priority class; whether Windows agreed. An anchor is often the PC
+/// whose game is being streamed: the daemon forwards that stream's packets while the game and the
+/// encoder load the processor, and Sunshine raises its own priority for the same reason. The
+/// daemon's work is a few percent of one core, so it has little to take from anything else.
+pub(super) fn high_priority() -> bool {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, HIGH_PRIORITY_CLASS, SetPriorityClass};
+    // SAFETY: the pseudo handle of this process, and a constant.
+    unsafe { SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS) != 0 }
 }
 
 /// Asks for 1 ms timers until the guard drops or the process exits (review: windows timer). Since
