@@ -1,0 +1,25 @@
+{
+  "device": "mac", "role": "client", "version": "2.0.0",
+  "links": [
+    {"id": 1, "name": "Wi-Fi", "kind": "wifi", "group": 1, "metered": false, "up": true, "captive": false, "support": null}
+  ],
+  "bond": {"anchor": "xanth", "mode": "performance", "state": "up",
+           "addr4": "10.77.0.2", "anchor_addr4": "10.77.0.1", "egress": "v4",
+           "lanes": [
+             {"id": 0, "links": [], "group": 1, "state": "up", "rtt_ms": 96.4, "owd_ms": 9.1, "dev_ms": 2.4, "loss": 0.0,
+              "rate_mbps": 0.0, "tx_mbps": 1.6, "rx_mbps": 21.8, "share": 0.5, "first_arrivals": 0.08, "rescues_per_min": 3, "bytes_today": 0},
+             {"id": 257, "links": ["Wi-Fi", "Ethernet"], "group": 1, "state": "up", "rtt_ms": 88.0, "owd_ms": 0.0, "dev_ms": 2.1, "loss": 0.012,
+              "rate_mbps": 24.0, "tx_mbps": 1.6, "rx_mbps": 21.8, "share": 0.5, "first_arrivals": 0.92, "rescues_per_min": 41, "bytes_today": 0}
+           ],
+           "note": ["the bond rests on one link, Wi-Fi: it has nothing to fail over to and no capacity to add",
+                    "next: cable a phone or another network to this device",
+                    "an iPhone on USB that is not among the links: in System Settings > Network > iPhone USB,",
+                    "turn off \"Disable unless needed\", which keeps the phone unused while Wi-Fi works"],
+           "flows": 31, "small_flows": 6},
+  "anchor": null,
+  "support": null,
+  "contribution": {"tx_bytes": 48000000, "rx_bytes": 1900000000, "since": "start"},
+  "mesh": [{"device": "xanth", "role": "anchor", "bonds": 1, "reachable": true}],
+  "problems": [],
+  "events": ["2026-11-21T20:14:09Z: bond to xanth up"]
+}

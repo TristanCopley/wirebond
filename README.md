@@ -88,7 +88,9 @@ GitHub's CLI checks: `gh attestation verify wirebond-Linux-x86_64 --repo Tristan
    sudo wirebond anchor allow laptop      # the client's name on the mesh
    ```
 
-3. **On the client**, with the phone plugged in over USB and its tethering (Personal Hotspot) on:
+3. **On the client**, with the phone plugged in over USB and its tethering (Personal Hotspot) on.
+   On a Mac, first turn off "Disable unless needed" under System Settings > Network > iPhone USB:
+   while it is on, macOS leaves the phone unused as long as Wi-Fi works, and the bond has one link.
 
    ```sh
    sudo wirebond client xanth             # the anchor's name on the mesh

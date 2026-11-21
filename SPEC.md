@@ -214,6 +214,8 @@ Every change is undone when capture is removed. Resolving near the anchor means 
 | iPhone (Personal Hotspot over USB) | `iPhone USB` | Apple Mobile Device Ethernet | `ipheth` |
 | Android (USB tethering) | — | RNDIS or NCM interface | RNDIS or NCM interface |
 
+On macOS the `iPhone USB` network service has "Disable unless needed" on by default, and the phone's interface then gets no address while Wi-Fi works: it must be turned off for the phone to be a link (§17).
+
 **A computer as a support.** `wirebond support on <uplink> <cable> [--for <client>]` shares `<uplink>` to `<cable>` with the OS's own sharing:
 
 | OS | How |
@@ -510,6 +512,7 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 | Mesh down, lanes up | Direct lanes keep carrying the bond, idle or not: the client's probes (§11.1) tell each side the other is there. Keys ratchet by derivation. The channel redials. |
 | Every lane down, channel up for `ALL_LANES_DOWN` (2 s) | Redial the channel, then re-punch. |
 | Only the mesh lane after `MESH_ONLY_AFTER` (30 s) | Problem `mesh_only`: the bond gives no gain over the baseline. |
+| Lanes through one client link only, after `MESH_ONLY_AFTER` | A note on the bond in status, not a problem: with one link the bond has nothing to fail over to and no capacity to add. The mesh lane rides one of the links, so it does not count. On macOS the note names the setting that hides a phone on USB: "Disable unless needed" on the `iPhone USB` network service, on by default, leaves the phone's interface unconfigured while Wi-Fi works. |
 | No lane validated `LANES_BLOCKED_AFTER` (3 s) after connect | Problem `lanes_blocked`. |
 
 ## 18. Measure and select: `wirebond pick`

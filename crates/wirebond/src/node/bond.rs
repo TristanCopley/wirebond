@@ -57,6 +57,9 @@ pub struct Bond {
     pub rates: super::rates::Rates,
     /// Since when only the mesh lane is up (MESH_ONLY_AFTER); None otherwise.
     pub mesh_only: Option<Mono>,
+    /// A client's: since when its lanes go through this one link of its own (MESH_ONLY_AFTER, then
+    /// status notes it); None with none or several.
+    pub one_link: Option<(Mono, u8)>,
     /// A lane validated since the bond opened (LANES_BLOCKED_AFTER).
     pub validated: bool,
     /// An anchor's: inner bytes forwarded toward the internet and delivered locally (§20.3).
@@ -94,6 +97,7 @@ impl Bond {
             probe_at: 0,
             rates: super::rates::Rates::default(),
             mesh_only: None,
+            one_link: None,
             validated: false,
             egressed: 0,
             local: 0,
@@ -143,6 +147,33 @@ impl Bond {
 /// suspect, dormant or re-punching lane that validated is not down.
 pub fn lane_down(l: &LaneStatus) -> bool {
     !l.validated || l.state == "down"
+}
+
+/// The client's links that carry the bond: those of its validated direct lanes that are up,
+/// suspect or dormant. The mesh lane rides one of the client's links, so it adds none.
+pub fn client_links(snap: &SessionStatus) -> Vec<u8> {
+    let through = |l: &&LaneStatus| l.id != 0 && l.validated && matches!(l.state, "up" | "suspect" | "dormant");
+    let mut v: Vec<u8> = snap.lanes.iter().filter(through).map(|l| (l.id >> 8) as u8).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// What status notes when a client's bond rests on its one link `link` (§17), a line each: with
+/// one link the bond has nothing to fail over to and no capacity to add. On macOS the usual cause
+/// cannot be seen: the "iPhone USB" network service has "Disable unless needed" on by default,
+/// which leaves the phone's interface without an address while Wi-Fi works. `phone` says the one
+/// link is itself the phone, so that setting is not what is missing.
+pub fn one_link_note(link: &str, macos: bool, phone: bool) -> Vec<String> {
+    let mut v = vec![
+        format!("the bond rests on one link, {link}: it has nothing to fail over to and no capacity to add"),
+        "next: cable a phone or another network to this device".to_string(),
+    ];
+    if macos && !phone {
+        v.push("an iPhone on USB that is not among the links: in System Settings > Network > iPhone USB,".into());
+        v.push("turn off \"Disable unless needed\", which keeps the phone unused while Wi-Fi works".into());
+    }
+    v
 }
 
 /// When the peer was last heard, from what each role can observe. A client: the newest echo of
@@ -293,6 +324,30 @@ mod tests {
         assert!(!snap.lanes.iter().all(lane_down), "by their states these lanes are not down");
         assert_eq!((heard(&snap, true), heard(&snap, false)), (Some(t - 7 * s), Some(t - 6 * s)));
         assert!(lost(Some(t - 5 * s), heard(&snap, true), t));
+    }
+
+    /// §17: the links a bond rests on are the client's links under its live direct lanes; the
+    /// mesh lane and a lane still punching add none. The note names the link, and the macOS
+    /// setting only on macOS, and not when the one link is the phone itself.
+    #[test]
+    fn a_bond_on_one_link_is_noted_with_what_to_switch_off_on_macos() {
+        let lane = |id, state| LaneStatus { id, state, validated: true, ..LaneStatus::default() };
+        let snap = |lanes| SessionStatus { lanes, ..SessionStatus::default() };
+        let one = snap(vec![lane(0, "up"), lane(0x0101, "up"), lane(0x0102, "dormant"), lane(0x0201, "punching")]);
+        assert_eq!(client_links(&one), [1], "two lanes through link 1; link 2's never came up");
+        let two = snap(vec![lane(0, "up"), lane(0x0101, "suspect"), lane(0x0201, "up"), lane(0x0301, "down")]);
+        assert_eq!(client_links(&two), [1, 2]);
+        assert!(client_links(&snap(vec![lane(0, "up")])).is_empty(), "the mesh lane alone: mesh_only's case");
+        let unvalidated = LaneStatus { validated: false, ..lane(0x0101, "up") };
+        assert!(client_links(&snap(vec![unvalidated])).is_empty());
+        let note = one_link_note("Wi-Fi", true, false);
+        assert!(note[0].starts_with("the bond rests on one link, Wi-Fi: ") && note.len() == 4, "{note:?}");
+        assert!(note[2].contains("iPhone USB") && note[3].contains("\"Disable unless needed\""), "{note:?}");
+        for (macos, phone) in [(false, false), (true, true)] {
+            let note = one_link_note("iPhone", macos, phone);
+            assert!(note.len() == 2 && !note.concat().contains("Disable unless needed"), "{note:?}");
+        }
+        assert!(note.iter().all(|l| l.len() <= 92), "each line fits 100 columns behind its indent");
     }
 
     #[test]

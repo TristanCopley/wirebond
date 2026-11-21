@@ -657,6 +657,12 @@ fn both_engines_see_the_clients_groups() {
     // The anchor shows every lane in the client's group, the mesh lane too: b carries the mesh.
     let shown = a.d.status(false).anchor.unwrap().bonds[0].lanes.clone();
     assert!(shown.iter().any(|l| l.id == 0) && shown.iter().all(|l| l.group == 1), "{shown:?}");
+    // §17: with lanes through two of its links, the client's bond does not rest on one.
+    run(&mut [&mut a, &mut c], "lanes through both links", |n| {
+        lanes(&n[1].d)
+            .is_some_and(|l| bond::client_links(&core::SessionStatus { lanes: l, ..Default::default() }).len() == 2)
+            && n[1].d.bonds[0].one_link.is_none()
+    });
 }
 
 #[test]

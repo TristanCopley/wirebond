@@ -290,6 +290,10 @@ pub struct Bond {
     pub anchor_addr6: Option<String>,
     pub egress: Egress,
     pub lanes: Vec<Lane>,
+    /// What a person should know of a bond that works (§17: it rests on one link), a line each.
+    /// Beyond §20.2's example, so left out while there is nothing to say.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub note: Vec<String>,
     /// Live flows, and how many of them are small (§13).
     pub flows: u32,
     pub small_flows: u32,

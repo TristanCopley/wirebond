@@ -496,6 +496,29 @@ fn an_idle_bond_outlives_its_channel() {
     assert_eq!((a.bonds[0].owner, c.bonds[0].owner), (owner, session), "the same sessions");
 }
 
+/// §17: a bond whose lanes go through one of the client's links is noted in status once that has
+/// lasted MESH_ONLY_AFTER, and only while the bond is up; the mesh lane, which rides the same
+/// link, does not make it two. A note on the bond, not a problem.
+#[test]
+fn a_bond_on_one_link_says_so_after_a_while() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(64, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(64, 20).to_string()), ..Config::default() };
+    let (mut a, _, _) = node("xanth", ip(64, 2), ip(64, 20), acfg);
+    let (mut c, _, _) = node("mac", ip(64, 1), ip(64, 10), ccfg);
+    run(&mut a, &mut c, "the direct lane", |_, c| c.bonds.first().is_some_and(|b| b.one_link.is_some()));
+    let note = |c: &Daemon| c.status(false).bond.unwrap().note;
+    assert_eq!((c.bonds[0].state, c.bonds[0].one_link.map(|(_, id)| id)), (BondState::Up, Some(1)));
+    assert!(note(&c).is_empty(), "not before MESH_ONLY_AFTER: lanes may still be punching");
+    c.bonds[0].one_link.as_mut().unwrap().0 -= MESH_ONLY_AFTER;
+    let lines = note(&c);
+    assert!(lines[0].starts_with("the bond rests on one link, lo-a: "), "{lines:?}");
+    assert_eq!(lines.len(), if cfg!(target_os = "macos") { 4 } else { 2 }, "the macOS setting on macOS: {lines:?}");
+    assert!(c.status(false).problems.is_empty(), "a note, not a problem: {:?}", c.status(false).problems);
+    assert!(a.status(false).anchor.unwrap().bonds.len() == 1 && a.bonds[0].one_link.is_none(), "a client's note");
+    c.bonds[0].set_state(BondState::Down, 0);
+    assert!(note(&c).is_empty(), "only while the bond is up");
+}
+
 /// §17, §5.4: an anchor's goodbye (`anchor off`, a clean stop or reboot) ends the client's bond,
 /// so its capture goes at once: nothing would carry what it captures. The client keeps redialing,
 /// and capture returns with the next bond's first validated lane.

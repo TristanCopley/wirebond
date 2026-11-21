@@ -76,7 +76,12 @@ fn bond(b: &Bond, device: &str) -> String {
         s += &format!("  addresses: {device} {} · {} {}\n", or(&here, "-"), b.anchor, or(&there, "-"));
     }
     s += &format!("  flows: {} live, {} small\n", b.flows, b.small_flows);
-    s + &lanes(&b.lanes, b.mode, "  ")
+    s += &lanes(&b.lanes, b.mode, "  ");
+    // A note is the daemon's, a line or more: what to know of a bond that works (§17).
+    for (i, line) in b.note.iter().enumerate() {
+        s += &format!("  {}{line}\n", if i == 0 { "note: " } else { "      " });
+    }
+    s
 }
 
 /// One bond on an anchor: its client, mode, state, addresses and bytes, then its lanes.

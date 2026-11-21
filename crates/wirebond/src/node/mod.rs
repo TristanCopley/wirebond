@@ -2058,6 +2058,11 @@ impl Daemon {
             let b = &mut self.bonds[bi];
             b.heard = heard;
             b.rates.sample(now, &snap.lanes);
+            // §17: one link of the client's under every live direct lane, and since when.
+            b.one_link = match bond::client_links(&snap)[..] {
+                [l] if client => Some((b.one_link.filter(|&(_, was)| was == l).map_or(now, |(t, _)| t), l)),
+                _ => None,
+            };
             // Capture returns after fail open on news of the anchor, not on a state: an idle
             // bond's probe lane stays "up" until its third probe is missed.
             let up = up && (b.state != BondState::Down || heard.is_some_and(|t| t > b.since));
@@ -2384,6 +2389,16 @@ impl Daemon {
         (lanes, snap.flows.len() as u32, small)
     }
 
+    /// §17: what status notes once the bond has rested on one of this client's links for
+    /// MESH_ONLY_AFTER, while it is up. A note, not a problem: the bond works.
+    fn one_link_note(&self, b: &Bond) -> Vec<String> {
+        let held = |&(since, _): &(Mono, u8)| b.state == BondState::Up && self.now() - since >= MESH_ONLY_AFTER;
+        let link = b.one_link.filter(held).and_then(|(_, id)| self.socks.iter().find(|s| s.id == id));
+        link.map_or(Vec::new(), |s| {
+            bond::one_link_note(&s.link.label, cfg!(target_os = "macos"), kind(&s.link) == LinkKind::Usb)
+        })
+    }
+
     /// The problems of §17 and the host's (§20.2).
     fn problems(&self) -> Vec<api::Problem> {
         let now = self.now();
@@ -2495,6 +2510,7 @@ impl Daemon {
                     .map(|a| Ipv6Addr::from_bits((a.to_bits() & !0xffff_ffff_ffff_ffff) | 1).to_string()),
                 egress: b.egress,
                 lanes,
+                note: self.one_link_note(b),
                 flows: if remote { 0 } else { flows },
                 small_flows: if remote { 0 } else { small },
             }

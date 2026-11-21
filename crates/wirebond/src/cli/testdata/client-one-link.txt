@@ -1,0 +1,27 @@
+mac · client · wirebond 2.0.0
+
+links
+  1  Wi-Fi  wifi  group 1  up
+
+bond to xanth · performance · up · egress IPv4
+  addresses: mac 10.77.0.2 · xanth 10.77.0.1
+  flows: 31 live, 6 small
+  lane  links             state  rtt     jitter  loss  in/out        first  rescues  pace
+  0     mesh              up     96.4ms  2.4ms   0.0%  21.8/1.6Mbps  8%     3/min    unlimited
+  257   Wi-Fi → Ethernet  up     88.0ms  2.1ms   1.2%  21.8/1.6Mbps  92%    41/min   24Mbps
+  note: the bond rests on one link, Wi-Fi: it has nothing to fail over to and no capacity to add
+        next: cable a phone or another network to this device
+        an iPhone on USB that is not among the links: in System Settings > Network > iPhone USB,
+        turn off "Disable unless needed", which keeps the phone unused while Wi-Fi works
+
+Moonlight: add the host 10.77.0.1 to stream from xanth
+
+contribution · sent 48.0 MB · received 1.9 GB · since start
+
+mesh
+  xanth  anchor  1 bond  reachable
+
+problems: none
+
+events
+  2026-11-21T20:14:09Z: bond to xanth up

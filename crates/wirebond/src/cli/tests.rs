@@ -567,6 +567,7 @@ fn golden_views() {
         ("client", None),
         ("client-bandwidth", None),
         ("client-connecting", None),
+        ("client-one-link", None),
         ("anchor", None),
         ("support", None),
         ("none", None),
@@ -617,8 +618,8 @@ fn watch_belongs_to_status_and_draws_over_the_last_frame() {
 /// §20.4: the lane table says, per lane, how late and lossy it is and what it carries now: delay,
 /// jitter and loss, megabits a second in and out, first arrivals as a percentage, rescues a
 /// minute, and the rate it is paced at, where no rate (0 in the JSON) reads "unlimited", not
-/// "0Mbps". A row stays within 100 columns. The Moonlight line is shown only while the bond is up:
-/// before that nothing answers at the anchor's bond address.
+/// "0Mbps" (`golden_views` holds every line to 100 columns). The Moonlight line is shown only
+/// while the bond is up: before that nothing answers at the anchor's bond address.
 #[test]
 fn the_lane_table_shows_what_each_lane_does_now() {
     let lane = crate::api::Lane {
@@ -656,10 +657,6 @@ fn the_lane_table_shows_what_each_lane_does_now() {
     assert!(text.contains("\nMoonlight: add the host 10.77.0.1 to stream from xanth\n"));
     for state in [crate::api::BondState::Connecting, crate::api::BondState::Punching, crate::api::BondState::Down] {
         assert!(!view(state, 0.0).contains("Moonlight"), "no Moonlight line while the bond is {state:?}");
-    }
-    for name in ["client", "client-bandwidth", "anchor", "remote"] {
-        let wide = data(&format!("{name}.txt")).lines().map(|l| l.chars().count()).max().unwrap_or(0);
-        assert!(wide <= 100, "{name}.txt is {wide} columns wide");
     }
     // --json always has the jitter now that the daemon has a figure for it (§20.2).
     assert!(serde_json::to_string(&crate::api::Lane::default()).unwrap().contains(r#""dev_ms":0.0"#));

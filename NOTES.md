@@ -77,7 +77,7 @@ Spec problems this build found, for the owner (SPEC.md is the owner's to change)
 
 - **§16:** `key` carries `floor` (the counter floor of §10.4), which the table does not list; `bond open` carries `measure` for pick's temporary bond (§18); the `view` reply carries the status in a `status` field.
 - **§19:** "`--json` gives the §20.2 schema" holds for `status` only: other verbs print their one reply line (`ok`, `changed`, `message`, `error`), and `version --json` prints `{"version", "commit"}`.
-- **§20.2:** `Problem` has a `msg` field, a client's bond has `addr6` and `anchor_addr6`, a lane has `reorder_p50_ms` and `reorder_p99_ms`, and `contribution` has `links`, all beyond the example (each is left out of the JSON while empty, so the example still round-trips).
+- **§20.2:** `Problem` has a `msg` field, a client's bond has `addr6`, `anchor_addr6` and `note` (§17's one-link note, a line each), a lane has `reorder_p50_ms` and `reorder_p99_ms`, and `contribution` has `links`, all beyond the example (each is left out of the JSON while empty, so the example still round-trips).
 - **§22.2, "Requirements checked at install":** `wirebond install` checks nothing; `install.sh` requires systemd and warns when `ip` or `nft` is missing. Neither names `curl`, which §22.3's update needs, nor `nmcli`.
 - **§22.4:** config.json also holds an `update` object (`url`, `starts`, `trial`, `bad`: where updates come from, and the trial of §22.3), which the example does not show.
 
