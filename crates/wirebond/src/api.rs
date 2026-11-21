@@ -331,20 +331,19 @@ pub struct Lane {
     pub state: LaneState,
     pub rtt_ms: f64,
     pub owd_ms: f64,
-    /// The delay's variation. The engine keeps it and its status does not yet give it, so the
-    /// daemon never sets it: left out while zero, as no figure, not as none measured.
-    #[serde(skip_serializing_if = "zero")]
+    /// The one-way delay's jitter (§11.3 `dev`), in this device's sending direction.
     pub dev_ms: f64,
     pub loss: f64,
-    /// The controller's rate.
+    /// The controller's rate; 0 is unlimited.
     pub rate_mbps: f64,
+    /// What the lane carried over the last seconds, out of this device and into it.
     pub tx_mbps: f64,
     pub rx_mbps: f64,
-    /// This lane's fraction of the bond's bytes.
+    /// This lane's fraction of the bond's bytes, both directions, over the last minute.
     pub share: f64,
-    /// Performance: the fraction of packets whose first copy came on this lane.
+    /// Performance: the fraction of the last minute's packets whose first copy came on this lane.
     pub first_arrivals: f64,
-    /// Performance: rescues over the last minute (§11.5).
+    /// Performance: rescues in the last minute (§11.5).
     pub rescues_per_min: u64,
     /// Bandwidth: reorder wait of packets that came on this lane. Beyond §20.2's example, so left
     /// out while zero (always, in performance mode).

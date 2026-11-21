@@ -480,7 +480,11 @@ fn an_idle_bond_outlives_its_channel() {
     }
     let since = c.now() - c.bonds[0].chan_down.expect("the client's channel is down");
     assert!(since > FAIL_OPEN_AFTER + SEC && a.bonds.first().is_some_and(|b| b.chan.is_none()), "{since}");
-    assert_eq!(a.bonds[0].owner, owner, "the anchor kept the bond");
+    assert_eq!(
+        (a.bonds[0].owner, a.bonds[0].state),
+        (owner, BondState::Up),
+        "the anchor kept the bond, and shows it up"
+    );
     assert_eq!((c.bonds[0].owner, c.bonds[0].state), (session, BondState::Up), "the client kept it");
     assert!(c.capture.is_some() && !ccalls.lock().unwrap().contains(&"capture off".to_string()));
     // The direct lane still carries the bond, and the channel comes back to the same bond.

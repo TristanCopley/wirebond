@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::api::{AnchorBond, Bond, Egress, Lane, LaneState, Mode, Pick, Problem, Role, Status, problem};
+use crate::api::{AnchorBond, Bond, BondState, Egress, Lane, LaneState, Mode, Pick, Problem, Role, Status, problem};
 
 /// Status for a person. `remote` names the device whose read-only view this is (`wirebond status
 /// <device>`): its next steps are for that device, and the Moonlight line is this device's only.
@@ -24,9 +24,10 @@ pub fn status_text(st: &Status, remote: Option<&str>) -> String {
     if let Some(b) = &st.bond {
         s += &bond(b, &st.device);
         if remote.is_none()
+            && b.state == BondState::Up
             && let Some(addr) = b.anchor_addr4.as_ref().or(b.anchor_addr6.as_ref())
         {
-            // §6.1: the anchor's own services are at its bond address.
+            // §6.1: the anchor's own services are at its bond address, while the bond is up.
             s += &format!("\nMoonlight: add the host {addr} to stream from {}\n", b.anchor);
         }
     }
@@ -87,32 +88,44 @@ fn anchor_bond(b: &AnchorBond) -> String {
     head + &more + &lanes(&b.lanes, b.mode, "    ")
 }
 
-/// One row per lane (§11.5, §20.4): delay (RTT), loss, rate and share, then what the mode
-/// measures: first arrivals and rescues in performance, reorder wait in bandwidth. The one-way
-/// delays are in --json; a row stays within 100 columns. No jitter column: the daemon has no
-/// figure for it (`Lane::dev_ms`), and a column of zeros would read as none measured.
+/// One row per lane (§11.5, §20.4), to answer at a glance which links carry the bond, how late
+/// and how lossy each is, and how much each carries now: its links and state; delay (RTT), jitter
+/// and loss; megabits a second into this device and out of it over the last seconds; what the
+/// mode measures over the last minute (first arrivals and rescues in performance, reorder wait in
+/// bandwidth); last, the rate the lane is paced at. The group is in the links table and the
+/// share and the one-way delays in --json: a row stays within 100 columns.
 fn lanes(ls: &[Lane], mode: Mode, indent: &str) -> String {
     if ls.is_empty() {
         return format!("{indent}no lanes yet\n");
     }
     let tail = if mode == Mode::Performance { "first\trescues" } else { "reorder p50/p99" };
-    let mut rows = vec![format!("lane\tlinks\tgroup\tstate\trtt\tloss\trate\tshare\t{tail}")];
+    let mut rows = vec![format!("lane\tlinks\tstate\trtt\tjitter\tloss\tin/out\t{tail}\tpace")];
     for l in ls {
         let name = if l.id == 0 { "mesh".to_string() } else { l.links.join(" → ") };
         // A lane never measured shows no numbers rather than zeros.
         let fresh = matches!(l.state, LaneState::Punching | LaneState::Dormant) && l.rtt_ms == 0.0;
         let num = |s: String| if fresh { "-".to_string() } else { s };
-        let pct = |x: f64| num(format!("{:.0}%", 100.0 * x));
         let end = match mode {
-            Mode::Performance => format!("{}\t{}/min", pct(l.first_arrivals), l.rescues_per_min),
+            Mode::Performance => {
+                let first = num(format!("{:.0}%", 100.0 * l.first_arrivals));
+                format!("{first}\t{}", num(format!("{}/min", l.rescues_per_min)))
+            }
             Mode::Bandwidth => num(format!("{:.1}/{:.1}ms", l.reorder_p50_ms, l.reorder_p99_ms)),
         };
-        let rtt = num(format!("{:.1}ms", l.rtt_ms));
-        let (loss, rate) = (num(format!("{:.1}%", 100.0 * l.loss)), num(format!("{:.0}Mbps", l.rate_mbps)));
-        let (id, group, state, share) = (l.id, l.group, l.state.as_str(), pct(l.share));
-        rows.push(format!("{id}\t{name}\t{group}\t{state}\t{rtt}\t{loss}\t{rate}\t{share}\t{end}"));
+        let (rtt, jitter) = (num(format!("{:.1}ms", l.rtt_ms)), num(format!("{:.1}ms", l.dev_ms)));
+        let loss = num(format!("{:.1}%", 100.0 * l.loss));
+        let carried = num(format!("{}/{}Mbps", mbps(l.rx_mbps), mbps(l.tx_mbps)));
+        // §12: a lane whose rate the controller has not limited is paced at no rate at all.
+        let pace = num(if l.rate_mbps == 0.0 { "unlimited".into() } else { format!("{:.0}Mbps", l.rate_mbps) });
+        let (id, state) = (l.id, l.state.as_str());
+        rows.push(format!("{id}\t{name}\t{state}\t{rtt}\t{jitter}\t{loss}\t{carried}\t{end}\t{pace}"));
     }
     table(&rows, indent)
+}
+
+/// Megabits a second in about three digits: 0.0, 2.4, 38.1, 120.
+fn mbps(x: f64) -> String {
+    if x >= 99.95 { format!("{x:.0}") } else { format!("{x:.1}") }
 }
 
 /// The problems, each with its next step: the daemon's, or else the one §17 gives its code.

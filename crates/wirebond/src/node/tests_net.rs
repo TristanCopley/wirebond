@@ -531,7 +531,7 @@ fn an_anchor_without_a_device_refuses_bonds_and_opens_it_again() {
 /// §20.2: a lane names the client's link and the anchor's by their labels, as the links tables do,
 /// on both ends in that order, and its first arrivals are the engine's, as a fraction of the bond's.
 #[test]
-fn status_lanes_name_links_by_label_and_count_first_arrivals() {
+fn status_lanes_name_links_by_label_and_say_what_they_carry_now() {
     let acfg = Config { role: Role::Anchor, allow: vec![ip(73, 10).to_string()], ..Config::default() };
     let ccfg = Config { role: Role::Client, anchor: Some(ip(73, 20).to_string()), ..Config::default() };
     let mut a = node("xanth", &[("eth0", ip(73, 2))], ip(73, 20), acfg);
@@ -559,6 +559,16 @@ fn status_lanes_name_links_by_label_and_count_first_arrivals() {
     );
     // The client received none: no fraction to show.
     assert!(cl.iter().all(|l| l.first_arrivals == 0.0), "{cl:?}");
+    // What the lanes carry now (§20.2): the client sent and the anchor received, megabits a
+    // second over the last seconds, and each side's shares count both directions (§11.5), so the
+    // anchor, which sent no data, has shares too. (Its lanes still show a little going out: the
+    // engine counts every packet a lane sends, probes too, and received data alone.) The engine's
+    // jitter is passed on.
+    let sum = |ls: &[api::Lane], f: fn(&api::Lane) -> f64| ls.iter().map(f).sum::<f64>();
+    assert!(sum(&cl, |l| l.tx_mbps) > 0.0 && sum(&cl, |l| l.rx_mbps) == 0.0, "{cl:?}");
+    assert!(sum(&al, |l| l.rx_mbps) > 0.0, "{al:?}");
+    assert!((sum(&cl, |l| l.share) - 1.0).abs() < 1e-9 && (sum(&al, |l| l.share) - 1.0).abs() < 1e-9, "{cl:?} {al:?}");
+    assert!(sum(&cl, |l| l.dev_ms) > 0.0, "{cl:?}");
 }
 
 /// A capture the host refuses (a route another VPN owns) is tried again every HOST_RETRY, not at

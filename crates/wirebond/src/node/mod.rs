@@ -26,6 +26,7 @@ mod link;
 mod pick;
 mod plat;
 pub mod proto;
+mod rates;
 mod support;
 #[cfg(test)]
 mod tests;
@@ -1525,6 +1526,7 @@ impl Daemon {
             }
             b.owner = owner;
             b.session = Some(Session::new(role, owner, rand));
+            b.rates = rates::Rates::default(); // the new session's counters start at nothing
             self.feed_links(bi);
         }
         let Some(mode) = self.bond_ref(bi).map(|b| b.mode) else { return };
@@ -2055,6 +2057,7 @@ impl Daemon {
             let heard = bond::heard(&snap, client);
             let b = &mut self.bonds[bi];
             b.heard = heard;
+            b.rates.sample(now, &snap.lanes);
             // Capture returns after fail open on news of the anchor, not on a state: an idle
             // bond's probe lane stays "up" until its third probe is missed.
             let up = up && (b.state != BondState::Down || heard.is_some_and(|t| t > b.since));
@@ -2081,7 +2084,9 @@ impl Daemon {
                     self.end_bond(bi, false);
                     continue;
                 }
-                b.set_state(if up { BondState::Up } else { BondState::Punching }, now);
+                // An anchor never probes an idle bond, so its lanes are dormant then: still up.
+                let idle = snap.lanes.iter().any(|l| l.validated && l.state == "dormant");
+                b.set_state(if up || idle { BondState::Up } else { BondState::Punching }, now);
                 bi += 1;
                 continue;
             }
@@ -2315,8 +2320,13 @@ impl Daemon {
     /// One session's lanes as status shows them (§20.2).
     fn lanes(&self, b: &Bond) -> (Vec<api::Lane>, u32, u32) {
         let Some(s) = b.session.as_ref() else { return (Vec::new(), 0, 0) };
-        let snap = s.snapshot();
-        let total: u64 = snap.lanes.iter().map(|l| l.out.sent_bytes).sum();
+        let (snap, now) = (s.snapshot(), self.now());
+        // What each lane did lately (`rates`): megabits a second over the last seconds; its share
+        // of the bond's bytes, both directions (§11.5), its first arrivals and its rescues over
+        // the last minute. The engine's counters are totals since the bond opened.
+        let recent = |l: &core::LaneStatus| b.rates.over(now, rates::NOW, l).unwrap_or_default();
+        let minute = |l: &core::LaneStatus| b.rates.over(now, rates::MINUTE, l).unwrap_or_default().1;
+        let total: u64 = snap.lanes.iter().map(|l| minute(l).bytes()).sum();
         // A lane's group is its client link's (§8); the mesh lane's, the link carrying the mesh's.
         let groups = self.groups();
         let group = |lane: u16| {
@@ -2338,11 +2348,13 @@ impl Daemon {
             let (own, peer) = (own.unwrap_or_else(|| l.local.clone()), peer.unwrap_or_else(|| l.remote.clone()));
             if mine { vec![own, peer] } else { vec![peer, own] }
         };
-        let firsts: u64 = snap.lanes.iter().map(|l| l.first_arrivals).sum();
+        let firsts: u64 = snap.lanes.iter().map(|l| minute(l).firsts).sum();
+        let part = |n: u64, of: u64| if of == 0 { 0.0 } else { n as f64 / of as f64 };
         let lanes = snap
             .lanes
             .iter()
-            .map(|l| api::Lane {
+            .map(|l| (l, recent(l), minute(l)))
+            .map(|(l, (span, lately), minute)| api::Lane {
                 id: l.id,
                 links: links(l),
                 group: group(l.id),
@@ -2355,11 +2367,14 @@ impl Daemon {
                 },
                 rtt_ms: l.out.rtt_ms,
                 owd_ms: l.out.owd_rel_ms,
+                dev_ms: l.dev as f64 / MS as f64,
                 loss: l.out.loss,
                 rate_mbps: l.out.rate_mbps,
-                share: if total == 0 { 0.0 } else { l.out.sent_bytes as f64 / total as f64 },
-                first_arrivals: if firsts == 0 { 0.0 } else { l.first_arrivals as f64 / firsts as f64 },
-                rescues_per_min: l.rescues,
+                tx_mbps: rates::Counts::mbps(lately.tx, span),
+                rx_mbps: rates::Counts::mbps(lately.rx, span),
+                share: part(minute.bytes(), total),
+                first_arrivals: part(minute.firsts, firsts),
+                rescues_per_min: minute.rescues,
                 reorder_p50_ms: l.reorder_wait_p50 as f64 / MS as f64,
                 reorder_p99_ms: l.reorder_wait_p99 as f64 / MS as f64,
                 ..api::Lane::default()

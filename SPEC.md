@@ -165,7 +165,7 @@ When the anchor offers IPv4 egress only, the client still captures IPv6, so noth
 
 The anchor's interface has 10.77.0.1/24 and fd77:b0d::1/64, or 192.168.137.1/24 on Windows (§6.2).
 
-- **Delivered locally:** packets for these addresses go to the anchor's own services. Moonlight on the client adds the host at the anchor's bond address (`10.77.0.1`, or `192.168.137.1` for a Windows anchor), and status prints that line.
+- **Delivered locally:** packets for these addresses go to the anchor's own services. Moonlight on the client adds the host at the anchor's bond address (`10.77.0.1`, or `192.168.137.1` for a Windows anchor), and status prints that line while the bond is up.
 - **Not routed through the bond:** the anchor's mesh address. Traffic to it, the control channel included, stays on the mesh.
 
 ### 6.2 Forwarding and NAT
@@ -613,7 +613,11 @@ wirebond run                               the daemon (started by the service ma
 }
 ```
 
-A lane's `links` are the client's link, then the anchor's, each by its label. `dev_ms` is left out until the engine reports it.
+A lane's `links` are the client's link, then the anchor's, each by its label. Its figures:
+- `tx_mbps` and `rx_mbps`: what it carried over the last 2 s, out of this device and into it. `tx` counts every packet sent, probes too; `rx` counts data.
+- `share`, `first_arrivals` and `rescues_per_min`: over the last minute; `share` counts both directions (§11.5).
+- `rate_mbps`: the rate it is paced at (§12); 0 is unlimited.
+- `dev_ms`: the jitter of §11.3, in this device's sending direction.
 
 What each role sees:
 - **Anchor:** an `anchor` object listing its bonds, each client's addresses, bytes egressed and delivered locally, and its uplink.

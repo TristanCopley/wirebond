@@ -53,6 +53,8 @@ pub struct Bond {
     pub heard: Option<Mono>,
     /// A client's, while its channel is down: when it next has its lanes probed (`life`).
     pub probe_at: Mono,
+    /// The session's lane counters over the last minute, for status's rates.
+    pub rates: super::rates::Rates,
     /// Since when only the mesh lane is up (MESH_ONLY_AFTER); None otherwise.
     pub mesh_only: Option<Mono>,
     /// A lane validated since the bond opened (LANES_BLOCKED_AFTER).
@@ -90,6 +92,7 @@ impl Bond {
             lanes_down: Some(now),
             heard: None,
             probe_at: 0,
+            rates: super::rates::Rates::default(),
             mesh_only: None,
             validated: false,
             egressed: 0,

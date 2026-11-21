@@ -6,9 +6,9 @@ links
 anchor · uplink eth · egress IPv4 and IPv6 · allows mac, tablet, pc
   bond from mac · performance · up
     addresses: 10.77.0.2 fd77:b0d::2 · egressed 2.4 GB · delivered here 18.0 GB
-    lane  links             group  state  rtt     loss  rate   share  first  rescues
-    257   Wi-Fi → eth       1      up     61.0ms  0.0%  6Mbps  50%    64%    7/min
-    513   iPhone USB → eth  2      up     70.1ms  1.0%  6Mbps  50%    36%    19/min
+    lane  links             state  rtt     jitter  loss  in/out        first  rescues  pace
+    257   Wi-Fi → eth       up     61.0ms  0.9ms   0.0%  2.0/30.0Mbps  64%    7/min    6Mbps
+    513   iPhone USB → eth  up     70.1ms  5.0ms   1.0%  2.0/30.0Mbps  36%    19/min   6Mbps
   bond from tablet · bandwidth · punching
     addresses: 10.77.0.3 · egressed 0 B · delivered here 0 B
     no lanes yet
