@@ -350,6 +350,34 @@ fn a_lost_bond_fails_open_after_fail_open_after() {
     assert!(c.status(false).problems.iter().any(|p| p.code == problem::BOND_DOWN));
 }
 
+/// §17, §5.4: an anchor's goodbye (`anchor off`, a clean stop or reboot) ends the client's bond,
+/// so its capture goes at once: nothing would carry what it captures. The client keeps redialing,
+/// and capture returns with the next bond's first validated lane.
+#[test]
+fn an_anchors_goodbye_removes_capture_at_once_and_the_next_bond_brings_it_back() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(40, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(40, 20).to_string()), ..Config::default() };
+    let (mut a, _, _) = node("xanth", ip(40, 2), ip(40, 20), acfg);
+    let (mut c, _, ccalls) = node("mac", ip(40, 1), ip(40, 10), ccfg);
+    let captures = || ccalls.lock().unwrap().iter().filter(|c| c.starts_with("capture on")).count();
+    run(&mut a, &mut c, "bond up", |_, c| c.bonds.first().is_some_and(|b| b.state == BondState::Up));
+    assert!(c.capture.is_some() && captures() == 1);
+
+    assert!(a.answer(Request::AnchorOff).changed);
+    let t = Instant::now();
+    run(&mut a, &mut c, "the goodbye arrives", |_, c| c.bonds.is_empty());
+    assert!(t.elapsed() < Duration::from_secs(1), "at once, not after FAIL_OPEN_AFTER: {:?}", t.elapsed());
+    assert!(c.capture.is_none() && c.tun.is_none(), "no capture without a bond");
+    assert_eq!(ccalls.lock().unwrap().last().map(String::as_str), Some("capture off"));
+    assert_eq!(c.cfg.role, Role::Client, "still a client: it redials");
+    assert!(c.status(false).problems.iter().any(|p| p.code == problem::ANCHOR_UNREACHABLE));
+
+    assert!(a.answer(Request::AnchorOn).changed);
+    run(&mut a, &mut c, "bond back", |_, c| c.bonds.first().is_some_and(|b| b.state == BondState::Up));
+    assert!(c.capture.is_some() && captures() == 2, "capture returns with the new bond");
+    assert!(c.status(false).problems.iter().all(|p| p.code != problem::ANCHOR_UNREACHABLE));
+}
+
 #[test]
 fn a_remote_view_answers_with_the_peers_status() {
     let acfg = Config { role: Role::Anchor, ..Config::default() };

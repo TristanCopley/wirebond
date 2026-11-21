@@ -1179,7 +1179,14 @@ impl Daemon {
             Msg::Bond(proto::Bond::Close) => {
                 if let Some(bi) = self.bonds.iter().position(|b| b.chan == Some(id)) {
                     self.log(format!("{} closed the bond", self.bonds[bi].peer));
-                    self.end_bond(bi, false);
+                    if self.cfg.role == Role::Client {
+                        // §17: a bond the anchor ended fails open at once (no bond is left to
+                        // count FAIL_OPEN_AFTER on); the redial brings capture back (§5.4).
+                        self.client_close(false);
+                        self.unreachable = Some("the anchor closed the bond".into());
+                    } else {
+                        self.end_bond(bi, false);
+                    }
                 }
             }
             Msg::Key(k) => {
