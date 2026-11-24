@@ -159,33 +159,16 @@ pub trait Out {
 // peer's candidates (loopback, unspecified, multicast, broadcast, link-local, mesh ranges; at most
 // MAX_LINKS links with MAX_CANDS each) before it passes hello or links to the engine.
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 fn zero<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
-/// Writes `f` as Go's encoding/json writes it, for the floats of [`LaneOut`], so a view message
-/// is the Go implementation's byte for byte (tests/vectors.rs). Go writes a whole number below
-/// 1e21 without a fraction or an exponent (95, not serde_json's 95.0; 1e20 in full, not 1e+20)
-/// and 1e21 and above as serde_json does (1e+21). Two differences remain, which no lane's
-/// measurement reaches: Go writes 0.000001 ≤ |f| < 0.00001 without the exponent serde_json uses,
-/// and −0 as -0 where this writes 0.
-fn gofloat<S: Serializer>(f: &f64, s: S) -> Result<S::Ok, S::Error> {
-    if f.fract() != 0.0 || f.abs() >= 1e21 {
-        s.serialize_f64(*f) // NaN and ±∞ too, which Go cannot write at all
-    } else if f.abs() < (1u64 << 53) as f64 {
-        s.serialize_i64(*f as i64) // below 2^53, every whole number is an i64 that converts exactly
-    } else {
-        // Go writes the shortest digits that read back as f, padded with zeros, as Display does.
-        s.serialize_i128(f.to_string().parse().map_err(serde::ser::Error::custom)?)
-    }
-}
-
 /// One control-channel message. The JSON is the Go implementation's, field for field.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Msg {
-    /// "hello", "key", "links", "mode", "view" or "error".
+    /// "hello", "key", "links" or "mode".
     pub t: String,
     /// hello: protocol major ([`PROTOCOL`]).
     #[serde(default, skip_serializing_if = "zero")]
@@ -217,15 +200,6 @@ pub struct Msg {
     /// (R2-09, notes/open.md). A Go peer omits it: 0, no floor.
     #[serde(default, skip_serializing_if = "zero")]
     pub c: u64,
-    /// view: the answer; a view without it asks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<View>,
-    /// error.
-    #[serde(default, skip_serializing_if = "zero")]
-    pub code: String,
-    /// error.
-    #[serde(default, skip_serializing_if = "zero")]
-    pub message: String,
 }
 
 /// One link as a peer offers it in hello and links (§6.3).
@@ -241,35 +215,19 @@ pub struct LinkInfo {
     pub cands: Vec<SocketAddr>,
 }
 
-/// One side's measurements of its own sending on each lane, which the peer shows as that lane's
-/// "in" direction (§14.2).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct View {
-    #[serde(default)]
-    pub lanes: Vec<LaneOut>,
-}
-
-/// What one side measures about its own sending on one lane (§8.3, §14.3). Its floats are
-/// written as Go writes them: 0, not 0.0.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// What one side measures about its own sending on one lane (§8.3, §14.3).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LaneOut {
     pub id: u16,
     /// spread, copies or standby.
     pub role: String,
-    #[serde(rename = "rttMs", serialize_with = "gofloat")]
     pub rtt_ms: f64,
-    #[serde(rename = "owdRelMs", serialize_with = "gofloat")]
     pub owd_rel_ms: f64,
-    #[serde(rename = "queueMs", serialize_with = "gofloat")]
     pub queue_ms: f64,
     /// 0–1.
-    #[serde(serialize_with = "gofloat")]
     pub loss: f64,
     /// The controller's rate; 0 while unlimited.
-    #[serde(serialize_with = "gofloat")]
     pub rate_mbps: f64,
-    pub sent_bytes: u64,
     pub copy_bytes: u64,
 }
 

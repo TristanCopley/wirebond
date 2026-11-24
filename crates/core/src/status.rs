@@ -61,7 +61,6 @@ impl Session {
                 queue_ms: ms(x.qd),
                 loss: x.loss,
                 rate_mbps: if x.rate < INF { x.rate / 1e6 } else { 0.0 },
-                sent_bytes: x.sent_bytes,
                 copy_bytes: x.copy_bytes,
             },
             // §11.5.

@@ -810,7 +810,7 @@ fn combine_spreads_bulk_over_two_lanes_and_keeps_its_order() {
     assert!(late <= steady.len() / 500, "{late} of {} delivered out of order in steady state", steady.len());
     let st = p.snap(Side::Server);
     for id in [WIFI, PHONE] {
-        let bytes = lane(&st, id).map_or(0, |l| l.out.sent_bytes);
+        let bytes = lane(&st, id).map_or(0, |l| l.tx_bytes);
         assert!(bytes >= 5_000_000, "lane {id:#06x} carried only {bytes} bytes; {}", describe(&st));
     }
     complete(&p.c, AUDIO, p.s.count(AUDIO), 0);

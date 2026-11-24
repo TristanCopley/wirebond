@@ -205,7 +205,7 @@ fn send_key() {
     match &acts.0[..] {
         [Act::Control(m)] => {
             assert!(m.t == "key" && m.rid == s.rid && m.rid != 0 && m.e == 0 && m.k == k, "{m:?}");
-            assert!(m.links.is_empty() && m.mode.is_empty() && m.view.is_none(), "{m:?}");
+            assert!(m.links.is_empty() && m.mode.is_empty(), "{m:?}");
         }
         a => panic!("{a:?}"),
     }
