@@ -729,7 +729,7 @@ impl Daemon {
         let next = self
             .bonds
             .iter()
-            .chain(self.pick.as_ref().and_then(|p| p.bond.as_ref()))
+            .chain(self.pick_bond())
             .filter_map(|b| b.session.as_ref())
             .map(|s| s.next())
             .fold(self.next_scan.min(self.next_life), Mono::min);
@@ -813,13 +813,27 @@ impl Daemon {
 
     /// The bond whose control channel is `id`: an index into `bonds`, or [`PICK`].
     fn bond_on(&self, id: u64) -> Option<usize> {
-        let pick = self.pick.as_ref().and_then(|p| p.bond.as_ref()).filter(|b| b.chan == Some(id)).map(|_| PICK);
-        self.bonds.iter().position(|b| b.chan == Some(id)).or(pick)
+        self.find_bond(|b| b.chan == Some(id))
+    }
+
+    /// The first bond for which `f` holds: an index into `bonds`, or [`PICK`].
+    fn find_bond(&self, f: impl Fn(&Bond) -> bool) -> Option<usize> {
+        self.bonds.iter().position(&f).or_else(|| self.pick_bond().filter(|b| f(b)).map(|_| PICK))
+    }
+
+    /// `pick`'s temporary bond, while it has one.
+    fn pick_bond(&self) -> Option<&Bond> {
+        self.pick.as_ref().and_then(|p| p.bond.as_ref())
     }
 
     /// Bond `bi`, or `pick`'s temporary bond for [`PICK`].
     fn bond_ref(&self, bi: usize) -> Option<&Bond> {
-        if bi == PICK { self.pick.as_ref().and_then(|p| p.bond.as_ref()) } else { self.bonds.get(bi) }
+        if bi == PICK { self.pick_bond() } else { self.bonds.get(bi) }
+    }
+
+    /// Every bond's index, [`PICK`] last while `pick` has a temporary bond.
+    fn bond_indices(&self) -> impl Iterator<Item = usize> + use<> {
+        (0..self.bonds.len()).chain(self.pick_bond().map(|_| PICK))
     }
 
     /// Sends `m` on bond `bi`'s control channel, if it is up.
@@ -927,8 +941,7 @@ impl Daemon {
             return;
         }
         let Some(owner) = core::packet_rid(data).and_then(|rid| self.rids.lookup(rid)) else { return };
-        let pick = self.pick.as_ref().and_then(|p| p.bond.as_ref()).filter(|b| b.owner == owner).map(|_| PICK);
-        let Some(bi) = self.bonds.iter().position(|b| b.owner == owner).or(pick) else { return };
+        let Some(bi) = self.find_bond(|b| b.owner == owner) else { return };
         self.handle_bond(bi, core::Event::Packet { sock: (si + 1) as SockId, from, data });
     }
 
@@ -1071,13 +1084,10 @@ impl Daemon {
         }
         self.gateways = self.plat.gateways();
         self.next_scan = now;
-        for bi in 0..self.bonds.len() {
-            if self.bonds[bi].session.is_some() {
+        for bi in self.bond_indices() {
+            if self.bond_ref(bi).is_some_and(|b| b.session.is_some()) {
                 self.handle_bond(bi, core::Event::Wake);
             }
-        }
-        if self.pick.as_ref().and_then(|p| p.bond.as_ref()).is_some_and(|b| b.session.is_some()) {
-            self.handle_bond(PICK, core::Event::Wake);
         }
     }
 
@@ -1782,19 +1792,10 @@ impl Daemon {
                 }
             }
         }
-        for bi in 0..self.bonds.len() {
-            if self.bonds[bi].session.as_ref().is_some_and(|s| now >= s.next()) {
+        for bi in self.bond_indices() {
+            if self.bond_ref(bi).and_then(|b| b.session.as_ref()).is_some_and(|s| now >= s.next()) {
                 self.handle_bond(bi, core::Event::Tick);
             }
-        }
-        if self
-            .pick
-            .as_ref()
-            .and_then(|p| p.bond.as_ref())
-            .and_then(|b| b.session.as_ref())
-            .is_some_and(|s| now >= s.next())
-        {
-            self.handle_bond(PICK, core::Event::Tick);
         }
         self.pick_tick(now);
         self.chan_tick();

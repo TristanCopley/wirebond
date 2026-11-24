@@ -450,12 +450,7 @@ impl Daemon {
         if m.keep(now) {
             self.handle_bond(PICK, core::Event::Send { packet: &filler_packet(64, false) });
         }
-        let done = self
-            .pick
-            .as_ref()
-            .and_then(|p| p.bond.as_ref())
-            .and_then(|b| b.meter.as_ref())
-            .is_some_and(|m| m.done(now));
+        let done = self.pick_bond().and_then(|b| b.meter.as_ref()).is_some_and(|m| m.done(now));
         if done && self.pick.as_ref().is_some_and(|p| p.result.is_some()) {
             self.pick_measured();
         }
