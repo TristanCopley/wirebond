@@ -86,7 +86,7 @@ fn home(uid: libc::uid_t) -> Option<(PathBuf, libc::uid_t)> {
 /// path, the CLI says how to run it.
 pub(super) fn register(s: Scope, exe: &Path, restart: bool) -> io::Result<bool> {
     let (_, job, dom) = layout(s);
-    let linked = s == Scope::System && link(Path::new(LINK), exe).unwrap_or(false);
+    let linked = relink(s, exe);
     let changed = write(&job, &plist(exe))?;
     let boot = [OsStr::new("bootstrap"), dom.as_ref(), job.as_ref()];
     if run("launchctl", &boot).is_ok() {
@@ -147,6 +147,7 @@ mod v2 {
 
     use super::super::Scope;
     use super::super::net::{Capture, Egress, EgressOn, Routes, Share, TunConfig};
+    use super::cvt;
 
     /// The dynamic-store key of the client's DNS service (§7).
     const DNS_KEY: &str = "State:/Network/Service/com.wirebond/DNS";
@@ -155,10 +156,6 @@ mod v2 {
     /// Internet Sharing's preferences and launchd job (§8).
     const NAT_PLIST: &str = "/Library/Preferences/SystemConfiguration/com.apple.nat";
     const SHARING_JOB: &str = "system/com.apple.NetworkSharing";
-
-    fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
-        if r == -1 { Err(io::Error::last_os_error()) } else { Ok(r) }
-    }
 
     /// A utun interface from a PF_SYSTEM / SYSPROTO_CONTROL socket connected to
     /// com.apple.net.utun_control (root); each packet carries a 4-byte family header (§5.3). Closing

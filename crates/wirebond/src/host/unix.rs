@@ -94,7 +94,7 @@ pub(super) fn setopt(s: &Socket, level: c_int, opt: c_int, v: &[u8]) -> io::Resu
 }
 
 /// A libc call's result: -1 is errno's error.
-fn cvt(r: c_int) -> io::Result<c_int> {
+pub(super) fn cvt(r: c_int) -> io::Result<c_int> {
     if r == -1 { Err(io::Error::last_os_error()) } else { Ok(r) }
 }
 
