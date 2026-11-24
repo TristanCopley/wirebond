@@ -1,10 +1,7 @@
 //! Tests of session.rs and lib.rs's Session methods. Owner: C2. Ports from core/pair_test.go:
-//! TestPairKeyExchange, TestPairMeshFlow, TestPairForged; from core/session_test.go:
-//! TestSendAllocs (with `pair::allocs` and an Out that does not allocate).
+//! TestPairKeyExchange, TestPairMeshFlow, TestPairForged (tests/alloc.rs ports TestSendAllocs).
 //!
 //! The ports drive whole sessions; the other tests need only session.rs and lib.rs.
-
-use std::net::SocketAddr;
 
 use super::Mode;
 use crate::flow::FLOW_LANES;
@@ -12,10 +9,7 @@ use crate::flow::FlowLane;
 use crate::lane::{Lane, LaneIx};
 use crate::pair::*;
 use crate::wire::Window;
-use crate::{
-    Event, HEADER_LEN, MAX_PACKET, MS, Msg, Out, RidTable, Role, SMALL_BIT, Session, SockId, TAG_LEN, TYPE_DATA,
-    TYPE_PROBE,
-};
+use crate::{Event, HEADER_LEN, MAX_PACKET, MS, Msg, Role, SMALL_BIT, Session, TAG_LEN, TYPE_DATA, TYPE_PROBE};
 
 /// Go: TestPairKeyExchange. Each side sends its rid and key on the peer's hello, and each takes
 /// the other's.
@@ -76,59 +70,6 @@ fn pair_forged() {
         }
     }
     assert_eq!(p.s.got.get(&f).map_or(0, Vec::len), got, "a replayed packet was delivered");
-}
-
-/// An Out that only counts, so the measured `handle` calls allocate nothing of their own.
-#[derive(Default)]
-struct Count {
-    sends: usize,
-    bytes: usize,
-    delivers: usize,
-    controls: usize,
-}
-
-impl Out for Count {
-    fn send(&mut self, _: SockId, _: SocketAddr, data: &[u8]) {
-        self.sends += 1;
-        self.bytes += data.len();
-    }
-
-    fn deliver(&mut self, _: &[u8]) {
-        self.delivers += 1;
-    }
-
-    fn control(&mut self, _: Msg) {
-        self.controls += 1;
-    }
-}
-
-/// Go: TestSendAllocs. `handle` allocates nothing for an App event in steady state (§4.2,
-/// §17.1).
-#[test]
-fn send_allocs() {
-    let (mut c, _, _) = keyed();
-    // Two keyed flows (§13), their packets built once: building them would allocate.
-    let video = crate::pair::inner(crate::FlowId(1), &[0u8; 1380]);
-    let audio = crate::pair::inner(crate::FlowId(2), &[0u8; 200]);
-    let (mut out, mut rids, mut now) = (Count::default(), RidTable::new(), 0);
-    let mut step = |c: &mut Session, out: &mut Count| {
-        now += MS / 10;
-        c.handle(now, Event::Send { packet: &video }, &mut rids, out);
-        c.handle(now, Event::Send { packet: &audio }, &mut rids, out);
-    };
-    // Warm up, plus one unmeasured batch as Go's AllocsPerRun runs; then one measured run of
-    // 5,000 steps, so that even one allocation in the whole batch (a probe tick, a pacer release)
-    // shows.
-    for _ in 0..25_000 {
-        step(&mut c, &mut out);
-    }
-    let (before, sends) = (allocs(), out.sends);
-    for _ in 0..5_000 {
-        step(&mut c, &mut out);
-    }
-    let n = allocs() - before;
-    assert_eq!(n, 0, "send path: {n} allocations in 5,000 steps");
-    assert!(out.sends > sends && out.bytes > 0, "nothing was sent");
 }
 
 /// The modes as messages name them; nothing else is one, from either mode. A new session runs

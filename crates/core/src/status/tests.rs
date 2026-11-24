@@ -1,5 +1,5 @@
-//! Tests of status.rs. Owner: C2. Ports from core/status_test.go: TestSnapshot, TestDeterminism
-//! (compares `Pair::wire` of two runs, one of them reading snapshots).
+//! Tests of status.rs. Owner: C2. Port from core/status_test.go: TestSnapshot (tests/determinism.rs
+//! ports TestDeterminism).
 //!
 //! The ports and the R2-06 and R2-14 pair tests drive whole sessions; the others need only
 //! status.rs. The new pair tests were checked against Go's core with the same fixes: they fail
@@ -44,36 +44,6 @@ fn snapshot() {
         st.events,
         st.bytes
     );
-}
-
-/// Go: TestDeterminism. The same events, times and rand stream give the same packets, and reading
-/// a snapshot changes nothing (netsim compares two runs of a seed).
-#[test]
-fn determinism() {
-    let run = |snap: bool| {
-        let mut p = hotel();
-        let (mut video, mut audio, mut input) = p.moonlight(10.0);
-        for i in 0..60 {
-            if i == 20 || i == 40 {
-                p.paths.get_mut(&(S_ETH, C_WIFI)).expect("the hotel Wi-Fi path").down = i == 20;
-            }
-            p.play(50 * MS, &mut [&mut video, &mut audio, &mut input]);
-            if snap {
-                p.s.s.snapshot();
-                p.c.s.snapshot();
-            }
-        }
-        p.wire
-    };
-    let (a, b) = (run(false), run(true));
-    assert_eq!(a.len(), b.len(), "{} packets, then {}", a.len(), b.len());
-    let packet = |it: &Item| match &it.ev {
-        Ev::Packet { sock, data, .. } => Some((it.dst, *sock, data.clone())),
-        _ => None,
-    };
-    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
-        assert!(packet(x).is_some() && packet(x) == packet(y), "packet {i} differs");
-    }
 }
 
 /// R2-06: the client sends only small input, so none of its lanes is spread, although it has a

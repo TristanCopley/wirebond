@@ -1,5 +1,6 @@
 //! Tests of lane.rs. Owner: C3. Ports from core/lane_test.go: TestLanesUp, TestStall,
-//! TestRebind, TestRelayedProbe, TestIdle, TestWake (`hotel` and `lane_state` are in pair.rs).
+//! TestRebind, TestRelayedProbe, TestWake (`hotel` and `lane_state` are in pair.rs; tests/pair.rs
+//! ports TestIdle).
 //! New (R2-03): a peer that answers a validation probe it never received, by echoing the
 //! predictable Seq from its own address, does not validate the claimed address.
 //!
@@ -889,46 +890,6 @@ fn forged_validation() {
         x.cand,
         x.peer
     );
-}
-
-/// An idle session sends one probe every PROBE_IDLE on one unmetered direct lane and the server
-/// answers each; nothing goes on the metered lane (§8.1, A8).
-#[test]
-fn idle() {
-    let mut p = hotel();
-    p.run(SEC);
-    p.stream(Side::C, crate::FlowId(1), 50, 100, 5 * MS);
-    p.run(10 * SEC);
-    let mark = p.wire.len();
-    p.run(10 * crate::MIN);
-    let (mut bytes, mut metered) = (0, 0);
-    let phone = p.nat[&C_PHONE];
-    for it in &p.wire[mark..] {
-        if let Ev::Packet { sock, from, data } = &it.ev {
-            bytes += data.len() + 28;
-            metered += usize::from(*sock == 12 || *from == phone);
-        }
-    }
-    let n = p.wire.len() - mark;
-    assert!(
-        bytes <= 100_000 / 6 && metered == 0 && n >= 40,
-        "idle 10 min: {bytes} bytes, {n} packets, {metered} on the metered lane"
-    );
-    lane_state(&p.c, 0x0101, State::Up);
-    lane_state(&p.c, 0x0201, State::Dormant);
-    // Idle, the client wants a tick for its next idle probe and the server none at all.
-    let d = p.c.s.next() - p.now;
-    assert!(
-        d > 0 && d <= PROBE_IDLE && p.s.s.next() == NEVER,
-        "idle: client next in {d} ns, server next {}",
-        p.s.s.next()
-    );
-    // The first datagram after idle goes on every known lane, then the lanes punch again.
-    let f = crate::FlowId(2); // another key than the first stream's
-    p.stream(Side::C, f, 100, 100, 5 * MS);
-    p.run(100 * MS);
-    complete(&p.s, f, 100, 0);
-    lane_state(&p.c, 0x0201, State::Up);
 }
 
 /// One probe on the iPhone lane from the client to the idle server, with at most `max` echoes and
