@@ -45,7 +45,9 @@ GitHub's anonymous limit. In the browser it asks once more, so a release publish
 shows; that request to `api.github.com` is the only one any page makes beyond the site itself, and
 the other pages ship no JavaScript at all. A content security policy written into each page
 enforces that; it allows inline style attributes (`style-src-attr`), which SvelteKit's route
-announcer needs, and nothing else inline. No cookies, no analytics, no fonts from elsewhere.
+announcer needs, and, by its hash, the site's one stylesheet, which each page carries inline so
+that no request holds up its first paint. Nothing else inline. No cookies, no analytics, no fonts
+from elsewhere.
 Prerendering also writes a `__data.json` beside each page; only the download page reads its own,
 and the others are dead weight on the host, accepted rather than restructure the loads.
 

@@ -15,6 +15,9 @@ export default defineConfig({
 		sveltekit({
 			adapter: adapter({ strict: true }),
 			paths: { base: base as '' | `/${string}` },
+			// The one stylesheet, under 2 KB compressed, goes into each page, so that nothing
+			// holds up the first paint; the policy below allows it by its hash.
+			inlineStyleThreshold: Infinity,
 			// Prerendered pages carry this policy as a <meta> tag: nothing loads from elsewhere,
 			// and the only request that leaves the site is the download page's release refresh.
 			csp: {
