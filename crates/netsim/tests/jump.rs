@@ -5,7 +5,7 @@
 //! hold (`World::reg_order`).
 
 use wirebond_core::{MODE_BANDWIDTH, MODE_PERFORMANCE};
-use wirebond_netsim::env::{Env, maker, spec};
+use wirebond_netsim::env::{Env, maker, par_runs, spec};
 use wirebond_netsim::{Dur, MS, SEC};
 
 /// Runs the jump on seed 1 in `mode`, both links at `rate` (the spec's links with 0), and
@@ -28,8 +28,9 @@ fn jump(mode: &'static str, rate: f64) -> (Result<(), String>, [usize; 4]) {
 
 #[test]
 fn jump_to_100_mbit_performance() {
-    for rate in [300e6, 120e6] {
-        let (r, [sent, back, s0, b0]) = jump(MODE_PERFORMANCE, rate);
+    let rates = [300e6, 120e6];
+    let runs = par_runs(&rates, |&rate| jump(MODE_PERFORMANCE, rate));
+    for (rate, (r, [sent, back, s0, b0])) in rates.into_iter().zip(runs) {
         assert_eq!(r, Ok(()), "performance, links at {rate}");
         assert_eq!((back, b0), (sent, s0), "performance, links at {rate}: echoes back of those sent");
     }
@@ -46,8 +47,9 @@ fn jump_to_100_mbit_performance() {
             performance does, loses nothing on 300 Mbit/s links but 9,970 on the spec's (none in \
             the first 200 ms) and contradicts SPEC 14.2's start from PACE_FLOOR"]
 fn jump_to_100_mbit_bandwidth() {
-    for rate in [300e6, 0.0] {
-        let (r, [sent, back, s0, b0]) = jump(MODE_BANDWIDTH, rate);
+    let rates = [300e6, 0.0];
+    let runs = par_runs(&rates, |&rate| jump(MODE_BANDWIDTH, rate));
+    for (rate, (r, [sent, back, s0, b0])) in rates.into_iter().zip(runs) {
         assert_eq!(r, Ok(()), "bandwidth, links at {rate}");
         assert_eq!((back, b0), (sent, s0), "bandwidth, links at {rate}: echoes back of those sent");
     }

@@ -9,7 +9,7 @@
 //! keeps it so.
 
 use wirebond_core::MODE_PERFORMANCE;
-use wirebond_netsim::env::{Env, maker, ms, par_runs, repro, seeds, spec};
+use wirebond_netsim::env::{Env, each_run, maker, ms, repro, seeds, spec};
 use wirebond_netsim::metrics::pct;
 use wirebond_netsim::{Dur, MS, SEC};
 
@@ -28,12 +28,8 @@ fn run(seed: u64) -> Option<String> {
         return Some(err);
     }
     e.w.settle(m);
-    let delays = |from: Dur, to: Dur| -> Vec<Dur> {
-        let sent = e.w[m].frames.iter().filter(|f| f.sent >= from && f.sent < to);
-        sent.map(|f| if f.done == 0 { Dur::MAX } else { f.done - f.sent }).collect()
-    };
-    let first = delays(START, START + FIRST).into_iter().max().unwrap_or(Dur::MAX);
-    let later = pct(&delays(START + SEC, END - SEC), 0.99);
+    let first = e.w[m].delays(START, START + FIRST).into_iter().max().unwrap_or(Dur::MAX);
+    let later = pct(&e.w[m].delays(START + SEC, END - SEC), 0.99);
     (first > later + SLACK).then(|| {
         format!(
             "seed {seed}: the worst frame of the first {} is {} (≤ the later frames' p99 {} + {})\nreproduce: {}",
@@ -48,7 +44,5 @@ fn run(seed: u64) -> Option<String> {
 
 #[test]
 fn first_frames_are_not_late() {
-    let jobs = seeds();
-    let bad: Vec<String> = par_runs(&jobs, |&s| run(s)).into_iter().flatten().collect();
-    assert!(bad.is_empty(), "{} of {} seeds failed:\n{}", bad.len(), jobs.len(), bad.join("\n"));
+    each_run(&seeds(), |&s| run(s));
 }

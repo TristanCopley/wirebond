@@ -101,11 +101,11 @@ fn moon_accept(test: &str, o: Opts, min: Dur, alone: bool, setup: Setup, criteri
             e.w.settle(m);
             let end = d - SEC;
             decoded(c, &e.w[m], WARM, end);
-            let bond = delays(&e.w[m], WARM, end);
+            let bond = e.w[m].delays(WARM, end);
             let mut refs = Refs { base_worst: a11_frames(c, seed, d, &o, setup, &bond), hotel_p50: 0 };
             if alone {
                 match reference(seed, d, &o, setup, true) {
-                    Ok(h) => refs.hotel_p50 = pct(&delays(&h, WARM, end), 0.5),
+                    Ok(h) => refs.hotel_p50 = pct(&h.delays(WARM, end), 0.5),
                     Err(err) => c.is(false, format!("the hotel alone's run failed: {err}")),
                 }
             }
@@ -127,19 +127,6 @@ fn reference(seed: u64, d: Dur, o: &Opts, setup: Setup, alone: bool) -> Result<M
     Ok(e.w[m].clone())
 }
 
-/// Every frame delay (sent → decodable) of the frames sent in [from, to); Dur::MAX for one never
-/// decoded.
-fn delays(m: &Moonlight, from: Dur, to: Dur) -> Vec<Dur> {
-    let sent = m.frames.iter().filter(|f| f.sent >= from && f.sent < to);
-    sent.map(|f| if f.done == 0 { Dur::MAX } else { f.done - f.sent }).collect()
-}
-
-/// The worst delay of a decoded frame sent in [from, to); 0 if none.
-fn worst(m: &Moonlight, from: Dur, to: Dur) -> Dur {
-    let done = m.frames.iter().filter(|f| f.sent >= from && f.sent < to && f.done > 0);
-    done.map(|f| f.done - f.sent).max().unwrap_or(0)
-}
-
 /// A11 for a Moonlight scenario: runs the baseline (the same seed, scenario and events, the
 /// client's node offering no link) and checks that the bond's frame delay is no worse at p50,
 /// p99 and p99.9. Returns the baseline's worst decoded frame.
@@ -152,12 +139,12 @@ fn a11_frames(c: &mut Check, seed: u64, d: Dur, o: &Opts, setup: Setup, bond: &[
         }
     };
     let end = d - SEC;
-    let base = delays(&m, WARM, end);
+    let base = m.delays(WARM, end);
     for p in [0.5, 0.99, 0.999] {
         let (x, y) = (pct(bond, p), pct(&base, p));
         c.is(x <= y, format!("A11: p{} frame delay {} (≤ the baseline's {})", 100.0 * p, ms(x), ms(y)));
     }
-    worst(&m, WARM, end)
+    m.worst(WARM, end)
 }
 
 /// What every scenario checks: no inner packet failed the daemon's address checks (§10.5 rule 6),
@@ -172,8 +159,8 @@ fn shared(c: &mut Check, w: &World) {
 /// hotel's p50 + 15 ms; at most 1 unrecovered frame per 5 minutes. Returns the worst frame.
 fn steady(c: &mut Check, m: &Moonlight, d: Dur, p50: Dur) -> Dur {
     let end = d - SEC;
-    let ds = delays(m, WARM, end);
-    let (p99, w) = (pct(&ds, 0.99), worst(m, WARM, end));
+    let ds = m.delays(WARM, end);
+    let (p99, w) = (pct(&ds, 0.99), m.worst(WARM, end));
     c.is(p99 <= p50 + A1_P99, format!("p99 frame delay {} (≤ the hotel's p50 {} + {})", ms(p99), ms(p50), ms(A1_P99)));
     c.is(w <= p50 + A1_WORST, format!("worst frame {} (≤ the hotel's p50 + {})", ms(w), ms(A1_WORST)));
     let (u, n) = (m.unrecovered(WARM, end), allow(A1_UNRECOVERED, 5 * MIN, d));
@@ -213,7 +200,7 @@ fn a2() {
 fn a3() {
     moon_accept("a3", spec(MODE_PERFORMANCE), 0, true, nothing, |c, e, m, d, _, r| {
         let (m, end) = (&e.w[m], d - SEC);
-        let (p50, h) = (pct(&delays(m, WARM, end), 0.5), r.hotel_p50);
+        let (p50, h) = (pct(&m.delays(WARM, end), 0.5), r.hotel_p50);
         c.is(
             (p50 - h).abs() <= A3_MEDIAN,
             format!("median frame delay {} (within {} of the hotel's {})", ms(p50), ms(A3_MEDIAN), ms(h)),

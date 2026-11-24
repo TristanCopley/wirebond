@@ -1172,5 +1172,7 @@ mod tests {
         assert_eq!(secs(180 * MS), 0.18);
         assert_eq!(secs(1500 * MS), 1.5);
         assert_eq!(secs(-1500 * MS), -1.5);
+        assert_eq!(secs(200 * MS), 0.2);
+        assert_eq!(secs(-SEC), -1.0);
     }
 }

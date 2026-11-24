@@ -7,11 +7,7 @@
 //! cell blackholed the hotel's group is the only one. Runs the PR seeds, or WIREBOND_SEED's, in
 //! both modes (in bandwidth the spread empties as every lane goes down: the swarm's seed 23).
 
-use std::cell::Cell;
-use std::rc::Rc;
-
-use wirebond_core::{MODE_BANDWIDTH, MODE_PERFORMANCE};
-use wirebond_netsim::env::{Env, START, defaults, hole, maker, ms, par_runs, repro, seeds};
+use wirebond_netsim::env::{Env, START, defaults, each_run, first_when, hole, maker, ms, repro, seeds_in_both_modes};
 use wirebond_netsim::{DevId, Dur, MS, SEC};
 
 /// The Mac sleeps from SLEEP_AT for SLEEP with its clock paused; the stream and the run end at END.
@@ -37,14 +33,7 @@ fn run(seed: u64, mode: &'static str) -> Option<String> {
     let wake = SLEEP_AT + SLEEP;
     e.w.at(SLEEP_AT, |w| w.sleep(DevId::Client, SLEEP, false));
     // When xanth first has an up lane after the wake.
-    let up = Rc::new(Cell::new(None::<Dur>));
-    let u = Rc::clone(&up);
-    e.w.every(wake, 10 * MS, move |w| {
-        if u.get().is_none() && w[DevId::Server].snap().lanes.iter().any(|l| l.state == "up") {
-            u.set(Some(w.now()));
-        }
-        u.get().is_none()
-    });
+    let up = first_when(&mut e.w, wake, 10 * MS, |w| w[DevId::Server].snap().lanes.iter().any(|l| l.state == "up"));
     if let Err(err) = e.run(END) {
         return Some(err);
     }
@@ -71,8 +60,5 @@ fn run(seed: u64, mode: &'static str) -> Option<String> {
 /// Every seed of the set in both modes: after the wake a lane comes back up and video plays again.
 #[test]
 fn lanes_come_back() {
-    let jobs: Vec<(u64, &str)> =
-        seeds().into_iter().flat_map(|s| [(s, MODE_PERFORMANCE), (s, MODE_BANDWIDTH)]).collect();
-    let bad: Vec<String> = par_runs(&jobs, |&(s, mode)| run(s, mode)).into_iter().flatten().collect();
-    assert!(bad.is_empty(), "{} of {} runs failed:\n{}", bad.len(), jobs.len(), bad.join("\n"));
+    each_run(&seeds_in_both_modes(), |&(s, mode)| run(s, mode));
 }

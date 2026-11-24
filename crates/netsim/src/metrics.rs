@@ -182,6 +182,19 @@ impl Moonlight {
         sent.map(excess).collect()
     }
 
+    /// Every frame delay (sent → decodable) of the frames sent in [from, to); `Dur::MAX` for one
+    /// never decoded.
+    pub fn delays(&self, from: Dur, to: Dur) -> Vec<Dur> {
+        let sent = self.frames.iter().filter(|f| f.sent >= from && f.sent < to);
+        sent.map(|f| if f.done == 0 { Dur::MAX } else { f.done - f.sent }).collect()
+    }
+
+    /// The worst delay of a decoded frame sent in [from, to); 0 if none.
+    pub fn worst(&self, from: Dur, to: Dur) -> Dur {
+        let done = self.frames.iter().filter(|f| f.sent >= from && f.sent < to && f.done > 0);
+        done.map(|f| f.done - f.sent).max().unwrap_or(0)
+    }
+
     /// The longest time in [from, to) without a displayed frame (Go MaxGap).
     pub fn max_gap(&self, from: Dur, to: Dur) -> Dur {
         let (mut prev, mut gap) = (from, 0);
@@ -279,6 +292,8 @@ mod tests {
         assert_eq!(m.unrecovered(SEC, 3 * SEC + 1), 3);
         assert_eq!(m.excess(0, SEC, 3 * SEC), [8 * MS, Dur::MAX, -MS]);
         assert_eq!(m.excess(1, 0, 2 * SEC), [-10 * MS, Dur::MAX]);
+        assert_eq!(m.delays(SEC, 3 * SEC), [40 * MS, Dur::MAX, 31 * MS]);
+        assert_eq!((m.worst(SEC, 3 * SEC), m.worst(SEC + MS, 2 * SEC)), (40 * MS, 0));
         // From 1 s to the first frame, between frames, and from the last to the end.
         assert_eq!(m.max_gap(SEC, 1_500 * MS), 250 * MS);
         assert_eq!(m.max_gap(SEC, 2 * SEC), 600 * MS);

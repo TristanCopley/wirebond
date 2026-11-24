@@ -15,7 +15,7 @@ use wirebond_core::OVERHEAD;
 
 use crate::link::IP_UDP;
 use crate::node::DevId;
-use crate::sim::{Dur, HookArgs, HookKind, MS, Rng, SEC, World, crc};
+use crate::sim::{Dur, HookArgs, HookKind, MS, Rng, SEC, World, crc, secs};
 
 /// Every app datagram starts with a header that tags it: 0xA5, the stream, a 48-bit id, the
 /// stream's sequence number, the send time and one word for the model (24 bytes, big-endian).
@@ -103,11 +103,6 @@ pub(crate) fn be64(b: &[u8]) -> u64 {
 /// t in whole milliseconds, as the registry stores submit times.
 fn reg_ms(t: Dur) -> u32 {
     (t / MS).clamp(0, Dur::from(u32::MAX)) as u32
-}
-
-/// d in seconds, as Go's Duration.Seconds computes it.
-pub(crate) fn secs(d: Dur) -> f64 {
-    (d / SEC) as f64 + (d % SEC) as f64 / 1e9
 }
 
 impl Registry {
@@ -1291,12 +1286,5 @@ mod tests {
         assert_eq!(w[e].loss(SEC + 2 * MS, SEC + 3 * MS, 2 * SEC), 0.0);
         assert_eq!(w[e].loss(0, SEC, 2 * SEC), 0.0, "nothing sent");
         assert_eq!(w.failed(), None);
-    }
-
-    #[test]
-    fn seconds_as_go_counts_them() {
-        assert_eq!(secs(1_500 * MS), 1.5);
-        assert_eq!(secs(200 * MS), 0.2);
-        assert_eq!(secs(-SEC), -1.0);
     }
 }

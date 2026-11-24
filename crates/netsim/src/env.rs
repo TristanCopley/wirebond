@@ -16,12 +16,14 @@
 //!
 //! Default: the PR set, seeds 1–3, 60 simulated seconds per scenario (§17.3).
 
+use std::cell::Cell;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 
-use wirebond_core::{LaneStatus, MODE_PERFORMANCE, SessionStatus, TYPE_DATA};
+use wirebond_core::{LaneStatus, MODE_BANDWIDTH, MODE_PERFORMANCE, SessionStatus, TYPE_DATA};
 
 use crate::apps::Moonlight;
 use crate::fake::{Evil, fake_maker};
@@ -541,6 +543,18 @@ pub fn par_runs<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Ve
     out.into_iter().map(|m| m.into_inner().unwrap_or_else(PoisonError::into_inner).expect("every item ran")).collect()
 }
 
+/// Every seed of the set in both modes, performance first.
+pub fn seeds_in_both_modes() -> Vec<(u64, &'static str)> {
+    seeds().into_iter().flat_map(|s| [(s, MODE_PERFORMANCE), (s, MODE_BANDWIDTH)]).collect()
+}
+
+/// Runs run on every job with [`par_runs`] and panics once, listing what each failed run returned
+/// (None: it passed).
+pub fn each_run<T: Sync>(jobs: &[T], run: impl Fn(&T) -> Option<String> + Sync) {
+    let bad: Vec<String> = par_runs(jobs, run).into_iter().flatten().collect();
+    assert!(bad.is_empty(), "{} of {} runs failed:\n{}", bad.len(), jobs.len(), bad.join("\n"));
+}
+
 /// max(n, n × d ÷ per): a count allowed "per 5 min" over a run of d (Go allow).
 pub fn allow(n: usize, per: Dur, d: Dur) -> usize {
     n.max((n as f64 * d as f64 / per as f64) as usize)
@@ -567,6 +581,25 @@ pub fn hole(w: &mut World, l: LinkId, at: Dur, dur: Dur, up: bool, down: bool) {
             k.down.hole = false;
         }
     });
+}
+
+/// The first time, sampled every period from `from`, at which cond holds; None until then. The
+/// sampler stops once it has seen it.
+pub fn first_when(
+    w: &mut World,
+    from: Dur,
+    period: Dur,
+    cond: impl Fn(&World) -> bool + 'static,
+) -> Rc<Cell<Option<Dur>>> {
+    let at = Rc::new(Cell::new(None));
+    let a = Rc::clone(&at);
+    w.every(from, period, move |w| {
+        if a.get().is_none() && cond(w) {
+            a.set(Some(w.now()));
+        }
+        a.get().is_none()
+    });
+    at
 }
 
 /// Checks that some frame sent in [from, to) became decodable, so no frame criterion passes on a
