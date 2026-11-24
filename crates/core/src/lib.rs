@@ -318,6 +318,11 @@ pub struct LaneStatus {
     pub sock: SockId,
     /// The current return address.
     pub peer: Option<SocketAddr>,
+    /// When the newest echo of a probe of mine on this lane arrived; None before the first. The
+    /// daemon judges a lost bond by it (§17): a dormant lane's state says nothing of its path.
+    pub last_echo: Option<Mono>,
+    /// The jitter of my direction's one-way delay on this lane (§11.3 `dev`); 0 before a sample.
+    pub dev: Mono,
     /// This side's sending on the lane.
     pub out: LaneOut,
     /// Bytes carried (§11.5): data packets I sent on this lane and received on it, copies

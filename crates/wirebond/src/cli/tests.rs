@@ -567,6 +567,7 @@ fn golden_views() {
         ("client", None),
         ("client-bandwidth", None),
         ("client-connecting", None),
+        ("client-one-link", None),
         ("anchor", None),
         ("support", None),
         ("none", None),
@@ -614,35 +615,49 @@ fn watch_belongs_to_status_and_draws_over_the_last_frame() {
     assert_eq!(screen("a\nbc\n"), "\x1b[Ha\x1b[K\nbc\x1b[K\n\x1b[J");
 }
 
-/// §20.4: the lane table shows what the daemon measures. No jitter column while the daemon has no
-/// figure for it; first arrivals as a percentage; the links by their labels.
+/// §20.4: the lane table says, per lane, how late and lossy it is and what it carries now: delay,
+/// jitter and loss, megabits a second in and out, first arrivals as a percentage, rescues a
+/// minute, and the rate it is paced at, where no rate (0 in the JSON) reads "unlimited", not
+/// "0Mbps" (`golden_views` holds every line to 100 columns). The Moonlight line is shown only
+/// while the bond is up: before that nothing answers at the anchor's bond address.
 #[test]
-fn the_lane_table_shows_first_arrivals_and_no_jitter_column() {
+fn the_lane_table_shows_what_each_lane_does_now() {
     let lane = crate::api::Lane {
         id: 257,
         links: vec!["Wi-Fi".into(), "Ethernet".into()],
         group: 1,
         state: crate::api::LaneState::Up,
         rtt_ms: 61.0,
+        dev_ms: 1.1,
+        tx_mbps: 2.04,
+        rx_mbps: 30.12,
         first_arrivals: 0.71,
         rescues_per_min: 12,
         ..crate::api::Lane::default()
     };
-    let bond = crate::api::Bond {
-        anchor: "xanth".into(),
-        state: crate::api::BondState::Up,
-        lanes: vec![lane],
-        ..crate::api::Bond::default()
+    let view = |state, rate_mbps| {
+        let bond = crate::api::Bond {
+            anchor: "xanth".into(),
+            state,
+            anchor_addr4: Some("10.77.0.1".into()),
+            lanes: vec![crate::api::Lane { rate_mbps, ..lane.clone() }],
+            ..crate::api::Bond::default()
+        };
+        render::status_text(&Status { role: crate::api::Role::Client, bond: Some(bond), ..Status::default() }, None)
     };
-    let text =
-        render::status_text(&Status { role: crate::api::Role::Client, bond: Some(bond), ..Status::default() }, None);
+    let text = view(crate::api::BondState::Up, 0.0);
     let rows: Vec<Vec<&str>> = text.lines().map(|l| l.split_whitespace().collect()).collect();
     let head = rows.iter().find(|r| r.first() == Some(&"lane")).unwrap_or_else(|| panic!("{text}"));
-    assert_eq!(*head, ["lane", "links", "group", "state", "rtt", "loss", "rate", "share", "first", "rescues"]);
+    assert_eq!(*head, ["lane", "links", "state", "rtt", "jitter", "loss", "in/out", "first", "rescues", "pace"]);
     let row = rows.iter().find(|r| r.first() == Some(&"257")).unwrap_or_else(|| panic!("{text}"));
-    assert_eq!(*row, ["257", "Wi-Fi", "→", "Ethernet", "1", "up", "61.0ms", "0.0%", "0Mbps", "0%", "71%", "12/min"]);
-    // --json leaves out the figure the daemon does not have, and writes it once it does.
-    let json = |l: &crate::api::Lane| serde_json::to_string(l).unwrap();
-    assert!(!json(&crate::api::Lane::default()).contains("dev_ms"));
-    assert!(json(&crate::api::Lane { dev_ms: 1.1, ..crate::api::Lane::default() }).contains(r#""dev_ms":1.1"#));
+    let want = ["257", "Wi-Fi", "→", "Ethernet", "up", "61.0ms", "1.1ms", "0.0%", "30.1/2.0Mbps", "71%", "12/min"];
+    assert_eq!(row[..11], want);
+    assert_eq!(row[11], "unlimited", "no rate is unlimited, not 0Mbps");
+    assert!(view(crate::api::BondState::Up, 38.0).contains("  38Mbps\n"));
+    assert!(text.contains("\nMoonlight: add the host 10.77.0.1 to stream from xanth\n"));
+    for state in [crate::api::BondState::Connecting, crate::api::BondState::Punching, crate::api::BondState::Down] {
+        assert!(!view(state, 0.0).contains("Moonlight"), "no Moonlight line while the bond is {state:?}");
+    }
+    // --json always has the jitter now that the daemon has a figure for it (§20.2).
+    assert!(serde_json::to_string(&crate::api::Lane::default()).unwrap().contains(r#""dev_ms":0.0"#));
 }

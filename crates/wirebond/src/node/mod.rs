@@ -26,6 +26,7 @@ mod link;
 mod pick;
 mod plat;
 pub mod proto;
+mod rates;
 mod support;
 #[cfg(test)]
 mod tests;
@@ -43,8 +44,8 @@ use std::{fs, thread};
 
 use wirebond_core::{
     self as core, ALL_LANES_DOWN, FAIL_OPEN_AFTER, IDLE_AFTER, LANES_BLOCKED_AFTER, LINK_SCAN, LOG_LINES, MAX_CANDS,
-    MAX_LINKS, MAX_MSG, MESH_ONLY_AFTER, MS, Mode, Mono, PICK_SECONDS, PORT, PROTOCOL, REDIAL_MAX, REDIAL_MIN,
-    RidTable, SEC, STATUS_EVENTS, STUN_EVERY, Session, SockId, TUN_MTU,
+    MAX_LINKS, MAX_MSG, MESH_ONLY_AFTER, MS, Mode, Mono, PICK_SECONDS, PORT, PROTOCOL, PUNCH_FOR, REDIAL_MAX,
+    REDIAL_MIN, RidTable, SEC, STATUS_EVENTS, STUN_EVERY, Session, SockId, TUN_MTU,
 };
 
 use crate::api::{self, LinkKind, Reply, Request, Role, Status, problem};
@@ -1525,6 +1526,7 @@ impl Daemon {
             }
             b.owner = owner;
             b.session = Some(Session::new(role, owner, rand));
+            b.rates = rates::Rates::default(); // the new session's counters start at nothing
             self.feed_links(bi);
         }
         let Some(mode) = self.bond_ref(bi).map(|b| b.mode) else { return };
@@ -2050,13 +2052,20 @@ impl Daemon {
             let snap = s.snapshot();
             let up = snap.lanes.iter().any(|l| l.validated && l.state == "up");
             let direct = snap.lanes.iter().any(|l| l.validated && l.state == "up" && l.id != 0);
-            // §17: every lane down, as the engine reports it (suspect is not down). An anchor never
-            // probes an idle bond, so there a lane that carries nothing counts too.
-            let down = match client {
-                true => snap.lanes.iter().all(bond::lane_down),
-                false => !snap.lanes.iter().any(bond::lane_carries),
-            };
+            // §17: every lane down, as the engine reports it (suspect is not down), for the redial.
+            let down = snap.lanes.iter().all(bond::lane_down);
+            let heard = bond::heard(&snap, client);
             let b = &mut self.bonds[bi];
+            b.heard = heard;
+            b.rates.sample(now, &snap.lanes);
+            // §17: one link of the client's under every live direct lane, and since when.
+            b.one_link = match bond::client_links(&snap)[..] {
+                [l] if client => Some((b.one_link.filter(|&(_, was)| was == l).map_or(now, |(t, _)| t), l)),
+                _ => None,
+            };
+            // Capture returns after fail open on news of the anchor, not on a state: an idle
+            // bond's probe lane stays "up" until its third probe is missed.
+            let up = up && (b.state != BondState::Down || heard.is_some_and(|t| t > b.since));
             if up {
                 b.validated = true;
                 b.mesh_only = if direct { None } else { Some(b.mesh_only.unwrap_or(now)) };
@@ -2068,17 +2077,21 @@ impl Daemon {
             } else {
                 b.lanes_down = None;
             }
-            let lost = |t: Option<Mono>| t.is_some_and(|t| now - t >= FAIL_OPEN_AFTER);
-            let gone = lost(b.chan_down) && lost(b.lanes_down);
+            // §17: the bond is lost once the channel is down and the peer unheard, each for
+            // FAIL_OPEN_AFTER: what the daemon observes, whatever state the lanes are in.
+            let gone = bond::lost(b.chan_down, heard, now);
             if !client {
-                // An anchor frees a bond whose lanes and channel are gone (§17), and pick's
-                // temporary bond with its channel (§18).
+                // An anchor frees a lost bond (§17), and pick's temporary bond with its channel
+                // (§18). An idle bond whose channel alone is down stays: the client's probes
+                // still arrive, and its direct lanes carry it when it wakes.
                 if gone || b.measure && b.chan.is_none() {
                     self.log(format!("{}: bond lost", self.bonds[bi].peer));
                     self.end_bond(bi, false);
                     continue;
                 }
-                b.set_state(if up { BondState::Up } else { BondState::Punching }, now);
+                // An anchor never probes an idle bond, so its lanes are dormant then: still up.
+                let idle = snap.lanes.iter().any(|l| l.validated && l.state == "dormant");
+                b.set_state(if up || idle { BondState::Up } else { BondState::Punching }, now);
                 bi += 1;
                 continue;
             }
@@ -2087,10 +2100,22 @@ impl Daemon {
                 if self.capture_on() {
                     self.bonds[bi].set_state(BondState::Up, now);
                 }
-            } else if down && b.state == BondState::Up && gone {
+            } else if b.state == BondState::Up && gone {
                 self.capture_off();
                 self.bonds[bi].set_state(BondState::Down, now);
                 self.log(format!("bond down for {} s: fail open", FAIL_OPEN_AFTER / SEC));
+            } else if b.state == BondState::Up
+                && b.chan.is_none()
+                && now >= b.probe_at
+                && heard.is_none_or(|t| now - t >= SEC)
+            {
+                // The channel is down and the lanes are quiet (an idle bond has one probe every
+                // PROBE_IDLE): a punch round has every lane probed for PUNCH_FOR, so echoes say
+                // within FAIL_OPEN_AFTER whether the anchor is still there, and round after round
+                // keep saying so, and keep the anchor hearing this client, until the channel is
+                // back. While data flows the lanes are probed anyway.
+                b.probe_at = now + PUNCH_FOR;
+                self.feed_links(bi);
             } else if down && b.validated && b.chan.is_some() && b.lanes_down.is_some_and(|t| now - t >= ALL_LANES_DOWN)
             {
                 // Every lane down while the channel is up: redial, then re-punch (§17).
@@ -2300,8 +2325,13 @@ impl Daemon {
     /// One session's lanes as status shows them (§20.2).
     fn lanes(&self, b: &Bond) -> (Vec<api::Lane>, u32, u32) {
         let Some(s) = b.session.as_ref() else { return (Vec::new(), 0, 0) };
-        let snap = s.snapshot();
-        let total: u64 = snap.lanes.iter().map(|l| l.out.sent_bytes).sum();
+        let (snap, now) = (s.snapshot(), self.now());
+        // What each lane did lately (`rates`): megabits a second over the last seconds; its share
+        // of the bond's bytes, both directions (§11.5), its first arrivals and its rescues over
+        // the last minute. The engine's counters are totals since the bond opened.
+        let recent = |l: &core::LaneStatus| b.rates.over(now, rates::NOW, l).unwrap_or_default();
+        let minute = |l: &core::LaneStatus| b.rates.over(now, rates::MINUTE, l).unwrap_or_default().1;
+        let total: u64 = snap.lanes.iter().map(|l| minute(l).bytes()).sum();
         // A lane's group is its client link's (§8); the mesh lane's, the link carrying the mesh's.
         let groups = self.groups();
         let group = |lane: u16| {
@@ -2323,11 +2353,13 @@ impl Daemon {
             let (own, peer) = (own.unwrap_or_else(|| l.local.clone()), peer.unwrap_or_else(|| l.remote.clone()));
             if mine { vec![own, peer] } else { vec![peer, own] }
         };
-        let firsts: u64 = snap.lanes.iter().map(|l| l.first_arrivals).sum();
+        let firsts: u64 = snap.lanes.iter().map(|l| minute(l).firsts).sum();
+        let part = |n: u64, of: u64| if of == 0 { 0.0 } else { n as f64 / of as f64 };
         let lanes = snap
             .lanes
             .iter()
-            .map(|l| api::Lane {
+            .map(|l| (l, recent(l), minute(l)))
+            .map(|(l, (span, lately), minute)| api::Lane {
                 id: l.id,
                 links: links(l),
                 group: group(l.id),
@@ -2340,11 +2372,14 @@ impl Daemon {
                 },
                 rtt_ms: l.out.rtt_ms,
                 owd_ms: l.out.owd_rel_ms,
+                dev_ms: l.dev as f64 / MS as f64,
                 loss: l.out.loss,
                 rate_mbps: l.out.rate_mbps,
-                share: if total == 0 { 0.0 } else { l.out.sent_bytes as f64 / total as f64 },
-                first_arrivals: if firsts == 0 { 0.0 } else { l.first_arrivals as f64 / firsts as f64 },
-                rescues_per_min: l.rescues,
+                tx_mbps: rates::Counts::mbps(lately.tx, span),
+                rx_mbps: rates::Counts::mbps(lately.rx, span),
+                share: part(minute.bytes(), total),
+                first_arrivals: part(minute.firsts, firsts),
+                rescues_per_min: minute.rescues,
                 reorder_p50_ms: l.reorder_wait_p50 as f64 / MS as f64,
                 reorder_p99_ms: l.reorder_wait_p99 as f64 / MS as f64,
                 ..api::Lane::default()
@@ -2352,6 +2387,16 @@ impl Daemon {
             .collect();
         let small = snap.flows.iter().filter(|f| f.class == "small").count() as u32;
         (lanes, snap.flows.len() as u32, small)
+    }
+
+    /// §17: what status notes once the bond has rested on one of this client's links for
+    /// MESH_ONLY_AFTER, while it is up. A note, not a problem: the bond works.
+    fn one_link_note(&self, b: &Bond) -> Vec<String> {
+        let held = |&(since, _): &(Mono, u8)| b.state == BondState::Up && self.now() - since >= MESH_ONLY_AFTER;
+        let link = b.one_link.filter(held).and_then(|(_, id)| self.socks.iter().find(|s| s.id == id));
+        link.map_or(Vec::new(), |s| {
+            bond::one_link_note(&s.link.label, cfg!(target_os = "macos"), kind(&s.link) == LinkKind::Usb)
+        })
     }
 
     /// The problems of §17 and the host's (§20.2).
@@ -2376,7 +2421,11 @@ impl Daemon {
             }
             if let Some(b) = self.bonds.first() {
                 if b.state == BondState::Down {
-                    v.push(p(problem::BOND_DOWN, None, "every lane and the channel down: traffic goes direct".into()));
+                    v.push(p(
+                        problem::BOND_DOWN,
+                        None,
+                        "the channel is down and no lane has an echo: traffic goes direct".into(),
+                    ));
                 }
                 if b.state == BondState::Punching && now - b.since >= LANES_BLOCKED_AFTER {
                     v.push(match &self.capture_fault {
@@ -2461,6 +2510,7 @@ impl Daemon {
                     .map(|a| Ipv6Addr::from_bits((a.to_bits() & !0xffff_ffff_ffff_ffff) | 1).to_string()),
                 egress: b.egress,
                 lanes,
+                note: self.one_link_note(b),
                 flows: if remote { 0 } else { flows },
                 small_flows: if remote { 0 } else { small },
             }

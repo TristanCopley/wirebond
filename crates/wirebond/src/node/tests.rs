@@ -396,17 +396,127 @@ fn a_lost_bond_fails_open_after_fail_open_after() {
     }
     let t = lost.elapsed();
     assert!(t >= Duration::from_secs(5), "{t:?}");
-    // On the daemon's clock, so a loaded test machine cannot blur it: the bond is down once both
-    // the channel and every lane are (§17; a lane is down DOWN_AFTER after its last echo, so the
-    // channel usually goes first), and fail open comes FAIL_OPEN_AFTER after that, within 1 s (A7).
+    // On the daemon's clock, so a loaded test machine cannot blur it: the bond is lost once the
+    // channel is down and no lane has had an echo (§17), and fail open comes FAIL_OPEN_AFTER
+    // after the later of the two, within 1 s (A7).
     let b = &c.bonds[0];
-    let (chan, lanes) = (b.chan_down.unwrap(), b.lanes_down.unwrap());
-    assert!(b.since - chan.max(lanes) >= FAIL_OPEN_AFTER, "{} {chan} {lanes}", b.since);
-    assert!(b.since - chan.max(lanes) <= FAIL_OPEN_AFTER + SEC, "{} {chan} {lanes}", b.since);
+    let (chan, echo) = (b.chan_down.unwrap(), b.heard.unwrap());
+    assert!(b.since - chan.max(echo) >= FAIL_OPEN_AFTER, "{} {chan} {echo}", b.since);
+    assert!(b.since - chan.max(echo) <= FAIL_OPEN_AFTER + SEC, "{} {chan} {echo}", b.since);
     assert_eq!(c.bonds[0].state, BondState::Down);
     assert_eq!(ccalls.lock().unwrap().last().map(String::as_str), Some("capture off"));
     assert!(c.capture.is_none());
     assert!(c.status(false).problems.iter().any(|p| p.code == problem::BOND_DOWN));
+}
+
+/// A client and an anchor on 127.`net`, their bond up, then idle: no data for IDLE_AFTER, so the
+/// client's lanes are dormant but its one idle-probe lane (§11.1).
+fn idle_bond(net: u8) -> (Daemon, Daemon, FakeTun, Arc<Mutex<Vec<String>>>) {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(net, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(net, 20).to_string()), ..Config::default() };
+    let (mut a, _, _) = node("xanth", ip(net, 2), ip(net, 20), acfg);
+    let (mut c, ctun, ccalls) = node("mac", ip(net, 1), ip(net, 10), ccfg);
+    run(&mut a, &mut c, "bond up", |_, c| c.bonds.first().is_some_and(|b| b.state == BondState::Up));
+    ctun.inject(udp([10, 77, 0, 2], [10, 77, 0, 1], b"then nothing"));
+    let dormant = |d: &Daemon| {
+        let lanes = d.bonds[0].session.as_ref().unwrap().snapshot().lanes;
+        lanes.iter().any(|l| l.state == "dormant") && lanes.iter().all(|l| matches!(l.state, "dormant" | "up"))
+    };
+    run(&mut a, &mut c, "idle", |_, c| dormant(c));
+    (a, c, ctun, ccalls)
+}
+
+/// §17: the anchor vanishes while the bond idles. The idle client's lanes never reach "down" (one
+/// is "up" on a probe every PROBE_IDLE, the rest dormant), so by their states the bond was never
+/// lost and capture stayed over a dead bond: no internet until `wirebond client off`. Judged by
+/// the channel and the echoes, it fails open FAIL_OPEN_AFTER after the channel goes.
+#[test]
+fn a_bond_lost_while_idle_fails_open_too() {
+    let (a, mut c, _, ccalls) = idle_bond(46);
+    assert!(c.capture.is_some());
+    drop(a);
+    let lost = Instant::now();
+    let mut p = host::Poll::default();
+    while c.bonds.first().is_some_and(|b| b.state == BondState::Up) {
+        assert!(lost.elapsed() < Duration::from_secs(12), "no fail open while idle: {:#?}", c.status(false));
+        c.step(&mut p, Duration::from_millis(5)).unwrap();
+    }
+    let b = &c.bonds[0];
+    let after = b.since - b.chan_down.unwrap();
+    assert!(
+        (FAIL_OPEN_AFTER..=FAIL_OPEN_AFTER + SEC).contains(&after),
+        "fail open {} ms after the channel",
+        after / MS
+    );
+    assert_eq!(ccalls.lock().unwrap().last().map(String::as_str), Some("capture off"));
+    assert!(c.capture.is_none());
+    assert!(c.status(false).problems.iter().any(|p| p.code == problem::BOND_DOWN));
+    // Still dead: the idle-probe lane's stale "up" does not bring capture back.
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(1) {
+        c.step(&mut p, Duration::from_millis(5)).unwrap();
+    }
+    assert!(c.capture.is_none() && c.bonds[0].state == BondState::Down);
+}
+
+/// §17, "mesh down, lanes up": the channel alone goes down while the bond idles, for longer than
+/// FAIL_OPEN_AFTER. The lanes still work, so the client keeps capture and the anchor keeps the
+/// bond: the client has its lanes probed while the channel is down, which gives it echoes and the
+/// anchor a client it still hears. An anchor that judged an idle bond by its lanes' states freed
+/// it 5 s into any such hiccup, and the client's next packets went nowhere.
+#[test]
+fn an_idle_bond_outlives_its_channel() {
+    let (mut a, mut c, ctun, ccalls) = idle_bond(49);
+    let (owner, session) = (a.bonds[0].owner, c.bonds[0].owner);
+    for p in c.chans.values() {
+        p.chan.close();
+    }
+    let (mut pa, mut pc) = (host::Poll::default(), host::Poll::default());
+    let down = Instant::now();
+    while down.elapsed() < Duration::from_secs(8) {
+        c.redial_at = Mono::MAX; // the mesh stays down
+        c.step(&mut pc, Duration::from_millis(2)).unwrap();
+        a.step(&mut pa, Duration::from_millis(2)).unwrap();
+    }
+    let since = c.now() - c.bonds[0].chan_down.expect("the client's channel is down");
+    assert!(since > FAIL_OPEN_AFTER + SEC && a.bonds.first().is_some_and(|b| b.chan.is_none()), "{since}");
+    assert_eq!(
+        (a.bonds[0].owner, a.bonds[0].state),
+        (owner, BondState::Up),
+        "the anchor kept the bond, and shows it up"
+    );
+    assert_eq!((c.bonds[0].owner, c.bonds[0].state), (session, BondState::Up), "the client kept it");
+    assert!(c.capture.is_some() && !ccalls.lock().unwrap().contains(&"capture off".to_string()));
+    // The direct lane still carries the bond, and the channel comes back to the same bond.
+    let p = udp([10, 77, 0, 2], [1, 1, 1, 1], b"over the direct lane");
+    ctun.inject(p);
+    run(&mut a, &mut c, "carried without the channel", |a, _| a.bonds[0].egressed > 0);
+    c.redial_at = 0;
+    run(&mut a, &mut c, "the channel returns", |a, c| a.bonds[0].chan.is_some() && c.bonds[0].chan.is_some());
+    assert_eq!((a.bonds[0].owner, c.bonds[0].owner), (owner, session), "the same sessions");
+}
+
+/// §17: a bond whose lanes go through one of the client's links is noted in status once that has
+/// lasted MESH_ONLY_AFTER, and only while the bond is up; the mesh lane, which rides the same
+/// link, does not make it two. A note on the bond, not a problem.
+#[test]
+fn a_bond_on_one_link_says_so_after_a_while() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(64, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(64, 20).to_string()), ..Config::default() };
+    let (mut a, _, _) = node("xanth", ip(64, 2), ip(64, 20), acfg);
+    let (mut c, _, _) = node("mac", ip(64, 1), ip(64, 10), ccfg);
+    run(&mut a, &mut c, "the direct lane", |_, c| c.bonds.first().is_some_and(|b| b.one_link.is_some()));
+    let note = |c: &Daemon| c.status(false).bond.unwrap().note;
+    assert_eq!((c.bonds[0].state, c.bonds[0].one_link.map(|(_, id)| id)), (BondState::Up, Some(1)));
+    assert!(note(&c).is_empty(), "not before MESH_ONLY_AFTER: lanes may still be punching");
+    c.bonds[0].one_link.as_mut().unwrap().0 -= MESH_ONLY_AFTER;
+    let lines = note(&c);
+    assert!(lines[0].starts_with("the bond rests on one link, lo-a: "), "{lines:?}");
+    assert_eq!(lines.len(), if cfg!(target_os = "macos") { 4 } else { 2 }, "the macOS setting on macOS: {lines:?}");
+    assert!(c.status(false).problems.is_empty(), "a note, not a problem: {:?}", c.status(false).problems);
+    assert!(a.status(false).anchor.unwrap().bonds.len() == 1 && a.bonds[0].one_link.is_none(), "a client's note");
+    c.bonds[0].set_state(BondState::Down, 0);
+    assert!(note(&c).is_empty(), "only while the bond is up");
 }
 
 /// §17, §5.4: an anchor's goodbye (`anchor off`, a clean stop or reboot) ends the client's bond,
