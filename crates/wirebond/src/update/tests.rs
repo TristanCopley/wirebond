@@ -423,7 +423,7 @@ fn stage_kills_a_smoke_test_that_hangs() {
     assert!(took >= SMOKE && took < SMOKE + Duration::from_secs(5), "took {took:?}");
     assert_eq!(files, "v0.3.0 | - | -");
     // A test build waits less; the shipped build waits §22.3's 10 s.
-    assert_eq!(Duration::from_nanos(SMOKE_TIMEOUT as u64), Duration::from_secs(10));
+    assert_eq!(SHIPPED_SMOKE, Duration::from_secs(10));
 }
 
 #[cfg(unix)]

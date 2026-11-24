@@ -52,10 +52,13 @@ pub const DEFAULT_URL: &str = "https://github.com/TristanCopley/wirebond";
 /// 4 minutes for update.
 const MAX_TIME: &str = "15";
 const ASSET_TIME: &str = "45";
-/// SMOKE_TIMEOUT, which core keeps in nanoseconds. A test build waits 3 s instead, so that the
-/// test of a smoke test that hangs does not hold every other spawning test for 10 s; 3 s still
-/// leaves a loaded runner time for the first exec of a freshly written script.
-const SMOKE: Duration = if cfg!(test) { Duration::from_secs(3) } else { Duration::from_nanos(SMOKE_TIMEOUT as u64) };
+/// SMOKE_TIMEOUT (§22.3), which core keeps in nanoseconds: how long a shipped daemon's smoke test
+/// may take.
+const SHIPPED_SMOKE: Duration = Duration::from_nanos(SMOKE_TIMEOUT as u64);
+/// How long this build's smoke test may take. A test build waits 3 s, so that the test of a smoke
+/// test that hangs does not hold every other spawning test for 10 s; 3 s still leaves a loaded
+/// runner time for the first exec of a freshly written script.
+const SMOKE: Duration = if cfg!(test) { Duration::from_secs(3) } else { SHIPPED_SMOKE };
 
 /// config.json's "update" object, which §22.4's example does not show.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -158,7 +161,7 @@ pub fn check(cfg: &Config, running: &str) -> io::Result<Option<String>> {
 /// one release, and nothing changes unless the asset's sha256 is on its SHA256SUMS line. Then a
 /// fresh `<exe>.new` replaces any stale one (a new file, private until written, then mode 0755,
 /// synced; the installed file is never written) and must answer `version --json` with the tag
-/// within SMOKE_TIMEOUT, or it is removed. Ok means `tag` is staged for `apply`.
+/// within SMOKE, or it is removed. Ok means `tag` is staged for `apply`.
 pub fn stage(cfg: &Config, exe: &Path, tag: &str) -> io::Result<()> {
     let dir = at(cfg, &format!("download/{tag}/"));
     let sums = curl(&format!("{dir}SHA256SUMS"), &["-L"])?;
@@ -174,7 +177,7 @@ pub fn stage(cfg: &Config, exe: &Path, tag: &str) -> io::Result<()> {
     staged.inspect_err(|_| _ = fs::remove_file(&next))
 }
 
-/// The smoke test (§22.3): `next version --json` must exit 0 within SMOKE_TIMEOUT and print
+/// The smoke test (§22.3): `next version --json` must exit 0 within SMOKE and print
 /// `wirebond version --json`'s object (`api::Version`) with the tag's version and a commit, not
 /// merely a text containing it (R1-33). This catches a wrong architecture, a truncated file,
 /// antivirus quarantine and a code-signing kill.
@@ -195,14 +198,14 @@ fn smoke(next: &Path, tag: &str) -> io::Result<()> {
     Err(io::Error::other(format!("smoke test: {what} within {}s: {why}", SMOKE.as_secs())))
 }
 
-/// Runs `next version --json`, killed if still running after SMOKE_TIMEOUT.
+/// Runs `next version --json`, killed if still running after SMOKE.
 fn run(next: &Path) -> io::Result<Output> {
     let mut child = Command::new(next).args(["version", "--json"]).stdout(Stdio::piped()).spawn()?;
     let start = Instant::now();
     while child.try_wait()?.is_none() && start.elapsed() < SMOKE {
         std::thread::sleep(Duration::from_millis(10));
     }
-    let _ = child.kill(); // past SMOKE_TIMEOUT; nothing if it exited
+    let _ = child.kill(); // past SMOKE; nothing if it exited
     child.wait_with_output()
 }
 
