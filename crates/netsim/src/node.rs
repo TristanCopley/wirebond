@@ -1,6 +1,7 @@
 //! The node stand-in (Go netsim/node.go, §17.2): per device its links, sockets, clock and
 //! Session, and what node does around core: hello, the control channel, STUN on node's triggers,
-//! flows and FlowEnd, wakes and restarts; plus the routing of packets through links and NATs.
+//! flows and their idle sweep, wakes and restarts; plus the routing of packets through links and
+//! NATs.
 //!
 //! Go's Device methods are `World` methods taking a [`DevId`] (they all reach the world: the
 //! clock, the queue, the links, the peer). How netsim drives core is in notes/netsim.md ("How
@@ -757,8 +758,8 @@ impl World {
         self[d].last_data = now;
     }
 
-    /// node's one-second timers: FlowEnd after FLOW_IDLE (in flow order), the STUN refresh, and
-    /// the session linger after the channel went down (Go house).
+    /// node's one-second timers: idle flows end after FLOW_IDLE (in flow order), the STUN refresh,
+    /// and the session linger after the channel went down (Go house).
     pub(crate) fn house(&mut self, d: DevId) {
         if !self[d].awake() {
             return;
@@ -1437,8 +1438,6 @@ mod tests {
         App(FlowId),
         Packet(SockId, SocketAddr),
         Wake,
-        #[allow(dead_code)] // 2.0: the engine ends idle flows itself (FLOW_IDLE); nothing sends FlowEnd
-        FlowEnd(FlowId),
         Tick(Mono),
         Close,
     }
@@ -1451,7 +1450,6 @@ mod tests {
                 Seen::App(..) => "App",
                 Seen::Packet(..) => "Packet",
                 Seen::Wake => "Wake",
-                Seen::FlowEnd(_) => "FlowEnd",
                 Seen::Tick(_) => "Tick",
                 Seen::Close => "Close",
             }
@@ -2058,9 +2056,8 @@ mod tests {
     /// its first datagram; each end ends a flow at its first housekeeping FLOW_IDLE after the
     /// flow's last datagram, in flow order; MAX_FLOWS live flows drop a new one.
     #[test]
-    #[ignore = "2.0 wave 2: the engine now ends idle flows itself (FLOW_IDLE); netsim sends no FlowEnd (SPEC 13)"]
     fn flows_numbered_ended_and_capped() {
-        let (mut w, log, _, _) = connected();
+        let (mut w, _, _, _) = connected();
         let a = w.stream("a", 9000, false, None);
         let b = w.stream("b", 9001, false, None);
         send(&mut w, a, 1);
@@ -2080,26 +2077,21 @@ mod tests {
         w.run(2 * SEC).unwrap();
         assert_eq!(w[b].received, 2);
         // The client sent 9000's at 0.5 s and got 9001's reply at 1.03 s: its sweeps at 61 s and
-        // 62 s end them; xanth got 9000's at 0.53 s and answered 9001 at 1 s: all at 61 s.
+        // 62 s end them; xanth got 9000's at 0.53 s, and 9001's reply crossed its egress leg at
+        // 1.005 s: the same sweeps end them.
         w.run(61 * SEC).unwrap();
-        let ends = |name| {
-            let ss = seen(&log, name).into_iter();
-            ss.filter_map(|s| match s {
-                Seen::FlowEnd(f) => Some(f),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-        };
-        assert_eq!((ends("mac#1"), ends("xanth#1")), (fs[..2].to_vec(), fs.to_vec()));
+        for d in DevId::BOTH {
+            assert_eq!(w[d].flows.keys().copied().collect::<Vec<_>>(), [fs[2]]);
+        }
+        assert_eq!(w[DevId::Client].by_app.values().copied().collect::<Vec<_>>(), [fs[2]]);
         w.run(62 * SEC).unwrap();
-        assert_eq!(ends("mac#1"), fs);
         assert!(w[DevId::Client].flows.is_empty() && w[DevId::Client].by_app.is_empty());
         assert!(w[DevId::Server].flows.is_empty());
-        for src in 1..=33 {
+        for src in 1..=MAX_FLOWS as u16 + 1 {
             send(&mut w, a, src);
         }
         let cl = &w[DevId::Client];
-        let want: Vec<_> = (4..=35).map(|n| FlowId::new(9000, n)).collect();
+        let want: Vec<_> = (4..4 + MAX_FLOWS as u16).map(|n| FlowId::new(9000, n)).collect();
         assert_eq!(cl.flows.keys().copied().collect::<Vec<_>>(), want);
         assert_eq!((cl.dropped, cl.by_app.len()), (1, MAX_FLOWS));
     }
