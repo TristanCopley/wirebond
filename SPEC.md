@@ -442,7 +442,7 @@ The mode belongs to the bond. The client sets it, and it applies in both directi
 
 ### 14.1 Performance (default)
 
-- **The spread:** one lane per bottleneck group that is up, validated, not suspect and not barred. In each group, the lane with the lowest base OWD. The mesh lane is in the spread only for a group with no usable direct lane: a direct lane is usable while it is validated and up or suspect, barred or not. While blind, and while no lane qualifies though echoes still arrive, the spread is the blind pair (§11.4).
+- **The spread:** one lane per bottleneck group that is validated, not barred, and up or suspect. In each group, an up lane before a suspect one, then the lane with the lowest base OWD. A suspect lane still answers, so it stays in the race: its copies lose while it stalls and win again from the first packet after. Taken out of the spread, it returned only a probe's round trip after it recovered, and the stream rode the slower lane alone until then; with hotel spikes of 10–50 ms every 2–5 s, more frames were late for that than for the spikes themselves (A1). A lane leaves the spread when it goes down (§11.4). The mesh lane is in the spread only for a group with no usable direct lane: a direct lane is usable while it is validated and up or suspect, barred or not. While blind, and while no lane qualifies though echoes still arrive, the spread is the blind pair (§11.4).
 - **Sending:** every packet of every flow goes on every lane of the spread.
   - Each lane's controller is offered the whole stream and drops its excess at its own pacer, so a lane too slow for the stream never holds the others back.
   - A lane that leaves the spread drops its queue.
@@ -467,7 +467,7 @@ The mesh lane is eligible only for a group with no usable direct lane (validated
 
 **Small flows** are copied (§13).
 
-**Leaving the spread.** A lane in overuse at `PACE_FLOOR` for `BANDWIDTH_FLOOR_HOLD` (500 ms) is barred for `BAR` (60 s). The bar doubles, up to `BAR_MAX` (10 min), while the lane keeps failing. A lane that was barred before is on trial for twice `BANDWIDTH_FLOOR_HOLD` after it rejoins the spread: it carries a copy of every bulk packet and none alone, and its queue is dropped if it leaves, so what it loses while it is judged again is not lost.
+**Leaving the spread.** A lane in overuse at `PACE_FLOOR` for `BANDWIDTH_FLOOR_HOLD` (500 ms) is barred for `BAR` (60 s). The bar doubles, up to `BAR_MAX` (10 min), while the lane keeps failing. A lane that returns to the spread from a bar is on trial for twice `BANDWIDTH_FLOOR_HOLD`: it carries a copy of every bulk packet and none alone, so what it loses while it is judged again is not lost, and the copies it holds are dropped if it leaves. Only that return is a trial: a lane that leaves for another reason later, suspect for a moment, has its share again when it comes back.
 
 **Rewind.** When a lane turns suspect, its unacknowledged packets from the last `REWIND_WINDOW` (300 ms, or its suspect timeout plus RTT if longer) are re-sent on the other eligible lanes. A packet's echoed `last_counter` marks it acknowledged. A lane still in startup that takes them adds the suspect lane's delivery rate to its own, so it paces for the stream at once.
 

@@ -263,6 +263,10 @@ pub(crate) struct Lane {
     /// In overuse at PACE_FLOOR since (§11.2 rule 4); NEVER if not.
     pub(crate) floor_at: Mono,
     pub(crate) bars: u32,
+    /// Barred since it last joined the spread: its next join after the bar begins a trial.
+    pub(crate) trial_due: bool,
+    /// On trial until then (§14.2, `Lane::on_trial`).
+    pub(crate) trial_until: Mono,
 
     // The peer's direction, as I receive it (§7.5, §8.4).
     pub(crate) win: Window,
