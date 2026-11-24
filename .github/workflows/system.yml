@@ -5,8 +5,9 @@
 name: system
 
 on:
+  # As in ci.yml: a branch's pushes are checked as its pull request, and tags run release.yml.
   push:
-    branches: ['**'] # tags run release.yml, which calls this workflow
+    branches: [main]
   pull_request:
   schedule:
     - cron: '41 10 * * *'

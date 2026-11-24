@@ -5,11 +5,14 @@
 name: ci
 
 on:
+  # A branch's pushes are checked as its pull request, once, not also as pushes; a branch with no
+  # pull request is run by hand. Tags run release.yml, which calls this workflow.
   push:
-    branches: ['**'] # tags run release.yml, which calls this workflow
+    branches: [main]
   pull_request:
   schedule:
     - cron: '23 9 * * *'
+  workflow_dispatch:
   workflow_call:
     inputs:
       long:
