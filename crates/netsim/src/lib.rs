@@ -1,9 +1,5 @@
 //! wirebond's deterministic network simulator. It drives two real wirebond_core::Sessions through
-//! simulated links in simulated time (SPEC §17.2). Tests only.
-//!
-//! Every Go type, field and function of Go's netsim/*.go (the test helpers included) has its Rust
-//! counterpart here. SKELETON.md (beside Cargo.toml) is the design: the Go-to-Rust name map and the
-//! ownership patterns. notes/rust.md records each departure from Go.
+//! simulated links in simulated time (SPEC §4.2). Tests only.
 //!
 //! The crate is one [`World`] that owns everything: two [`Device`]s (the node stand-in), every
 //! [`Link`] and its two [`Dir`]ections, the event queue, the datagram registry, the checker, the

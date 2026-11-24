@@ -1,6 +1,6 @@
-//! The NAT in front of a link (Go netsim/nat.go): one-to-one, easy and hard; mapping timeouts
-//! drawn from 10–200 s; port or address rebinding [Testing 8]. Methods that need the clock take
-//! `now` (Go reached it through a World pointer). Owner: N1.
+//! The NAT in front of a link: one-to-one, easy and hard; mapping timeouts drawn from 10–200 s;
+//! port or address rebinding [Testing 8]. Methods that need the clock take `now`, so a NAT holds
+//! no reference to the world.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -23,28 +23,28 @@ pub enum NatKind {
 #[derive(Clone, Debug)]
 pub struct Nat {
     pub kind: NatKind,
-    /// The public address (Go Pub).
+    /// The public address.
     pub public: Ipv4Addr,
     pub timeout: Dur,
     /// The link's local address, which one-to-one passes inbound packets to.
     pub(crate) local: IpAddr,
     pub(crate) r: Rng,
-    /// Live mappings by key (Go out); they own the mapping.
+    /// Live mappings by key; they own the mapping.
     pub(crate) out: BTreeMap<NatKey, Mapping>,
-    /// Public port → key (Go in).
+    /// Public port → key.
     pub(crate) inb: BTreeMap<u16, NatKey>,
-    /// Keys in creation order, so a rebind draws ports deterministically (Go list).
+    /// Keys in creation order, so a rebind draws ports deterministically.
     pub(crate) list: Vec<NatKey>,
 }
 
-/// A mapping's key: the local socket, and for a hard NAT the destination (Go natKey).
+/// A mapping's key: the local socket, and for a hard NAT the destination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct NatKey {
     pub(crate) local: SocketAddr,
     pub(crate) dst: Option<SocketAddr>,
 }
 
-/// One mapping (Go mapping).
+/// One mapping.
 #[derive(Clone, Debug)]
 pub(crate) struct Mapping {
     pub(crate) key: NatKey,
@@ -57,13 +57,13 @@ pub(crate) struct Mapping {
 
 impl Nat {
     /// A NAT of kind in front of local with public address public, drawing its timeout
-    /// (10–200 s [Testing 6]) and ports from r (Go newNAT, which drew r from the world).
+    /// (10–200 s [Testing 8]) and ports from r.
     pub fn new(kind: NatKind, local: IpAddr, public: Ipv4Addr, mut r: Rng) -> Nat {
         let timeout = 10 * SEC + r.dur(190 * SEC);
         Nat { kind, public, timeout, local, r, out: BTreeMap::new(), inb: BTreeMap::new(), list: Vec::new() }
     }
 
-    /// Whether the mapping under key is live at now; an expired one is removed (Go live).
+    /// Whether the mapping under key is live at now; an expired one is removed.
     pub(crate) fn live(&mut self, now: Dur, key: Option<NatKey>) -> bool {
         let Some(m) = key.and_then(|k| self.out.get(&k)) else {
             return false;
@@ -77,7 +77,7 @@ impl Nat {
         true
     }
 
-    /// A free public port in 1024–65534 (Go port).
+    /// A free public port in 1024–65534.
     pub(crate) fn port(&mut self) -> u16 {
         loop {
             let p = 1024 + self.r.below(64511) as u16;
@@ -87,7 +87,7 @@ impl Nat {
         }
     }
 
-    /// The public source of a packet from local to dst, making or refreshing its mapping (Go Out).
+    /// The public source of a packet from local to dst, making or refreshing its mapping.
     pub fn out(&mut self, now: Dur, local: SocketAddr, dst: SocketAddr) -> SocketAddr {
         if self.kind == NatKind::OneToOne {
             return SocketAddr::new(IpAddr::V4(self.public), local.port());
@@ -98,9 +98,9 @@ impl Nat {
             let m = Mapping { key, port, peers: BTreeSet::new(), last: now };
             self.out.insert(key, m);
             self.inb.insert(port, key);
-            // Go kept the expired mapping in its list until the next rebind skipped it; a key
-            // stands for its newest mapping here, so the old entry goes now: the order of live
-            // mappings, which a rebind draws ports in, is the same.
+            // A key stands for its newest mapping, so the expired mapping's entry goes now: left
+            // in the list, the key would be there twice and a rebind would move its mapping twice.
+            // The order of the live mappings, which a rebind draws ports in, is unchanged by it.
             self.list.retain(|k| *k != key);
             self.list.push(key);
         }
@@ -111,7 +111,7 @@ impl Nat {
     }
 
     /// The local address a packet from src to the public port reaches, if the NAT lets it in
-    /// (Go In; `in` is a Rust keyword).
+    /// (`in` is a Rust keyword).
     pub fn inbound(&mut self, now: Dur, src: SocketAddr, port: u16) -> Option<SocketAddr> {
         if self.kind == NatKind::OneToOne {
             return Some(SocketAddr::new(self.local, port));
@@ -125,7 +125,7 @@ impl Nat {
     }
 
     /// Gives every live mapping a new public port, and with addr a new public address too (the
-    /// last octet + 1), as a NAT that restarts or a carrier that moves the device does (Go Rebind).
+    /// last octet + 1), as a NAT that restarts or a carrier that moves the device does.
     pub fn rebind(&mut self, addr: bool) {
         if addr {
             let mut b = self.public.octets();
@@ -146,7 +146,7 @@ impl Nat {
         self.list = list;
     }
 
-    /// Moves the NAT's local address (Go set n.local in Link.SetLocal).
+    /// Moves the NAT's local address.
     pub(crate) fn set_local(&mut self, a: IpAddr) {
         self.local = a;
     }
@@ -163,9 +163,10 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// Go TestNAT: easy maps once and admits only destinations; hard maps per destination;
-    /// one-to-one keeps the port and admits anyone; timeouts 10–200 s; rebinding drops the old
-    /// mapping and moves the address. The NAT takes the clock as `now`, where Go ran the world.
+    /// Easy maps once and admits only destinations; hard maps per destination; one-to-one keeps
+    /// the port and admits anyone; timeouts 10–200 s; rebinding drops the old mapping and moves
+    /// the address. The NAT takes the clock as `now`, so the test passes times and never runs the
+    /// world.
     #[test]
     fn nat() {
         let mut w = World::new(1, fake_maker(false, Evil::None));
@@ -218,9 +219,9 @@ mod tests {
         assert!(errs.is_empty(), "{}", errs.join("\n"));
     }
 
-    /// Not in Go: a mapping made again after it expired is one mapping, which a rebind moves once,
-    /// keeping the port table in step; outgoing packets keep a mapping alive; an address rebind
-    /// moves a one-to-one NAT's address (wrapping the last octet) and keeps its ports.
+    /// A mapping made again after it expired is one mapping, which a rebind moves once, keeping
+    /// the port table in step; outgoing packets keep a mapping alive; an address rebind moves a
+    /// one-to-one NAT's address (wrapping the last octet) and keeps its ports.
     #[test]
     fn expiry_and_rebind() {
         let local = addr("10.0.0.2:7849");

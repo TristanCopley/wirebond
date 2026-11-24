@@ -1,11 +1,10 @@
-//! The swarm (Go netsim/swarm_test.go, §17.2): per seed each fault class is on with probability
-//! ½ [Testing 3]. Every seed runs in safety mode (faults on to the end, invariants after every
-//! event) and liveness mode (faults heal at two thirds of the run, then video must play), each
-//! twice: the two event-log hashes must match. 30 simulated seconds per run (notes/netsim.md 13);
-//! 5 minutes with WIREBOND_LONG; WIREBOND_SEED=N for one seed. Go's failure on seed 4 was the
-//! checker's probe key, fixed in check.rs; seed 8's liveness gap at full length (1,000.8 ms
-//! against 1,000 ms) went with the pacer's cap at twice the offered rate (NOTES.md, Closed).
-//! Owner: N4.
+//! The swarm: per seed each fault class is on with probability ½ [Testing 3]. Every seed runs in
+//! safety mode (faults on to the end, invariants after every event) and liveness mode (faults heal
+//! at two thirds of the run, then video must play), each twice: the two event-log hashes must
+//! match. 30 simulated seconds per run; 5 minutes with WIREBOND_LONG; WIREBOND_SEED=N for one
+//! seed. The failure on seed 4 was the checker's probe key, fixed in check.rs; seed 8's liveness
+//! gap at full length (1,000.8 ms against 1,000 ms) went with the pacer's cap at twice the offered
+//! rate (NOTES.md, Closed).
 
 use wirebond_core::MODE_BANDWIDTH;
 use wirebond_netsim::env::{Env, START, WARM, defaults, hole, long, maker, ms, par_runs, repro, seeds, show_hash};
@@ -43,7 +42,7 @@ const CLASSES: [&str; 23] = [
 const SWARM_LIVE: Dur = 5 * SEC;
 const SWARM_GAP: Dur = SEC;
 
-/// The command that reproduces a swarm failure on seed (§17.2).
+/// The command that reproduces a swarm failure on seed.
 fn swarm_repro(seed: u64) -> String {
     repro("swarm", "swarm", seed)
 }
@@ -59,7 +58,7 @@ type Live = Box<dyn FnOnce(&mut Env) -> Option<String>>;
 /// What the heal turns off again (liveness mode).
 type Undo = Box<dyn FnOnce(&mut World)>;
 
-/// The seed's generator (Go's `rand.New(rand.NewPCG(seed, 0x5a5a))`).
+/// The seed's generator.
 fn seeded(seed: u64) -> Rng {
     Rng::new(seed, 0x5a5a)
 }
@@ -94,8 +93,8 @@ fn flap(w: &mut World, l: LinkId, heal: Dur, mut r: Rng, down: bool) {
     }
 }
 
-/// One swarm run for seed (Go swarm): the classes drawn from `Rng::new(seed, 0x5a5a)` stay on to
-/// the end (safety) or heal at two thirds of the run (liveness); Moonlight 20 Mbps from START.
+/// One swarm run for seed: the classes drawn from `Rng::new(seed, 0x5a5a)` stay on to the end
+/// (safety) or heal at two thirds of the run (liveness); Moonlight 20 Mbps from START.
 /// Returns the env, the classes that are on, and the liveness evaluation (None: passed; always
 /// None in safety mode), which settles the stream and checks max_gap from heal + SWARM_LIVE.
 fn build(seed: u64, live: bool, d: Dur) -> (Env, Vec<&'static str>, Live) {
@@ -154,8 +153,7 @@ fn build(seed: u64, live: bool, d: Dur) -> (Env, Vec<&'static str>, Live) {
         }
     }
     if on("flap") {
-        // The flap draws its periods while the run goes, from a generator of its own (Go drew
-        // them from the classes' generator).
+        // The flap draws its periods while the run goes, from a generator of its own.
         let (l, t) = (pick(&mut r, links), at(&mut r, heal));
         let fr = Rng::new(r.u64(), r.u64());
         w.at(t, move |w| flap(w, l, heal, fr, true));
@@ -184,7 +182,7 @@ fn build(seed: u64, live: bool, d: Dur) -> (Env, Vec<&'static str>, Live) {
         w.at(t, |w| w.mesh_down = true);
         w.at(back, |w| w.mesh_down = false);
     }
-    // Go drew the sleep's and the restarts' lengths when they began; they are drawn here.
+    // The sleep's and the restarts' lengths are drawn here, not when they begin.
     if on("sleep") {
         let (dv, advance) = (pick(&mut r, DevId::BOTH), r.below(2) == 0);
         let t = at(&mut r, heal);
@@ -254,8 +252,8 @@ fn build(seed: u64, live: bool, d: Dur) -> (Env, Vec<&'static str>, Live) {
     (e, names, eval)
 }
 
-/// One seed in one mode, run twice (Go TestSwarm's subtest): the log line, or every failure. With
-/// WIREBOND_HASHES each run prints its event-log hash, also one that ends on a safety failure.
+/// One seed in one mode, run twice: the log line, or every failure. With WIREBOND_HASHES each run
+/// prints its event-log hash, also one that ends on a safety failure.
 fn run(seed: u64, live: bool) -> Result<String, String> {
     let mode = if live { "liveness" } else { "safety" };
     let d = swarm_time();
@@ -294,9 +292,8 @@ fn run(seed: u64, live: bool) -> Result<String, String> {
     }
 }
 
-/// Go TestSwarm: every seed of the set in both modes (on scoped threads), each run twice; a
-/// safety failure, a liveness failure (first run) or differing hashes fail with the faults and
-/// swarm_repro.
+/// Every seed of the set in both modes (on scoped threads), each run twice; a safety failure, a
+/// liveness failure (first run) or differing hashes fail with the faults and swarm_repro.
 #[test]
 fn swarm() {
     let jobs: Vec<(u64, bool)> = seeds().into_iter().flat_map(|s| [(s, false), (s, true)]).collect();

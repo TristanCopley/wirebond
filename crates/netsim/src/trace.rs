@@ -1,5 +1,5 @@
-//! Mahimahi delivery traces (Go netsim/trace.go) and the T-Mobile trace files CI fetches
-//! (models_test.go's loadTraces). Errors are Strings throughout netsim. Owner: N1.
+//! Mahimahi delivery traces and the T-Mobile trace files CI fetches. Errors are Strings throughout
+//! netsim.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, ErrorKind};
@@ -19,8 +19,8 @@ pub struct Trace {
     pub(crate) period: Dur,
 }
 
-/// A direction's position in its trace (Go Dir.topp, Dir.left): the opportunity in use, counting
-/// across loops, and the bytes it has left.
+/// A direction's position in its trace: the opportunity in use, counting across loops, and the
+/// bytes it has left.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TracePos {
     pub(crate) opp: usize,
@@ -35,8 +35,8 @@ impl Default for TracePos {
 
 impl Trace {
     /// Reads a Mahimahi trace: nondecreasing non-negative milliseconds, blank lines skipped, not
-    /// empty and not lasting 0 ms (Go ParseTrace). A millisecond must fit a [`Dur`] in
-    /// nanoseconds (292 years), where Go's arithmetic would have wrapped.
+    /// empty and not lasting 0 ms. A millisecond must fit a [`Dur`] in nanoseconds (292 years);
+    /// a larger one would wrap when converted.
     pub fn parse(mut r: impl BufRead) -> Result<Trace, String> {
         const MAX: i64 = Dur::MAX / MS;
         let mut ms: Vec<i64> = Vec::new();
@@ -79,7 +79,7 @@ impl Trace {
         k as Dur * self.period + self.ms[j] * MS
     }
 
-    /// When the head packet of n bytes has been given enough opportunities, from now (Go ready).
+    /// When the head packet of n bytes has been given enough opportunities, from now.
     pub(crate) fn ready(&self, pos: &mut TracePos, now: Dur, n: usize) -> Dur {
         let k = (now / self.period) as usize;
         let off = now - k as Dur * self.period;
@@ -99,7 +99,7 @@ impl Trace {
     }
 }
 
-/// The trace checksums, crates/netsim/traces.sum, which CI reads to fetch the traces (SPEC §17.2).
+/// The trace checksums, crates/netsim/traces.sum, which CI reads to fetch the traces.
 pub fn traces_sum() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("traces.sum")
 }
@@ -113,8 +113,8 @@ pub fn traces_dir() -> PathBuf {
 pub type Traces = (Arc<Trace>, Arc<Trace>);
 
 /// The T-Mobile LTE driving traces (up, down): Ok(None) when CI has not fetched them (the caller
-/// skips, printing why), Err when a file does not match traces.sum (Go loadTraces). The files are
-/// read, checked and parsed once per test process; every caller shares the result.
+/// skips, printing why), Err when a file does not match traces.sum. The files are read, checked
+/// and parsed once per test process; every caller shares the result.
 pub fn load_traces() -> Result<Option<Traces>, String> {
     static TRACES: OnceLock<Result<Option<Traces>, String>> = OnceLock::new();
     TRACES.get_or_init(read_traces).clone()
@@ -169,7 +169,7 @@ mod tests {
     use crate::node::Pkt;
     use crate::sim::{SEC, fmt_dur};
 
-    /// Go TestTraceReader: rate of "0 1 1 4", a decreasing trace fails, deliveries at 0 1 1 4 4 5 ms.
+    /// The rate of "0 1 1 4", a decreasing trace fails, deliveries at 0 1 1 4 4 5 ms.
     #[test]
     fn trace_reader() {
         let tr = Trace::parse("0\n1\n1\n\n4\n".as_bytes()).unwrap();
@@ -204,8 +204,8 @@ mod tests {
         assert!(errs.is_empty(), "{}", errs.join("\n"));
     }
 
-    /// Not in Go: a packet larger than one opportunity takes several; one smaller shares it with
-    /// the next; an opportunity nobody used is lost.
+    /// A packet larger than one opportunity takes several; one smaller shares it with the next;
+    /// an opportunity nobody used is lost.
     #[test]
     fn trace_opportunities() {
         let tr = Trace::parse("2\n4\n6\n8\n".as_bytes()).unwrap();
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(tr.period(), 8 * MS);
     }
 
-    /// Go TestTraceFiles: both T-Mobile traces above 1 Mbps; skips (returns) when absent.
+    /// Both T-Mobile traces above 1 Mbps; skips (returns) when absent.
     #[test]
     fn trace_files() {
         let Some((up, down)) = load_traces().unwrap() else {

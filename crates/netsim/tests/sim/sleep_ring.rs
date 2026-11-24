@@ -1,11 +1,11 @@
-//! A sleep longer than the probe ring (Rust only; notes/rust.md, accept: integration): the swarm's
-//! seed 5, reduced. While the Mac sleeps, xanth's probes go unechoed until its ring of RTT_RING
-//! probes wraps (5.12 s at 20 ms), and every lane of its goes down. After the wake no lane carries
-//! bulk, so it goes out unpaced. Go sent it on every validated lane: the direct lane and the
-//! Tailscale lane took it twice through the hotel's shaper, and the overuse that made kept every
-//! lane from the clean UP_AFTER that brings it back up, so video never played again. With the
-//! cell blackholed the hotel's group is the only one. Runs the PR seeds, or WIREBOND_SEED's, in
-//! both modes (in bandwidth the spread empties as every lane goes down: the swarm's seed 23).
+//! A sleep longer than the probe ring: the swarm's seed 5, reduced. While the Mac sleeps, xanth's
+//! probes go unechoed until its ring of RTT_RING probes wraps (5.12 s at 20 ms), and every lane of
+//! its goes down. After the wake no lane carries bulk, so it goes out unpaced. Sent on every
+//! validated lane, it would cross the hotel's shaper twice, on the direct lane and on the
+//! Tailscale lane, and the overuse that made would keep every lane from the clean UP_AFTER that
+//! brings it back up, so video would never play again. With the cell blackholed the hotel's group
+//! is the only one. Runs the PR seeds, or WIREBOND_SEED's, in both modes (in bandwidth the spread
+//! empties as every lane goes down: the swarm's seed 23).
 
 use wirebond_netsim::env::{Env, START, defaults, each_run, first_when, hole, maker, ms, repro, seeds_in_both_modes};
 use wirebond_netsim::{DevId, Dur, MS, SEC};

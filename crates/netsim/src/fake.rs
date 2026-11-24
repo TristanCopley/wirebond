@@ -1,12 +1,12 @@
-//! The test fake (Go netsim/fake_test.go): a stand-in Session that proves netsim's plumbing
-//! without core. It frames each app datagram in core's header layout with a checksum for a tag,
-//! sends bulk on one lane and small datagrams on every lane, delivers what passes its checksum and
-//! replay set, and probes every 20 ms through next and Tick. In direct mode it also punches the
-//! peer's candidates and uses a direct lane once a probe arrives on it. An [`Evil`] fake breaks
-//! one invariant on purpose, so the self-tests show the checker catches it.
+//! The test fake: a stand-in Session that proves netsim's plumbing without core. It frames each
+//! app datagram in core's header layout with a checksum for a tag, sends bulk on one lane and
+//! small datagrams on every lane, delivers what passes its checksum and replay set, and probes
+//! every 20 ms through next and Tick. In direct mode it also punches the peer's candidates and
+//! uses a direct lane once a probe arrives on it. An [`Evil`] fake breaks one invariant on purpose,
+//! so the self-tests show the checker catches it.
 //!
 //! It registers nothing in the device's RidTable; the stand-in routes to it without the rid check
-//! (it is not a `wirebond_core::Session`). Owner: N3.
+//! (it is not a `wirebond_core::Session`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -24,7 +24,7 @@ use wirebond_core::{
 use crate::apps::{be32, be64};
 use crate::sim::{Endpoint, MS, Maker};
 
-/// Ways a fake can be evil (Go evil* constants).
+/// Ways a fake can be evil.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Evil {
     #[default]
@@ -51,14 +51,14 @@ pub enum Evil {
     Trust,
 }
 
-/// Where a probe went or came from: a socket and an address (Go dst).
+/// Where a probe went or came from: a socket and an address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Dst {
     pub(crate) sock: SockId,
     pub(crate) to: SocketAddr,
 }
 
-/// The fake endpoint (Go fake).
+/// The fake endpoint.
 pub struct Fake {
     pub(crate) role: Role,
     pub(crate) rand: Rand,
@@ -78,7 +78,7 @@ pub struct Fake {
     pub(crate) cands: Vec<SocketAddr>,
     pub(crate) lanes: Vec<LaneStatus>,
     pub(crate) next: Mono,
-    /// Wake events seen (TestSleepWake reads it).
+    /// Wake events seen (the self-test sleep_wake reads it).
     pub wakes: u32,
     pub(crate) held: Option<Vec<u8>>,
     /// Where each of our probes went, by counter.
@@ -87,12 +87,12 @@ pub struct Fake {
     pub(crate) last_rx: BTreeMap<Dst, u64>,
 }
 
-/// Makes fakes (Go fakeMaker).
+/// Makes fakes.
 pub fn fake_maker(direct: bool, evil: Evil) -> Maker {
     Box::new(move |role, _owner, rand| Box::new(Fake::new(role, rand, direct, evil)) as Box<dyn Endpoint>)
 }
 
-/// The fake's integrity check: a CRC, enough against random corruption and forgery (Go fakeTag).
+/// The fake's integrity check: a CRC, enough against random corruption and forgery.
 pub fn fake_tag(b: &[u8]) -> u64 {
     crate::sim::crc(b) as u64
 }
@@ -143,7 +143,7 @@ impl Fake {
     }
 
     /// Frames payload as core would: type, the peer's rid, counter, payload, a 16-byte tag (the
-    /// CRC tag and 8 zero bytes) (Go seal).
+    /// CRC tag and 8 zero bytes).
     pub(crate) fn seal(&mut self, typ: u8, payload: &[u8]) -> Vec<u8> {
         if self.evil == Evil::Reuse && self.ctr == 50 {
             self.ctr = 0;
@@ -161,7 +161,7 @@ impl Fake {
     }
 
     /// Sends a probe that names its socket and echoes the newest probe received on sock from to,
-    /// so the peer can validate the address that probe was sent to (Go probe).
+    /// so the peer can validate the address that probe was sent to.
     pub(crate) fn probe(&mut self, sock: SockId, to: SocketAddr, out: &mut dyn Out) {
         let d = Dst { sock, to };
         self.probes.insert(self.ctr, d);
@@ -173,7 +173,7 @@ impl Fake {
         out.send(sock, to, &b);
     }
 
-    /// Seals an app datagram: bulk (≥ 400 bytes) on the newest lane, small on every lane (Go app).
+    /// Seals an app datagram: bulk (≥ 400 bytes) on the newest lane, small on every lane.
     pub(crate) fn app(&mut self, flow: FlowId, data: &[u8], out: &mut dyn Out) {
         if self.peer_rid == 0 || self.lanes.is_empty() {
             return;
@@ -215,8 +215,7 @@ impl Fake {
         }
     }
 
-    /// Opens a lane packet: checks tag, rid and replay; learns from probes; delivers data (Go
-    /// packet).
+    /// Opens a lane packet: checks tag, rid and replay; learns from probes; delivers data.
     pub(crate) fn packet(&mut self, sock: SockId, from: SocketAddr, data: &[u8], out: &mut dyn Out) {
         let b = data;
         if self.evil == Evil::Answer {
@@ -279,7 +278,7 @@ impl Fake {
     }
 
     /// Makes or moves the direct lane between sock and the peer's socket peer to from, an address
-    /// a probe of ours reached. Lane ids are client link << 8 | server link, as core's (Go learn).
+    /// a probe of ours reached. Lane ids are client link << 8 | server link, as core's.
     pub(crate) fn learn(&mut self, sock: SockId, from: SocketAddr, peer: u16) {
         let id = match self.role {
             Role::Client => sock << 8 | peer,
@@ -309,7 +308,7 @@ impl Fake {
     }
 
     /// Probes every lane every 20 ms once keyed; in direct mode also every candidate from every
-    /// link in the first 20 ms of each 200 ms (the end of Go Handle).
+    /// link in the first 20 ms of each 200 ms.
     fn probe_all(&mut self, now: Mono, out: &mut dyn Out) {
         if now < self.next || self.peer_rid == 0 {
             return;
@@ -340,7 +339,6 @@ fn flip_last(d: &[u8]) -> Vec<u8> {
 }
 
 impl Endpoint for Fake {
-    /// Go fake.Handle.
     fn handle(&mut self, now: Mono, ev: Event<'_>, _rids: &mut RidTable, out: &mut dyn Out) {
         match ev {
             Event::Links { links, mesh } => {
@@ -401,7 +399,7 @@ impl Endpoint for Fake {
         if self.peer_rid == 0 { Mono::MAX } else { self.next }
     }
 
-    /// Go's fake set Snapshot's Role, which Rust's SessionStatus does not have.
+    /// No role in the snapshot: SessionStatus has no field for one.
     fn snapshot(&self) -> SessionStatus {
         let bytes = if self.evil == Evil::Bytes { BOND_BYTES + 1 } else { 0 };
         SessionStatus { mode: self.mode.clone(), lanes: self.lanes.clone(), bytes, ..SessionStatus::default() }

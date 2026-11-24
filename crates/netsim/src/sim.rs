@@ -1,10 +1,8 @@
-//! The event engine (Go netsim/sim.go): one seeded random source, one clock and an event queue
-//! ordered by (time, sequence number), so a seed always replays the same run. Everything runs on
-//! one thread; an endpoint's `handle` is never re-entered, because every reaction is a new event.
-//! Also here: the [`Endpoint`] trait that `wirebond_core::Session` satisfies, the action recorder
-//! a device hands to `handle`, the PRNG, the CRC, the hooks and the event-log hash.
-//!
-//! Owner: N1 (with link.rs, nat.rs, trace.rs).
+//! The event engine: one seeded random source, one clock and an event queue ordered by (time,
+//! sequence number), so a seed always replays the same run. Everything runs on one thread; an
+//! endpoint's `handle` is never re-entered, because every reaction is a new event. Also here: the
+//! [`Endpoint`] trait that `wirebond_core::Session` satisfies, the action recorder a device hands
+//! to `handle`, the PRNG, the CRC, the hooks and the event-log hash.
 
 use std::any::Any;
 use std::cmp::Ordering;
@@ -25,8 +23,8 @@ use crate::node::{CtlChan, DevId, Device};
 // ---------------------------------------------------------------------------------------------
 // Simulated time
 
-/// Simulated time and durations, in nanoseconds (Go's time.Duration). World time starts at 0; a
-/// device's monotonic clock ([`wirebond_core::Mono`]) is world time plus the device's offset.
+/// Simulated time and durations, in nanoseconds. World time starts at 0; a device's monotonic
+/// clock ([`wirebond_core::Mono`]) is world time plus the device's offset.
 pub type Dur = i64;
 
 pub use wirebond_core::{MIN, MS, SEC};
@@ -37,21 +35,23 @@ pub const HOUR: Dur = 60 * MIN;
 /// The default one-way delay between the anchor and the internet server ([`World::egress`]).
 pub const EGRESS: Dur = 5 * MS;
 
-/// The golden-ratio increment of splitmix64; Go's World seeds its PCG with seed ^ GOLDEN.
+/// The golden-ratio increment of splitmix64; [`World::new`] seeds its generator with seed and
+/// seed ^ GOLDEN.
 pub const GOLDEN: u64 = 0x9e37_79b9_7f4a_7c15;
 
-/// Formats d as Go's %v of a time.Duration does closely enough for failure messages ("12.345s").
+/// Formats d for failure messages, in seconds to the millisecond ("12.345s").
 pub fn fmt_dur(d: Dur) -> String {
     format!("{:.3}s", d as f64 / 1e9)
 }
 
-/// d in seconds, computed as Go's Duration.Seconds is (whole seconds plus the remainder), so the
-/// rates and limits the models derive from durations round as Go's did.
+/// d in seconds, as whole seconds plus the remainder rather than d as f64 / 1e9 (the two can
+/// differ in the last bit), so the rates and limits the models derive from durations keep their
+/// values; `go_seconds` pins them.
 pub(crate) fn secs(d: Dur) -> f64 {
     (d / SEC) as f64 + (d % SEC) as f64 / 1e9
 }
 
-/// Lower-case hex of b (Go's %x of a byte slice).
+/// Lower-case hex of b.
 pub(crate) fn hex(b: &[u8]) -> String {
     use std::fmt::Write;
     b.iter().fold(String::with_capacity(2 * b.len()), |mut s, x| {
@@ -312,11 +312,10 @@ pub fn is_anchor(a: IpAddr) -> bool {
 // ---------------------------------------------------------------------------------------------
 // The endpoint netsim drives
 
-/// The part of core's API that netsim drives (Go's Endpoint). `wirebond_core::Session` satisfies
-/// it; so does the test fake ([`crate::fake::Fake`]), which proves the simulator's plumbing
-/// without core. `Any` lets the stand-in tell a core Session (which owns receive ids in the
-/// device's [`RidTable`]) from the fake, as Go's type assertion did, and lets tests downcast to the
-/// fake (`(ep as &dyn Any).downcast_ref::<Fake>()`).
+/// The part of core's API that netsim drives. `wirebond_core::Session` satisfies it; so does the
+/// test fake ([`crate::fake::Fake`]), which proves the simulator's plumbing without core. `Any`
+/// lets the stand-in tell a core Session (which owns receive ids in the device's [`RidTable`])
+/// from the fake, and lets tests downcast to the fake (`(ep as &dyn Any).downcast_ref::<Fake>()`).
 pub trait Endpoint: Any {
     /// Applies one event at monotonic time `now`, calling `out` for each resulting action.
     fn handle(&mut self, now: Mono, ev: Event<'_>, rids: &mut RidTable, out: &mut dyn Out);
@@ -352,37 +351,36 @@ impl Endpoint for Session {
     }
 }
 
-/// Makes an endpoint the way `Session::new` does (Go's Maker): the role, the owner key the device
-/// files the session under in its [`RidTable`], and the session's source of key bytes.
+/// Makes an endpoint the way `Session::new` does: the role, the owner key the device files the
+/// session under in its [`RidTable`], and the session's source of key bytes.
 pub type Maker = Box<dyn Fn(Role, u64, Rand) -> Box<dyn Endpoint>>;
 
-/// Makes real core Sessions (Go's Core).
+/// Makes real core Sessions.
 pub fn core_maker() -> Maker {
     Box::new(|role, owner, rand| Box::new(Session::new(role, owner, rand)) as Box<dyn Endpoint>)
 }
 
-/// A key source for one Session from a seeded generator (Go's keyReader).
+/// A key source for one Session from a seeded generator.
 pub fn key_reader(mut r: Rng) -> Rand {
     Box::new(move |b: &mut [u8]| r.fill(b))
 }
 
-/// One action an endpoint emitted during one `handle` call (Go's core.Action). The device records
-/// them while `handle` runs and carries them out after it returns, so `handle` is never
-/// re-entered; the checker reads the whole list first.
+/// One action an endpoint emitted during one `handle` call. The device records them while
+/// `handle` runs and carries them out after it returns, so `handle` is never re-entered; the
+/// checker reads the whole list first.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    /// Send `data` from socket `sock` to `to` (Go ActSend).
+    /// Send `data` from socket `sock` to `to`.
     Send { sock: SockId, to: SocketAddr, data: Vec<u8> },
     /// Deliver the inner packet whose datagram is `data`, on flow `flow`, from `src` to `dst`
-    /// (Go ActDeliver; [`outer`] read it: flow 0, no addresses and the whole packet if it could
-    /// not).
+    /// ([`outer`] read it: flow 0, no addresses and the whole packet if it could not).
     Deliver { flow: FlowId, src: Option<IpAddr>, dst: Option<IpAddr>, data: Vec<u8> },
-    /// Send the message over the control channel (Go ActControl).
+    /// Send the message over the control channel.
     Control(Msg),
 }
 
-/// The [`Out`] a device passes to `Endpoint::handle`: it records the actions in order (Go's
-/// `out []core.Action`). Owned by the device and reused across calls.
+/// The [`Out`] a device passes to `Endpoint::handle`: it records the actions in order. Owned by
+/// the device and reused across calls.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Actions(pub Vec<Action>);
 
@@ -405,17 +403,16 @@ impl Out for Actions {
 // ---------------------------------------------------------------------------------------------
 // Randomness (no rand crate): xoshiro256** seeded through splitmix64
 
-/// A seeded random source (Go's *rand.Rand over PCG): xoshiro256**. Every model draws from its own
-/// `Rng`, split off the world's with [`World::sub`], so adding a model never shifts another's
-/// draws. Values differ from Go's PCG: Go and Rust event-log hashes are not comparable.
+/// A seeded random source: xoshiro256**. Every model draws from its own `Rng`, split off the
+/// world's with [`World::sub`], so adding a model never shifts another's draws.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rng {
     s: [u64; 4],
 }
 
 impl Rng {
-    /// A generator from two seed words (Go's rand.NewPCG(a, b)): every output depends on both. It
-    /// is [`Rng::seeded`]'s state with the first output spent, since that one depends on b alone
+    /// A generator from two seed words: every output depends on both. It is [`Rng::seeded`]'s
+    /// state with the first output spent, since that one depends on b alone
     /// (`Rng::new(seed, 0x5a5a)` would otherwise start alike for every seed).
     pub fn new(a: u64, b: u64) -> Rng {
         let mut r = Rng::seeded(a, b);
@@ -439,7 +436,7 @@ impl Rng {
         Rng { s }
     }
 
-    /// The next 64 random bits (Go Uint64).
+    /// The next 64 random bits.
     pub fn u64(&mut self) -> u64 {
         let s = &mut self.s;
         let r = s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
@@ -453,12 +450,12 @@ impl Rng {
         r
     }
 
-    /// The next 32 random bits (Go Uint32).
+    /// The next 32 random bits.
     pub fn u32(&mut self) -> u32 {
         (self.u64() >> 32) as u32
     }
 
-    /// Uniform in [0, n), n > 0 (Go IntN, Int64N, Uint64N), without modulo bias (Lemire).
+    /// Uniform in [0, n), n > 0, without modulo bias (Lemire).
     pub fn below(&mut self, n: u64) -> u64 {
         assert!(n > 0, "Rng::below(0)");
         let mut m = self.u64() as u128 * n as u128;
@@ -471,22 +468,22 @@ impl Rng {
         (m >> 64) as u64
     }
 
-    /// Uniform in [0, n) as a duration, n > 0 (Go time.Duration(r.Int64N(int64(n)))).
+    /// Uniform in [0, n) as a duration, n > 0.
     pub fn dur(&mut self, n: Dur) -> Dur {
         self.below(n as u64) as Dur
     }
 
-    /// Uniform in [0, 1) (Go Float64).
+    /// Uniform in [0, 1).
     pub fn f64(&mut self) -> f64 {
         (self.u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
-    /// Exponential with rate 1 (Go ExpFloat64).
+    /// Exponential with rate 1.
     pub fn exp(&mut self) -> f64 {
         -(1.0 - self.f64()).ln()
     }
 
-    /// Fills b with random bytes (Go's keyReader.Read).
+    /// Fills b with random bytes.
     pub fn fill(&mut self, b: &mut [u8]) {
         for c in b.chunks_mut(8) {
             let x = self.u64().to_le_bytes();
@@ -494,8 +491,8 @@ impl Rng {
         }
     }
 
-    /// A generator of its own, seeded from two draws of this one, as Go's
-    /// `rand.New(rand.NewPCG(r.Uint64(), r.Uint64()))`: [`World::sub`], and each bump train's own.
+    /// A generator of its own, seeded from two draws of this one: [`World::sub`], and each bump
+    /// train's own.
     pub(crate) fn split(&mut self) -> Rng {
         let a = self.u64();
         let b = self.u64();
@@ -504,7 +501,7 @@ impl Rng {
 }
 
 /// splitmix64's output for state x: a stateless hash for draws that must be a function of time,
-/// such as small jitter (Go's splitmix).
+/// such as small jitter.
 pub fn splitmix(x: u64) -> u64 {
     let mut x = x.wrapping_add(GOLDEN);
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -540,10 +537,10 @@ static CRC_TABLES: [[u32; 256]; 8] = {
     t
 };
 
-/// CRC-32C (Castagnoli) of b (Go's crc): the registry's datagram check, the checker's seal ring
-/// and the log's digest. It runs over every datagram several times, and Go's used the CPU's CRC
-/// instruction; slicing by 8 is about 4 times faster than a byte at a time (the instruction
-/// needs unsafe code, which this crate forbids).
+/// CRC-32C (Castagnoli) of b: the registry's datagram check, the checker's seal ring and the
+/// log's digest. It runs over every datagram several times; slicing by 8 is about 4 times faster
+/// than a byte at a time (the CPU's CRC instruction would be faster still, but it needs unsafe
+/// code, which this crate forbids).
 pub fn crc(b: &[u8]) -> u32 {
     let t = &CRC_TABLES;
     let mut c = !0u32;
@@ -568,9 +565,9 @@ pub fn crc(b: &[u8]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Hooks (Go's World.Hook and the tests' hook(w, f))
+// Hooks
 
-/// What a hook sees (Go's kind byte).
+/// What a hook sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HookKind {
     /// 'S': a lane packet a Session sent, with its link (None for the Tailscale lane).
@@ -591,8 +588,7 @@ pub struct HookArgs<'a> {
     pub dev: DevId,
     pub link: Option<LinkId>,
     pub data: &'a [u8],
-    /// For `Sent`: the event whose actions the device is carrying out (Go's Device.Event). None
-    /// for the other kinds.
+    /// For `Sent`: the event whose actions the device is carrying out. None for the other kinds.
     pub event: Option<Event<'a>>,
 }
 
@@ -611,24 +607,24 @@ pub(crate) struct Entry {
     pub(crate) task: Task,
 }
 
-/// What an event does. `Call` is Go's func(); the others are the hot paths (two per packet on a
+/// What an event does. `Call` runs a closure; the others are the hot paths (two per packet on a
 /// shaped direction, one per periodic tick, one per Session Tick), kept free of a closure
 /// allocation. Every variant is small: a heap entry is 48 bytes.
 pub(crate) enum Task {
     Call(Box<dyn FnOnce(&mut World)>),
-    /// The first packet in flight on a direction arrives: run its continuation (Go's closure in
-    /// Dir.depart). A direction never reorders, so its packets in flight are in (time, sequence)
-    /// order in its own queue ([`crate::link::Dir`]'s `flight`) and only the first is in the heap,
-    /// under the time and sequence number it drew when it departed: the events run in exactly
-    /// the order they would with one heap entry per packet.
+    /// The first packet in flight on a direction arrives: run its continuation. A direction never
+    /// reorders, so its packets in flight are in (time, sequence) order in its own queue
+    /// ([`crate::link::Dir`]'s `flight`) and only the first is in the heap, under the time and
+    /// sequence number it drew when it departed: the events run in exactly the order they would
+    /// with one heap entry per packet.
     Arrive(DirId),
-    /// The head of a direction's queue leaves its bottleneck (Go's closure in Dir.serve).
+    /// The head of a direction's queue leaves its bottleneck.
     Serve(DirId),
     /// One tick of [`World::every`]: runs f, and while it returns true queues itself again a
-    /// period later, moving the same box (Go's tick closure, which allocated per tick).
+    /// period later, moving the same box, so a tick allocates nothing.
     Every(Dur, Box<dyn FnMut(&mut World) -> bool>),
-    /// A device's Session Tick that `World::sched_tick` queued with this generation (Go's closure
-    /// in schedTick): `World::tick_due` runs it unless a newer schedule replaced it.
+    /// A device's Session Tick that `World::sched_tick` queued with this generation:
+    /// `World::tick_due` runs it unless a newer schedule replaced it.
     Tick(DevId, u64),
 }
 
@@ -653,20 +649,20 @@ impl Ord for Entry {
 // ---------------------------------------------------------------------------------------------
 // The world
 
-/// The event log hashes its 32-byte records in chunks of this many bytes (Go's 1 << 14).
+/// The event log hashes its 32-byte records in chunks of this many bytes.
 const LOG_CHUNK: usize = 1 << 14;
 
-/// One simulation (Go's World): one seeded random source, one clock, and an event queue ordered by
-/// (time, sequence number), so a seed always replays the same run. It owns every device, link,
-/// model and check; ids index into it (`world[DevId::Client]`, `world[link_id]`, `world[dir_id]`).
+/// One simulation: one seeded random source, one clock, and an event queue ordered by (time,
+/// sequence number), so a seed always replays the same run. It owns every device, link, model and
+/// check; ids index into it (`world[DevId::Client]`, `world[link_id]`, `world[dir_id]`).
 pub struct World {
-    /// The Mac, then xanth (Go's Client and Server): index with [`DevId`].
+    /// The Mac, then xanth: index with [`DevId`].
     pub devs: [Device; 2],
-    /// Safety invariants after every event (Go Check).
+    /// Safety invariants after every event.
     pub check: bool,
-    /// Wall-clock limit for one `run`, so a runaway core cannot hang a test (Go Wall).
+    /// Wall-clock limit for one `run`, so a runaway core cannot hang a test.
     pub wall: std::time::Duration,
-    /// Tailscale-lane packets are dropped (Go MeshDown).
+    /// Tailscale-lane packets are dropped.
     pub mesh_down: bool,
     /// The baseline of SPEC §1 (P1) and §23.3 (A11): the client's node offers no link, so the
     /// bond has the mesh lane alone, riding the client's default link.
@@ -674,7 +670,7 @@ pub struct World {
     pub mesh_only: bool,
     /// Links pulled out ([`World::pull`]).
     pub pulled: Vec<LinkId>,
-    /// The on-path adversary, if a scenario made one (Go Adv).
+    /// The on-path adversary, if a scenario made one.
     pub adv: Option<Adversary>,
     /// The traffic models' state: index with [`crate::MoonId`], [`crate::BulkId`].
     pub apps: Apps,
@@ -697,7 +693,7 @@ pub struct World {
     pub(crate) reasm: Vec<Reasm>,
     /// The IP id of the next datagram [`fragment`] splits.
     pub(crate) ip_id: u16,
-    /// Hooks in the order added (Go's chained Hook).
+    /// Hooks in the order added.
     pub(crate) hooks: Vec<Hook>,
     pub(crate) now: Dur,
     pub(crate) seq: u64,
@@ -707,7 +703,7 @@ pub struct World {
     pub(crate) ctl: CtlChan,
     pub(crate) reg: Registry,
     pub(crate) chk: Checker,
-    /// Every link of both devices; [`LinkId`] indexes it (Go's w.links).
+    /// Every link of both devices; [`LinkId`] indexes it.
     pub(crate) links: Vec<Link>,
     /// Session pairings (self inst, peer inst); pair 0 is "no session".
     pub(crate) pairs: Vec<[u64; 2]>,
@@ -717,15 +713,15 @@ pub struct World {
     pub(crate) busy: bool,
     pub(crate) log: Sha256,
     pub(crate) buf: Vec<u8>,
-    /// The first failure (Go's fail string; None for "").
+    /// The first failure.
     pub(crate) fail: Option<String>,
     /// Events run so far.
     pub(crate) n: u64,
 }
 
 impl World {
-    /// An empty world for seed whose sessions come from mk (Go New): the Mac and xanth with their
-    /// mesh addresses, xanth sharing Moonlight's ports, no links yet.
+    /// An empty world for seed whose sessions come from mk: the Mac and xanth with their mesh
+    /// addresses, xanth sharing Moonlight's ports, no links yet.
     pub fn new(seed: u64, mk: Maker) -> World {
         let mut rng = Rng::seeded(seed, seed ^ GOLDEN);
         let client = Device::new("mac", Role::Client, "100.101.1.2:7849".parse().unwrap(), &mut rng);
@@ -767,23 +763,23 @@ impl World {
         }
     }
 
-    /// The simulated time since the start (Go Now).
+    /// The simulated time since the start.
     pub fn now(&self) -> Dur {
         self.now
     }
 
-    /// Events run so far (Go's w.n, which a self-test logs).
+    /// Events run so far, which a self-test logs.
     pub fn events(&self) -> u64 {
         self.n
     }
 
     /// A random source of its own, drawn from the world's, so adding a model never shifts the
-    /// draws of another (Go sub).
+    /// draws of another.
     pub fn sub(&mut self) -> Rng {
         self.rng.split()
     }
 
-    /// Runs f at simulated time t (now, if t is past) (Go At).
+    /// Runs f at simulated time t (now, if t is past).
     pub fn at(&mut self, t: Dur, f: impl FnOnce(&mut World) + 'static) {
         self.push(t, Task::Call(Box::new(f)));
     }
@@ -794,15 +790,15 @@ impl World {
         self.q.push(Entry { at: t.max(self.now), seq: self.seq, task });
     }
 
-    /// Runs f every period from start while it returns true (Go Every).
+    /// Runs f every period from start while it returns true.
     pub fn every(&mut self, start: Dur, period: Dur, f: impl FnMut(&mut World) -> bool + 'static) {
         self.push(start, Task::Every(period, Box::new(f)));
     }
 
-    /// Advances the world to until, or to the first failure, which it returns (Go Run). It fails
-    /// on more than 600,000 events per simulated second (a runaway Session) and when the run takes
-    /// more than `wall` of wall-clock time (checked every 4,096 events). On success the clock
-    /// stands at until (Go set it there even when until was past; the clock never goes back).
+    /// Advances the world to until, or to the first failure, which it returns. It fails on more
+    /// than 600,000 events per simulated second (a runaway Session) and when the run takes more
+    /// than `wall` of wall-clock time (checked every 4,096 events). On success the clock stands at
+    /// until, or where it was if until was past: the clock never goes back.
     pub fn run(&mut self, until: Dur) -> Result<(), String> {
         let span = until.saturating_sub(self.now) / SEC;
         let budget = (self.n as i64).saturating_add(span.saturating_mul(600_000)).saturating_add(1_000_000);
@@ -849,21 +845,21 @@ impl World {
     }
 
     /// Records the first failure, prefixed with the time; `run` stops after the current event
-    /// (Go Fail(format, args...): callers pass `format_args!(...)` or a String).
+    /// (callers pass `format_args!(...)` or a String).
     pub fn fail(&mut self, msg: impl Display) {
         if self.fail.is_none() {
             self.fail = Some(format!("at {}: {msg}", fmt_dur(self.now)));
         }
     }
 
-    /// The first failure, if any (Go Failed, which returned "" for none).
+    /// The first failure, if any.
     pub fn failed(&self) -> Option<&str> {
         self.fail.as_deref()
     }
 
     /// Adds one fixed-size record to the event-log hash: time, kind, device, a, b, the data's
-    /// length and the CRC of its first 64 bytes (Go logf). Kinds: an event's code
-    /// ([`event_code`]), b'S', b'D', b'C'.
+    /// length and the CRC of its first 64 bytes. Kinds: an event's code ([`event_code`]), b'S',
+    /// b'D', b'C'.
     pub(crate) fn logf(&mut self, kind: u8, dev: u8, a: u64, b: u32, data: &[u8]) {
         let mut r = [0u8; 32];
         r[0..8].copy_from_slice(&(self.now as u64).to_be_bytes());
@@ -883,15 +879,15 @@ impl World {
         }
     }
 
-    /// The event-log hash so far, 24 hex digits: two runs of one seed must give the same (Go Hash).
-    /// Reading it does not end the log: later records extend it, as Go's Sum(nil) did.
+    /// The event-log hash so far, 24 hex digits: two runs of one seed must give the same. Reading
+    /// it does not end the log: later records extend it.
     pub fn hash(&mut self) -> String {
         self.log.update(&self.buf);
         self.buf.clear();
         hex(&self.log.clone().finalize()[..12])
     }
 
-    /// The index of the session pairing (self inst, peer inst), added if new (Go pair).
+    /// The index of the session pairing (self inst, peer inst), added if new.
     pub fn pair(&mut self, self_inst: u64, peer: u64) -> u16 {
         let p = [self_inst, peer];
         if let Some(i) = self.pairs.iter().position(|&x| x == p) {
@@ -901,8 +897,7 @@ impl World {
         (self.pairs.len() - 1) as u16
     }
 
-    /// Adds f to the world's hooks; each hook sees every call after the ones added before it (the
-    /// tests' hook(w, f), which chained Go's single Hook).
+    /// Adds f to the world's hooks; each hook sees every call after the ones added before it.
     pub fn hook(&mut self, f: impl FnMut(&mut World, &HookArgs<'_>) + 'static) {
         self.hooks.push(Box::new(f));
     }
@@ -922,7 +917,7 @@ impl World {
     }
 }
 
-/// The code an event has in the event log (Go logged byte(ev.Kind): App 1 … Tick 7).
+/// The code an event has in the event log.
 pub(crate) fn event_code(ev: &Event<'_>) -> u8 {
     match ev {
         Event::Send { .. } => 1,
@@ -931,7 +926,7 @@ pub(crate) fn event_code(ev: &Event<'_>) -> u8 {
         Event::Wake => 4,
         Event::Control(_) => 5,
         Event::Tick => 7,
-        Event::Channel(_) => 8, // 6 was Go's FlowEnd
+        Event::Channel(_) => 8, // 6 is no longer used
     }
 }
 
@@ -1066,8 +1061,8 @@ mod tests {
         assert!(n.iter().all(|&c| (9_000..11_000).contains(&c)), "{n:?}");
     }
 
-    /// Go TestEngineOrder: 2,000 events at random times run in (time, sequence) order, and the
-    /// clock ends at the run's end.
+    /// 2,000 events at random times run in (time, sequence) order, and the clock ends at the
+    /// run's end.
     #[test]
     fn engine_order() {
         let mut w = world(7);

@@ -1,12 +1,11 @@
-//! A performance stream's first frames after idle (Rust only): Moonlight's video starts 8 s into
-//! the bond, on the spec's links, every lane long up and the session idle. Its first frames must
-//! be no later than its later ones: a lane is unlimited until its first overuse (§12, §14.1), so
-//! nothing should hold a stream that starts. The pacer was once capped at twice the rate offered
-//! over the last RATE_WINDOW: an empty window paced a cold start at PACE_FLOOR, the pace reached
-//! the stream's rate only after 50 ms, and the first dozen frames waited up to 25 ms in the
-//! pacers, on every lane alike, so no copy was early (the system harness saw frames 1 to 15 of
-//! every stream late, and now and then one purged). The pace is the lane's rate now; this test
-//! keeps it so.
+//! A performance stream's first frames after idle: Moonlight's video starts 8 s into the bond, on
+//! the spec's links, every lane long up and the session idle. Its first frames must be no later
+//! than its later ones: a lane is unlimited until its first overuse (§12), so nothing should hold a
+//! stream that starts. The pacer was once capped at twice the rate offered over the last
+//! RATE_WINDOW: an empty window paced a cold start at PACE_FLOOR, the pace reached the stream's
+//! rate only after 50 ms, and the first dozen frames waited up to 25 ms in the pacers, on every
+//! lane alike, so no copy was early (the system harness saw frames 1 to 15 of every stream late,
+//! and now and then one purged). The pace is the lane's rate now; this test keeps it so.
 
 use wirebond_core::MODE_PERFORMANCE;
 use wirebond_netsim::env::{Env, each_run, maker, ms, repro, seeds, spec};

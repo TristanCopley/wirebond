@@ -1,10 +1,9 @@
-//! A path that opens after its punch round (Rust only): the phone is blackholed, both ways, from
-//! the start until OPEN, past the punch rounds of the hello and of the stream's first datagram,
-//! while video flows on the hotel. The pairs over the phone never validated, so no lane of theirs
-//! has a return address and only a punch round probes them (§11.1). Rounds once began only on a
-//! link or candidate change, a wake, a new control channel or the first datagram after idle, so
-//! with data flowing the phone's lanes stayed punching for good. Runs the PR seeds, or
-//! WIREBOND_SEED's, in both modes.
+//! A path that opens after its punch round: the phone is blackholed, both ways, from the start
+//! until OPEN, past the punch rounds of the hello and of the stream's first datagram, while video
+//! flows on the hotel. The pairs over the phone never validated, so no lane of theirs has a return
+//! address and only a punch round probes them (§9.4). Rounds once began only on a link or candidate
+//! change, a wake, a new control channel or the first datagram after idle, so with data flowing the
+//! phone's lanes stayed punching for good. Runs the PR seeds, or WIREBOND_SEED's, in both modes.
 
 use wirebond_core::PUNCH_GAP;
 use wirebond_netsim::env::{

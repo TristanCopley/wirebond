@@ -1,8 +1,7 @@
-//! The safety invariants of §17.2 that need more than one datagram (Go netsim/check.go; the
-//! registry in apps.rs checks deliveries), checked after every handle call, and the on-path
-//! adversary (A6, A14, the swarm, the fuzzer). What core keeps sealed (probe sequence numbers,
-//! echoes) is approximated from what netsim can see; each check says how (notes/netsim.md 5–8).
-//! Owner: N4 (with tests/sim/swarm.rs and tests/sim/fuzz.rs).
+//! The safety invariants that need more than one datagram (the registry in apps.rs checks
+//! deliveries), checked after every handle call, and the on-path adversary that the swarm, the
+//! fuzzer and the self-tests use. What core keeps sealed (probe sequence numbers, echoes) is
+//! approximated from what netsim can see; each check says how.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -20,12 +19,12 @@ use crate::sim::{Action, Dur, MS, Rng, World, crc};
 /// packets a second, far more than any rewind or trial resends.
 pub const SEAL_WINDOW: usize = 1 << 17;
 
-/// The invariants' memory (Go checker). Go's maps keyed by *Device are keyed by [`DevId`]; maps
-/// that are never iterated could be HashMaps if profiling asks (none is iterated today).
+/// The invariants' memory. Maps that name a device are keyed by [`DevId`]; maps that are never
+/// iterated could be HashMaps if profiling asks (none is iterated today).
 #[derive(Default)]
 pub struct Checker {
     pub(crate) seals: BTreeMap<SealKey, Box<SealRing>>,
-    /// Each key's pair of processes (Go map[string(key)]).
+    /// Each key's pair of processes.
     pub(crate) keys: BTreeMap<Vec<u8>, [u64; 2]>,
     /// Bytes sent to an address while it was not a validated lane.
     pub(crate) sent: BTreeMap<PathKey, usize>,
@@ -39,7 +38,7 @@ pub struct Checker {
 }
 
 /// A sending key: its process, its peer process, the device's Session count (a Session draws its
-/// own random key, notes/netsim.md 21) and the rid it is sent under (Go sealKey).
+/// own random key) and the rid it is sent under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SealKey {
     pub(crate) d: DevId,
@@ -49,7 +48,7 @@ pub(crate) struct SealKey {
     pub(crate) rid: u16,
 }
 
-/// The last SEAL_WINDOW counters of one key and their CRCs (Go sealRing): counter + 1, 0 empty.
+/// The last SEAL_WINDOW counters of one key and their CRCs: counter + 1, 0 empty.
 pub(crate) struct SealRing {
     pub(crate) ctr: Vec<u64>,
     pub(crate) crc: Vec<u32>,
@@ -61,7 +60,7 @@ impl SealRing {
     }
 }
 
-/// A device's socket and a remote address (Go pathKey).
+/// A device's socket and a remote address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PathKey {
     pub(crate) d: DevId,
@@ -69,12 +68,11 @@ pub(crate) struct PathKey {
     pub(crate) addr: SocketAddr,
 }
 
-/// One probe: the device that received it, its rid and counter, and the CRC of its bytes (Go
-/// probeKey, without the CRC). A sealed packet is its bytes: a replay, a duplicate or a relay of a
-/// probe repeats them, while a later Session's probe that happens to reuse the rid and counter
-/// (a restart's fresh rid table, a fresh key's counters) is another packet. Go's key, without
-/// the CRC, took such a probe for a copy of the old one and reported its genuine move (the swarm's
-/// seed 4 in notes/open.md; notes/rust.md, netsim N4).
+/// One probe: the device that received it, its rid and counter, and the CRC of its bytes. A sealed
+/// packet is its bytes: a replay, a duplicate or a relay of a probe repeats them, while a later
+/// Session's probe that happens to reuse the rid and counter (a restart's fresh rid table, a fresh
+/// key's counters) is another packet. A key without the CRC would take such a probe for a copy of
+/// the old one and report its genuine move (as on the swarm's seed 4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ProbeKey {
     pub(crate) d: DevId,
@@ -91,12 +89,12 @@ pub fn header(b: &[u8]) -> (u16, u64) {
     (rid, u64::from_be_bytes(ctr))
 }
 
-/// The lane of s on socket sock whose peer is peer (Go laneOf).
+/// The lane of s on socket sock whose peer is peer.
 pub(crate) fn lane_of(s: &SessionStatus, sock: SockId, peer: SocketAddr) -> Option<&LaneStatus> {
     s.lanes.iter().find(|l| l.sock == sock && l.peer == Some(peer))
 }
 
-/// A lane's address in a failure message ("none" for Go's invalid AddrPort).
+/// A lane's address in a failure message ("none" for no address).
 struct Show(Option<SocketAddr>);
 
 impl fmt::Display for Show {
@@ -109,12 +107,12 @@ impl fmt::Display for Show {
 }
 
 impl Checker {
-    /// Counts n bytes that reached d's socket sock from `from` (Go recvd).
+    /// Counts n bytes that reached d's socket sock from `from`.
     pub(crate) fn recvd(&mut self, d: DevId, sock: SockId, from: SocketAddr, n: usize) {
         *self.recv.entry(PathKey { d, sock, addr: from }).or_default() += n;
     }
 
-    /// Records the candidates d's peer offered (Go offered).
+    /// Records the candidates d's peer offered.
     pub(crate) fn offered(&mut self, d: DevId, ls: &[LinkInfo]) {
         for l in ls {
             self.cands[d.idx()].extend(l.cands.iter().copied());
@@ -123,16 +121,15 @@ impl Checker {
 }
 
 impl World {
-    /// Whether d may probe a without limit: the peer's mesh address or an offered candidate (Go
-    /// known).
+    /// Whether d may probe a without limit: the peer's mesh address or an offered candidate.
     pub(crate) fn known(&self, d: DevId, a: SocketAddr) -> bool {
         a == self[d.peer()].mesh || self.chk.cands[d.idx()].contains(&a)
     }
 
-    /// Checks one handle call of d whose actions are acts (Go after): the cap on held bytes,
-    /// no answer to an adversary's packet, data only to validated addresses that ground truth has
-    /// reached, probes within VALIDATE_AMP to unvalidated unknown addresses, no reply larger than
-    /// its trigger, keys, seals, and lane moves. Updates d's before-snapshot.
+    /// Checks one handle call of d whose actions are acts: the cap on held bytes, no answer to an
+    /// adversary's packet, data only to validated addresses that ground truth has reached, probes
+    /// within VALIDATE_AMP to unvalidated unknown addresses, no reply larger than its trigger,
+    /// keys, seals, and lane moves. Updates d's before-snapshot.
     pub(crate) fn check_after(&mut self, d: DevId, ev: &Event<'_>, p: Option<&Pkt>, acts: &[Action]) {
         let after = self[d].sess.as_ref().map(|s| s.paths()).unwrap_or_default();
         let before = std::mem::take(&mut self[d].last_snap);
@@ -236,7 +233,7 @@ impl World {
                 _ => self.fail(format_args!("{name}: sent a packet of unknown type {:#04x}", b[0])),
             }
         }
-        // A reply is a probe sent back to a probe's source in the same call: while idle (§8.1's
+        // A reply is a probe sent back to a probe's source in the same call: while idle (the
         // answer to the idle probe), or toward a source that is neither a validated lane nor an
         // offered candidate (an address an attacker could name). Punching toward candidates and
         // the regular probes of an active lane are not replies.
@@ -255,10 +252,10 @@ impl World {
         self.check_moves(d, ev, before, after, newer);
     }
 
-    /// Rule 2 of §7.6 from Snapshot: a lane's peer address changes only on the first arrival of
+    /// Rule 2 of §10.5 from Snapshot: a lane's peer address changes only on the first arrival of
     /// an authentic probe from the new address on the lane's own socket; a move outside a packet
     /// must leave the lane unvalidated and point at an offered candidate; the Tailscale lane never
-    /// moves (Go moves; newer: this call's probe arrived for the first time).
+    /// moves (newer: this call's probe arrived for the first time).
     pub(crate) fn check_moves(
         &mut self,
         d: DevId,
@@ -308,10 +305,9 @@ impl World {
     }
 
     /// No (key, counter) sealed twice with different bytes, nor again after SEAL_WINDOW newer
-    /// counters (Go sealed). A key is named by its sending process, its peer process, the Session
-    /// and the rid it is sent under: when one side's Session ends by SessionLinger while the peer
-    /// process lives on, the pair's next Session holds a new random key, whose counters start
-    /// again.
+    /// counters. A key is named by its sending process, its peer process, the Session and the rid
+    /// it is sent under: when one side's Session ends by SessionLinger while the peer process lives
+    /// on, the pair's next Session holds a new random key, whose counters start again.
     pub(crate) fn check_sealed(&mut self, d: DevId, b: &[u8]) {
         let (rid, ctr) = header(b);
         let dev = &self[d];
@@ -332,7 +328,7 @@ impl World {
         }
     }
 
-    /// A key belongs to one pair of processes (§7.2) (Go key).
+    /// A key belongs to one pair of processes (§10.2, §10.5 rule 7).
     pub(crate) fn check_key(&mut self, d: DevId, m: &Msg) {
         let (name, pair) = (self[d].name, [self[d].inst, self[d].peer_inst]);
         match self.chk.keys.get_mut(m.k.as_slice()) {
@@ -350,7 +346,7 @@ impl World {
     }
 
     /// The bytes d sent from sock to addr while it was not a validated lane, and the bytes that
-    /// reached sock from addr (A6 reads Go's chk.sent and chk.recv for the relay's address).
+    /// reached sock from addr.
     pub fn path_bytes(&self, d: DevId, sock: SockId, addr: SocketAddr) -> (usize, usize) {
         let k = PathKey { d, sock, addr };
         let get = |m: &BTreeMap<PathKey, usize>| m.get(&k).copied().unwrap_or(0);
@@ -361,8 +357,7 @@ impl World {
 // ---------------------------------------------------------------------------------------------
 // The adversary
 
-/// What the adversary did to a packet (Go adv* constants). Ordered: the kinds from Corrupt on
-/// are not authentic.
+/// What the adversary did to a packet. Ordered: the kinds from Corrupt on are not authentic.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Adv {
     #[default]
@@ -381,12 +376,11 @@ pub enum Adv {
     WrongRid,
 }
 
-/// The number of kinds, Genuine included (Go advKinds): `p` and `injected` are indexed by
-/// `Adv as usize`.
+/// The number of kinds, Genuine included: `p` and `injected` are indexed by `Adv as usize`.
 pub const ADV_KINDS: usize = 7;
 
 impl Adv {
-    /// The attacks, Relay to WrongRid (Go's loops from advRelay to advKinds).
+    /// The attacks, Relay to WrongRid.
     pub const ATTACKS: [Adv; 6] = [Adv::Relay, Adv::Replay, Adv::Dup, Adv::Corrupt, Adv::Forge, Adv::WrongRid];
 
     pub fn idx(self) -> usize {
@@ -396,8 +390,7 @@ impl Adv {
 
 /// An on-path network in front of `target`: it records the packets reaching it and injects
 /// replays, corruptions, forgeries, wrong-rid copies, duplicates and probes relayed from `third`,
-/// each with probability p[kind] per arriving packet (A6) (Go Adversary). Owned by the world
-/// (`world.adv`).
+/// each with probability p[kind] per arriving packet. Owned by the world (`world.adv`).
 pub struct Adversary {
     pub target: DevId,
     pub third: SocketAddr,
@@ -409,7 +402,7 @@ pub struct Adversary {
     pub(crate) rec: Vec<Recorded>,
 }
 
-/// A packet the adversary recorded (Go recorded).
+/// A packet the adversary recorded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Recorded {
     pub(crate) sock: SockId,
@@ -444,9 +437,9 @@ impl Adversary {
         i
     }
 
-    /// Makes the packet of kind k from r at now and counts it (the body of Go inject); None when
-    /// k does not apply: a relay of a non-probe, Genuine, a replay with nothing recorded, or a
-    /// packet too short to be a lane packet.
+    /// Makes the packet of kind k from r at now and counts it; None when k does not apply: a
+    /// relay of a non-probe, Genuine, a replay with nothing recorded, or a packet too short to be
+    /// a lane packet.
     fn adv_make(&mut self, k: Adv, r: Recorded, now: Dur) -> Option<AdvSend> {
         let Recorded { mut sock, mut src, data: mut b } = r;
         if b.len() < HEADER_LEN + TAG_LEN {
@@ -496,8 +489,8 @@ impl Adversary {
 }
 
 impl World {
-    /// Puts an adversary in front of target, from 203.0.113.66:4444, on, all probabilities 0
-    /// (Go NewAdversary); returns it to set up.
+    /// Puts an adversary in front of target, from 203.0.113.66:4444, on, all probabilities 0;
+    /// returns it to set up.
     pub fn new_adversary(&mut self, target: DevId) -> &mut Adversary {
         let r = self.sub();
         self.adv.insert(Adversary {
@@ -512,7 +505,7 @@ impl World {
     }
 
     /// Records a genuine packet reaching d and injects what p draws; returns how long the
-    /// original is held back: a relayed probe gets 5 ms ahead of it (Go see).
+    /// original is held back: a relayed probe gets 5 ms ahead of it.
     pub(crate) fn adv_see(&mut self, d: DevId, sock: SockId, src: SocketAddr, p: &Pkt) -> Dur {
         let Some(a) = self.adv.as_mut() else {
             return 0;
@@ -538,7 +531,7 @@ impl World {
     }
 
     /// Injects one packet of kind k made from r, within 2 ms (a relay at once); false when k does
-    /// not apply (a relay of a non-probe) (Go inject).
+    /// not apply (a relay of a non-probe).
     pub(crate) fn adv_inject(&mut self, k: Adv, r: Recorded) -> bool {
         let now = self.now;
         let Some(a) = self.adv.as_mut() else {
@@ -552,8 +545,7 @@ impl World {
         true
     }
 
-    /// Sends every recorded packet again now, as an attacker does after a restart (A14) (Go
-    /// ReplayAll).
+    /// Sends every recorded packet again now, as an attacker does after a restart.
     pub fn replay_all(&mut self) {
         let now = self.now;
         let Some(a) = self.adv.as_mut() else {
@@ -928,7 +920,7 @@ mod tests {
         assert!(f.contains(want), "{f}");
 
         // A later Session's probe that reuses the rid and counter is another packet (the swarm's
-        // seed 4 in notes/open.md: a restart's fresh rid table and key).
+        // seed 4: a restart's fresh rid table and key).
         let mut w = world();
         assert_eq!(moved_by(&mut w, &probe, Adv::Genuine, 1, true), "");
         let next = pkt(TYPE_PROBE, 3, 50, 80, 10);

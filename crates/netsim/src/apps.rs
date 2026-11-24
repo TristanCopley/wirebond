@@ -1,12 +1,11 @@
-//! Traffic (Go netsim/apps.go): the datagram registry that tags every app datagram so the
-//! invariants can tell each one apart and the metrics can time it; the Moonlight model (Sunshine's
-//! frames with 20% Reed–Solomon parity as 0.8 Gbit/s bursts, Moonlight's purge and freeze, audio,
-//! input on reliable ENet, the pings that open each flow); a saturating UDP sender; a TCP-like
-//! paced sender (§17.2).
+//! Traffic: the datagram registry that tags every app datagram so the invariants can tell each
+//! one apart and the metrics can time it; the Moonlight model (Sunshine's frames with 20%
+//! Reed–Solomon parity as 0.8 Gbit/s bursts, Moonlight's purge and freeze, audio, input on
+//! reliable ENet, the pings that open each flow); a saturating UDP sender; a TCP-like paced sender.
 //!
 //! The models live in the world ([`Apps`]) and are named by ids: `world[moon_id]`. Operations that
 //! send or schedule are `World` methods taking the id; read-only metrics are methods on the model
-//! (here and in metrics.rs). Owner: N3 (with metrics.rs and fake.rs).
+//! (here and in metrics.rs).
 
 use std::ops::{Index, IndexMut};
 
@@ -34,7 +33,7 @@ pub struct Hdr {
     pub aux: u32,
 }
 
-/// A stream: index into the registry (Go *Stream; the id in the tag, so at most 256).
+/// A stream: index into the registry (the id in the tag, so at most 256).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StreamId(pub u8);
 
@@ -47,7 +46,7 @@ fn on_recv(f: impl FnMut(&mut World, DevId, FlowId, Hdr, &[u8]) + 'static) -> Op
     Some(Box::new(f))
 }
 
-/// One direction of one app flow, as the registry knows it (Go Stream).
+/// One direction of one app flow, as the registry knows it.
 pub struct Stream {
     pub name: &'static str,
     pub port: u16,
@@ -67,7 +66,7 @@ pub struct Stream {
     pub(crate) late: u32,
 }
 
-/// What the registry remembers of one datagram (Go dgram).
+/// What the registry remembers of one datagram.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Dgram {
     pub(crate) crc: u32,
@@ -81,7 +80,7 @@ pub(crate) struct Dgram {
     pub(crate) queued: bool,
 }
 
-/// Knows every app datagram the models made, to check what core delivers (Go registry).
+/// Knows every app datagram the models made, to check what core delivers.
 #[derive(Default)]
 pub struct Registry {
     pub(crate) streams: Vec<Stream>,
@@ -106,7 +105,7 @@ fn reg_ms(t: Dur) -> u32 {
 }
 
 impl Registry {
-    /// The datagram b's tag names, its stream and its header, if b carries a valid tag (Go find).
+    /// The datagram b's tag names, its stream and its header, if b carries a valid tag.
     pub fn find(&self, b: &[u8]) -> Option<(usize, StreamId, Hdr)> {
         if b.len() < HDR_LEN || b[0] != TAG_MAGIC {
             return None;
@@ -122,7 +121,7 @@ impl Registry {
 }
 
 impl World {
-    /// Registers a stream; recv gets each datagram core delivers on it (Go Stream).
+    /// Registers a stream; recv gets each datagram core delivers on it.
     pub fn stream(&mut self, name: &'static str, port: u16, bulk: bool, recv: Option<Recv>) -> StreamId {
         let n = self.reg.streams.len();
         let id = StreamId(u8::try_from(n).expect("at most 256 streams: the tag names one in a byte"));
@@ -143,7 +142,7 @@ impl World {
         id
     }
 
-    /// A new tagged datagram of size bytes (at least HDR_LEN) on stream s (Go Datagram).
+    /// A new tagged datagram of size bytes (at least HDR_LEN) on stream s.
     pub fn datagram(&mut self, s: StreamId, seq: u32, aux: u32, size: usize, sent: Dur) -> Vec<u8> {
         let st = self[s].id;
         let mut b = vec![0; size.max(HDR_LEN)];
@@ -157,13 +156,13 @@ impl World {
         b
     }
 
-    /// The registry, for metrics that look datagrams up (inputCopies).
+    /// The registry, for metrics that look datagrams up.
     pub fn registry(&self) -> &Registry {
         &self.reg
     }
 
-    /// Records which session pairing sealed the datagram, the first time d submits it (Go
-    /// registry.submit; pub for the self-tests).
+    /// Records which session pairing sealed the datagram, the first time d submits it (pub for
+    /// the self-tests).
     pub fn reg_submit(&mut self, d: DevId, b: &[u8]) {
         let Some((g, s, _)) = self.reg.find(b) else {
             return;
@@ -179,8 +178,8 @@ impl World {
 
     /// Checks one datagram core delivered at d on f and passes it to its stream: nothing forged,
     /// corrupted or replayed, nothing twice, nothing across session pairings, the right port, bulk
-    /// in order except one late packet after a skipped gap per handle call (§17.2); then hook
-    /// Delivered and the stream's recv (Go registry.deliver; pub for the self-tests).
+    /// in order except one late packet after a skipped gap per handle call; then hook Delivered
+    /// and the stream's recv (pub for the self-tests).
     pub fn reg_deliver(&mut self, d: DevId, f: FlowId, b: &[u8]) {
         let name = self[d].name;
         let Some((gi, s, h)) = self.reg.find(b) else {
@@ -239,7 +238,7 @@ impl World {
         }
     }
 
-    /// Counts datagrams of s submitted in [from, to) that were never delivered (Go Lost).
+    /// Counts datagrams of s submitted in [from, to) that were never delivered.
     pub fn lost(&self, s: StreamId, from: Dur, to: Dur) -> usize {
         let (a, b) = (reg_ms(from), reg_ms(to));
         let lost = |g: &&Dgram| g.st == s && g.queued && !g.done && g.ms >= a && g.ms < b;
@@ -287,7 +286,7 @@ pub struct Frame {
     pub done: Dur,
     /// Purged incomplete.
     pub lost: bool,
-    /// Its frame time on each client link alone (§17.3).
+    /// Its frame time on each client link alone.
     pub ideal: Vec<Dur>,
     pub(crate) got: u16,
 }
@@ -302,13 +301,13 @@ pub struct Sample {
     pub owd: Vec<Dur>,
 }
 
-/// A Moonlight stream: index into the world's (Go *Moonlight).
+/// A Moonlight stream: index into the world's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MoonId(pub usize);
 
-/// A Moonlight stream (§17.2): Sunshine's frames with 20% Reed–Solomon parity as 0.8 Gbit/s
-/// bursts; Moonlight purging a frame that is incomplete when a packet of a later frame arrives,
-/// and freezing one RTT per lost frame; audio every 5 ms; input on reliable ENet, resent after
+/// A Moonlight stream: Sunshine's frames with 20% Reed–Solomon parity as 0.8 Gbit/s bursts;
+/// Moonlight purging a frame that is incomplete when a packet of a later frame arrives, and
+/// freezing one RTT per lost frame; audio every 5 ms; input on reliable ENet, resent after
 /// RTT + 4 × variance with doubling; and the pings that open each flow.
 #[derive(Clone, Debug, Default)]
 pub struct Moonlight {
@@ -356,7 +355,7 @@ pub(crate) struct EnetState {
     pub(crate) arrived: bool,
 }
 
-/// A TCP-like sender: index into the world's (Go *Bulk).
+/// A TCP-like sender: index into the world's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BulkId(pub usize);
 
@@ -459,8 +458,8 @@ pub struct Apps {
 const NO_FLOW: FlowId = FlowId(0);
 
 impl World {
-    /// Starts a stream of bps bits per second of video on the wire (Sunshine's parity included,
-    /// notes/netsim.md 2) at fps frames per second, from start until stop (Go Moonlight).
+    /// Starts a stream of bps bits per second of video on the wire (Sunshine's parity included)
+    /// at fps frames per second, from start until stop.
     pub fn moonlight(&mut self, bps: f64, fps: f64, start: Dur, stop: Dur) -> MoonId {
         let m = MoonId(self.apps.moon.len());
         let total = (bps / 8.0 / fps / (VIDEO_SIZE - 16) as f64).ceil() as usize;
@@ -516,7 +515,7 @@ impl World {
         m
     }
 
-    /// Each client link's ground-truth OWD toward the server (up) or the client (Go m.owds).
+    /// Each client link's ground-truth OWD toward the server (up) or the client.
     pub fn owds(&mut self, up: bool) -> Vec<Dur> {
         let n = self[DevId::Client].links.len();
         let mut o = Vec::with_capacity(n);
@@ -527,7 +526,7 @@ impl World {
         o
     }
 
-    /// A ping arrived at the server on f: it opens the video, audio or control flow (Go ping).
+    /// A ping arrived at the server on f: it opens the video, audio or control flow.
     pub(crate) fn moon_ping(&mut self, m: MoonId, f: FlowId) {
         let now = self.now;
         let mo = &mut self[m];
@@ -540,7 +539,7 @@ impl World {
         }
     }
 
-    /// Sends one frame as Sunshine does, while the client keeps pinging (Go frame).
+    /// Sends one frame as Sunshine does, while the client keeps pinging.
     pub(crate) fn moon_frame(&mut self, m: MoonId) {
         let now = self.now;
         let (vflow, vping, total) = (self[m].vflow, self[m].vping, self[m].total);
@@ -567,7 +566,7 @@ impl World {
         }
     }
 
-    /// Sends one audio packet every 5 ms while the stream runs (Go's audio closure).
+    /// Sends one audio packet every 5 ms while the stream runs.
     fn moon_audio(&mut self, m: MoonId) {
         let now = self.now;
         let (aflow, vping) = (self[m].aflow, self[m].vping);
@@ -583,7 +582,7 @@ impl World {
     }
 
     /// Moonlight's frame assembly (RtpVideoQueue.c): a packet of a later frame purges every
-    /// earlier incomplete frame; packets of earlier frames are rejected (Go video).
+    /// earlier incomplete frame; packets of earlier frames are rejected.
     pub(crate) fn moon_video(&mut self, m: MoonId, h: Hdr) {
         let now = self.now;
         let mo = &mut self[m];
@@ -606,7 +605,7 @@ impl World {
         }
     }
 
-    /// Marks frames before f that are incomplete as lost; each freezes video for one RTT (Go purge).
+    /// Marks frames before f that are incomplete as lost; each freezes video for one RTT.
     pub(crate) fn moon_purge(&mut self, m: MoonId, f: u32) {
         while self[m].cur < f {
             let c = self[m].cur as usize;
@@ -623,8 +622,7 @@ impl World {
         }
     }
 
-    /// Purges the frames sent more than a second ago that never completed, at the end of a run
-    /// (Go Settle).
+    /// Purges the frames sent more than a second ago that never completed, at the end of a run.
     pub fn settle(&mut self, m: MoonId) {
         let (frames, recent) = (&self[m].frames, self.now - SEC);
         let mut f = frames.len();
@@ -636,7 +634,7 @@ impl World {
         }
     }
 
-    /// Sends ENet packet i (a new one when first) and arms its resend timer (Go send).
+    /// Sends ENet packet i (a new one when first) and arms its resend timer.
     pub(crate) fn moon_send(&mut self, m: MoonId, i: usize, first: bool) {
         let now = self.now;
         if first {
@@ -655,8 +653,8 @@ impl World {
         let (tries, rto, input, sent) = (e.tries, e.rto, mo.input, mo.inputs[i].sent);
         let b = self.datagram(input, i as u32, tries, INPUT_SIZE, sent);
         self.send_from(DevId::Client, PORT_CONTROL, 50002, b);
-        // The timer names the packet by index: an ack that arrives meanwhile is seen (Go's timer
-        // held a pointer that append could leave behind; notes/rust.md).
+        // The timer names the packet by index, so it sees an ack that arrives meanwhile; a
+        // pointer to the packet could be left behind when a push moves the list.
         self.at(now + rto, move |w| {
             if !w[m].enet[i].acked && w[DevId::Client].awake() {
                 w[m].enet[i].rto *= 2;
@@ -665,7 +663,7 @@ impl World {
         });
     }
 
-    /// The server's ENet: acknowledge every packet, apply in order (Go input).
+    /// The server's ENet: acknowledge every packet, apply in order.
     pub(crate) fn moon_input(&mut self, m: MoonId, f: FlowId, h: Hdr) {
         let (now, acks) = (self.now, self[m].acks);
         let b = self.datagram(acks, h.seq, 0, PING_SIZE, now);
@@ -678,7 +676,7 @@ impl World {
         }
     }
 
-    /// The client's ENet: RTT samples from first transmissions, as ENet's own estimator (Go ack).
+    /// The client's ENet: RTT samples from first transmissions, as ENet's own estimator.
     pub(crate) fn moon_ack(&mut self, m: MoonId, h: Hdr) {
         let now = self.now;
         let mo = &mut self[m];
@@ -835,7 +833,7 @@ fn bulk_fill(w: &mut World, b: BulkId, stop: Dur) {
     }
 }
 
-/// Toggles the mouse between moving and resting for Exp(1 s) (Go's phase closure).
+/// Toggles the mouse between moving and resting for Exp(1 s).
 fn moon_phase(w: &mut World, m: MoonId, mut r: Rng) {
     w[m].moving = !w[m].moving;
     let t = w.now + (r.exp() * 1e9) as Dur;

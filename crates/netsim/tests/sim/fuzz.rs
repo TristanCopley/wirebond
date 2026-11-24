@@ -1,10 +1,10 @@
-//! FuzzScenario (Go netsim/fuzz_test.go, §17.1 tier 1, [Testing 11]) without cargo fuzz: bytes
-//! decoded into a script of network events, every safety invariant checked after every event.
-//! Each 4 bytes are one event: what (op % 14), when (in 40 ms steps over the 10 s run) and two
-//! arguments; at most 64 events. The test runs the Go corpus, every `.hex` file in testdata/fuzz
-//! (hex, one script per file, whitespace ignored: a failing script found here is committed there)
-//! and WIREBOND_FUZZ random scripts per seed of the set (default 8; 128 with WIREBOND_LONG), each
-//! drawn from `Rng::new(seed, i)`. A failure prints the script in hex. Owner: N4.
+//! A scenario fuzzer ([Testing 11]) without cargo fuzz: bytes decoded into a script of network
+//! events, every safety invariant checked after every event. Each 4 bytes are one event: what
+//! (op % 14), when (in 40 ms steps over the 10 s run) and two arguments; at most 64 events. The
+//! test runs the built-in corpus, every `.hex` file in testdata/fuzz (hex, one script per file,
+//! whitespace ignored: a failing script found here is committed there) and WIREBOND_FUZZ random
+//! scripts per seed of the set (default 8; 128 with WIREBOND_LONG), each drawn from
+//! `Rng::new(seed, i)`. A failure prints the script in hex.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ use wirebond_core::{MODE_BANDWIDTH, MODE_PERFORMANCE};
 use wirebond_netsim::env::{Env, START, defaults, hole, long, maker, par_runs, repro, seeds};
 use wirebond_netsim::{Adv, DevId, Dur, LinkId, MS, Rng, SEC, World};
 
-/// Go's f.Add seeds.
+/// The built-in corpus.
 const CORPUS: [&[u8]; 5] = [
     &[],
     &[2, 40, 0, 50, 3, 60, 0, 100, 5, 90, 0, 0, 5, 120, 0, 1],
@@ -22,7 +22,7 @@ const CORPUS: [&[u8]; 5] = [
     &[10, 30, 1, 3, 12, 60, 1, 0, 4, 70, 0, 150, 13, 80, 0, 40, 1, 100, 0, 30],
 ];
 
-/// The events one script may hold (Go's 4 × 64 bytes).
+/// The events one script may hold (4 × 64 bytes).
 const MAX_EVENTS: usize = 64;
 
 /// Where failing scripts are committed (crates/netsim/testdata/fuzz).
@@ -36,9 +36,9 @@ fn events(script: &[u8]) -> impl Iterator<Item = (Dur, u8, u8, u8)> + '_ {
     whole.iter().take(MAX_EVENTS).map(|&[op, when, x, y]| (Dur::from(when) * 40 * MS, op, x, y))
 }
 
-/// Runs one script on seed 1 (Go's fuzz body): the default topology, Moonlight 4 Mbps at 60 fps
-/// from START to 10 s, an adversary at the server (off), a 10 s wall limit so a runaway input
-/// fails instead of stalling; Err carries the failure.
+/// Runs one script on seed 1: the default topology, Moonlight 4 Mbps at 60 fps from START to
+/// 10 s, an adversary at the server (off), a 10 s wall limit so a runaway input fails instead of
+/// stalling; Err carries the failure.
 fn run_script(script: &[u8]) -> Result<(), String> {
     let mut e = Env::new(1, maker(), &defaults());
     let links = [e.hotel, e.cell];
@@ -53,7 +53,7 @@ fn run_script(script: &[u8]) -> Result<(), String> {
     w.run(10 * SEC)
 }
 
-/// The next address after a's, on a's port (Go's Addr().Next()).
+/// The next address after a's, on a's port.
 fn next_ip(a: SocketAddr) -> SocketAddr {
     let ip = match a.ip() {
         IpAddr::V4(v) => IpAddr::V4((u32::from(v).wrapping_add(1)).into()),
@@ -62,13 +62,13 @@ fn next_ip(a: SocketAddr) -> SocketAddr {
     SocketAddr::new(ip, a.port())
 }
 
-/// Carries out one scripted event (Go apply) on the world; links are the hotel and the cell. x
-/// picks the link (hotel, cell) or device (client, server); y scales a duration (20 ms steps) or
-/// a parameter. op % 14: 0–2 hole up/down/both; 3 cut the control channel; 4 the mesh down;
+/// Carries out one scripted event on the world; links are the hotel and the cell. x picks the
+/// link (hotel, cell) or device (client, server); y scales a duration (20 ms steps) or a
+/// parameter. op % 14: 0–2 hole up/down/both; 3 cut the control channel; 4 the mesh down;
 /// 5 rebind (address if y odd); 6 sleep (advancing if y odd); 7 restart; 8 adversary on,
 /// Adv::ATTACKS[x % 6] at y/255 × 0.2; 9 adversary off; 10 down rate (y + 1) Mbps; 11 client mode
-/// stable/bandwidth by y; 12 the link's local address to the next IP; 13 loss y/255 × 0.3 both
-/// ways. (Go's apply took the env, which a scheduled event cannot reach in Rust.)
+/// performance/bandwidth by y; 12 the link's local address to the next IP; 13 loss y/255 × 0.3 both
+/// ways. (It takes the links, not the env, which a scheduled event cannot reach.)
 fn apply(w: &mut World, links: [LinkId; 2], op: u8, x: u8, y: u8) {
     let l = links[usize::from(x % 2)];
     let dev = DevId::BOTH[usize::from(x % 2)];
@@ -170,7 +170,7 @@ fn random_script(seed: u64, i: u64) -> Vec<u8> {
     b
 }
 
-/// Go FuzzScenario's corpus run, plus the committed and the seeded random scripts.
+/// The built-in corpus, plus the committed and the seeded random scripts.
 #[test]
 fn fuzz_scenario() {
     let any = repro("fuzz", "fuzz_scenario", 1);
@@ -204,7 +204,7 @@ fn fuzz_scenario() {
     );
 }
 
-/// The decoding Go's fuzz body did: 4 bytes an event, 40 ms steps, at most 64, no partial event.
+/// The scripts' decoding: 4 bytes an event, 40 ms steps, at most 64, no partial event.
 #[test]
 fn scripts_decode_as_in_go() {
     let got: Vec<_> = events(CORPUS[1]).collect();

@@ -1,7 +1,6 @@
-//! What the acceptance criteria measure (Go netsim/metrics_test.go, which lived in a test file
-//! because only tests use it; the Rust integration tests need it from the library): the Recorder
-//! that samples lane roles, bulk bytes and queues; quantiles; and frame, gap and lateness
-//! metrics. Owner: N3.
+//! What the acceptance criteria measure (in the library, though only tests use it, because the
+//! integration tests need it from there): the Recorder that samples lane roles, bulk bytes and
+//! queues; quantiles; and frame, gap and lateness metrics.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +13,7 @@ use crate::sim::{Dur, HookKind, MS, World};
 /// The Recorder's period for lane roles and bulk bytes.
 pub const WINDOW: Dur = 100 * MS;
 
-/// The Recorder's index for the Tailscale lane; client links are 0…7 by id − 1 (Go mesh).
+/// The Recorder's index for the Tailscale lane; client links are 0…7 by id − 1.
 pub const MESH_LANE: i8 = 8;
 
 /// Lanes the Recorder counts: eight client links and the Tailscale lane.
@@ -23,23 +22,24 @@ pub const LANES: usize = 9;
 /// The period of the queue samples.
 const QUEUE_EVERY: Dur = 10 * MS;
 
-/// Samples what the acceptance criteria need (§17.3): per WINDOW, the bulk bytes the server sent
-/// on each lane and the lane its Snapshot calls primary; every 10 ms, the queue of each
-/// watched direction. Owned by the world (`world.rec`), started by [`record`].
+/// Samples what the acceptance criteria need (§23.3): per WINDOW, the bulk bytes the server sent
+/// on each lane and the lane its Snapshot marks "primary" (only the fake session marks one; core's
+/// lanes are spread, copies or standby); every 10 ms, the queue of each watched direction. Owned
+/// by the world (`world.rec`), started by [`record`].
 #[derive(Clone, Debug, Default)]
 pub struct Recorder {
     /// Bulk bytes (TYPE_DATA without the small bit) per window and lane.
     pub bytes: Vec<[i64; LANES]>,
-    /// The server's primary per window, from Snapshot; −1: none reported.
+    /// The lane the server's Snapshot marks "primary", per window; −1: none reported.
     pub roles: Vec<i8>,
-    /// Queue samples every 10 ms per watched direction (Go keyed them by *Dir).
+    /// Queue samples every 10 ms per watched direction.
     pub queues: BTreeMap<DirId, Vec<Dur>>,
     pub(crate) cur: [i64; LANES],
     pub(crate) dirs: Vec<DirId>,
 }
 
 /// Starts a Recorder on w (`w.rec`): a hook counting the server's bulk bytes entering client
-/// links per lane, and a window every WINDOW (Go record).
+/// links per lane, and a window every WINDOW.
 pub fn record(w: &mut World) {
     w.rec = Some(Recorder::default());
     w.hook(|w, a| {
@@ -57,7 +57,7 @@ pub fn record(w: &mut World) {
 }
 
 impl World {
-    /// Samples d's queue every 10 ms from now, zero-filled before (Go Recorder.Watch).
+    /// Samples d's queue every 10 ms from now, zero-filled before.
     pub fn watch(&mut self, d: DirId) {
         let now = self.now;
         let r = self.rec.as_mut().expect("watch needs the Recorder: metrics::record starts it");
@@ -78,7 +78,7 @@ impl World {
         }
     }
 
-    /// Closes one window: its bytes, and the server's primary lane (Go window).
+    /// Closes one window: its bytes, and the server's primary lane.
     pub(crate) fn rec_window(&mut self) {
         let lanes = self[DevId::Server].snap().lanes;
         let Some(r) = self.rec.as_mut() else {
@@ -108,7 +108,7 @@ fn first_max(b: &[i64; LANES]) -> usize {
 }
 
 impl Recorder {
-    /// The lane carrying the server's bulk in each window: the one its Snapshot calls primary,
+    /// The lane carrying the server's bulk in each window: the one its Snapshot marks "primary",
     /// else the one that carried the most bulk bytes, staying with the previous one while it
     /// carried at least 80% of the most (a trial or rewind duplicates bulk). −1: no bulk yet.
     pub fn primary(&self) -> Vec<i8> {
@@ -137,7 +137,7 @@ impl Recorder {
         n as f64 / (b - a).max(1) as f64
     }
 
-    /// The 95th percentile over time of d's queue in [from, to) (Go QueueP95).
+    /// The 95th percentile over time of d's queue in [from, to).
     pub fn queue_p95(&self, d: DirId, from: Dur, to: Dur) -> Dur {
         let q = self.queues.get(&d).map_or(&[][..], Vec::as_slice);
         let at = |t: Dur| ((t / QUEUE_EVERY).max(0) as usize).min(q.len());
@@ -146,15 +146,15 @@ impl Recorder {
     }
 }
 
-/// The window indices [a, b) of [from, to), clamped to n windows (Go span). Times before 0 count
-/// as 0, and a ≤ b always (Go's slices panicked when from was past to).
+/// The window indices [a, b) of [from, to), clamped to n windows. Times before 0 count as 0, and
+/// a ≤ b always, so a slice by them does not panic when from is past to.
 pub fn span(from: Dur, to: Dur, n: usize) -> (usize, usize) {
     let at = |t: Dur| ((t / WINDOW).max(0) as usize).min(n);
     let b = at(to);
     (at(from).min(b), b)
 }
 
-/// The p-th quantile of xs (nearest rank); `Dur::MAX` (+Inf) when xs is empty (Go Pct).
+/// The p-th quantile of xs (nearest rank); `Dur::MAX` (+Inf) when xs is empty.
 pub fn pct(xs: &[Dur], p: f64) -> Dur {
     if xs.is_empty() {
         return Dur::MAX;
@@ -165,14 +165,13 @@ pub fn pct(xs: &[Dur], p: f64) -> Dur {
 }
 
 impl Moonlight {
-    /// Frames purged in [from, to) (Go Unrecovered).
+    /// Frames purged in [from, to).
     pub fn unrecovered(&self, from: Dur, to: Dur) -> usize {
         self.lost_at.iter().filter(|&&t| t >= from && t < to).count()
     }
 
     /// For each frame sent in [from, to): its frame delay minus its frame time on client link i
-    /// alone (§17.3), so "X OWD + d" holds at p99 when pct(…, 0.99) ≤ d; never decoded is
-    /// `Dur::MAX` (Go Excess).
+    /// alone, so "X OWD + d" holds at p99 when pct(…, 0.99) ≤ d; never decoded is `Dur::MAX`.
     pub fn excess(&self, i: usize, from: Dur, to: Dur) -> Vec<Dur> {
         let sent = self.frames.iter().filter(|f| f.sent >= from && f.sent < to);
         let excess = |f: &Frame| match f.done {
@@ -195,7 +194,7 @@ impl Moonlight {
         done.map(|f| f.done - f.sent).max().unwrap_or(0)
     }
 
-    /// The longest time in [from, to) without a displayed frame (Go MaxGap).
+    /// The longest time in [from, to) without a displayed frame.
     pub fn max_gap(&self, from: Dur, to: Dur) -> Dur {
         let (mut prev, mut gap) = (from, 0);
         for &t in self.shown.iter().filter(|&&t| t >= from && t < to) {
@@ -207,8 +206,7 @@ impl Moonlight {
 }
 
 /// For each sample sent in [from, to): its delay beyond the reference, the lowest client link's
-/// OWD at the moment it was sent (r None) or link r's; never delivered is `Dur::MAX` (Go Late,
-/// where ref < 0 meant None).
+/// OWD at the moment it was sent (r None) or link r's; never delivered is `Dur::MAX`.
 pub fn late(ss: &[Sample], r: Option<usize>, from: Dur, to: Dur) -> Vec<Dur> {
     let sent = ss.iter().filter(|s| s.sent >= from && s.sent < to);
     let late = |s: &Sample| {

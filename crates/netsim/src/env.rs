@@ -1,20 +1,20 @@
-//! The scenario-building API the acceptance tests, the swarm, the fuzzer and the self-tests use
-//! (Go's env_test.go and the helpers of accept_test.go and accept2_test.go): the owner's topology,
-//! the link profiles of §17.3, the seed sets and their environment variables, the criteria
-//! collector, the parallel seed runner, and small scenario helpers. Owner: N5.
+//! The scenario-building API the acceptance tests, the swarm, the fuzzer and the self-tests use:
+//! the owner's topology, the link profiles (§23.3's setting among them), the seed sets and their
+//! environment variables, the criteria collector, the parallel seed runner, and small scenario
+//! helpers.
 //!
-//! Environment variables (Go's flags):
-//! - `WIREBOND_LONG=1`: the nightly set, 20 seeds × 5 simulated minutes (Go -long);
-//! - `WIREBOND_SEED=N`: run only seed N (Go -seed=N);
-//! - `WIREBOND_FAKE=1`: drive the acceptance scenarios with the fake instead of core (Go -fake);
+//! Environment variables:
+//! - `WIREBOND_LONG=1`: the nightly set, 20 seeds × 5 simulated minutes;
+//! - `WIREBOND_SEED=N`: run only seed N;
+//! - `WIREBOND_FAKE=1`: drive the acceptance scenarios with the fake instead of core;
 //! - `WIREBOND_JOBS=N`: [`accept`] and [`par_runs`] (the swarm, the fuzzer and the smaller suites)
 //!   run at most N scenario runs at once in one test process, between them (default: the
-//!   machine's available parallelism; Go's -parallel bounded its parallel subtests);
+//!   machine's available parallelism);
 //! - `WIREBOND_HASHES=1`: [`accept`] and the swarm print every run's event-log hash, passed or
 //!   failed, as a `hash <run>: <hash>` line ([`show_hash`]), to compare two builds run by run (with
 //!   `--nocapture`: the harness shows a passing test's output only then).
 //!
-//! Default: the PR set, seeds 1–3, 60 simulated seconds per scenario (§17.3).
+//! Default: the PR set, seeds 1–3, 60 simulated seconds per scenario.
 
 use std::cell::Cell;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -33,10 +33,10 @@ use crate::nat::NatKind;
 use crate::node::DevId;
 use crate::sim::{Dur, MIN, MS, Maker, SEC, World, core_maker};
 
-/// Every stream starts at 1 s (Go start).
+/// Every stream starts at 1 s.
 pub const START: Dur = SEC;
 /// Criteria are measured from 5 s, when lanes have settled, to a second before the end, so frames
-/// in flight are not counted (Go warm).
+/// in flight are not counted.
 pub const WARM: Dur = 5 * SEC;
 
 // ---------------------------------------------------------------------------------------------
@@ -46,17 +46,17 @@ fn flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
-/// WIREBOND_LONG: the nightly set (Go -long).
+/// WIREBOND_LONG: the nightly set.
 pub fn long() -> bool {
     flag("WIREBOND_LONG")
 }
 
-/// WIREBOND_SEED: run only this seed (Go -seed); None when unset or 0.
+/// WIREBOND_SEED: run only this seed; None when unset or 0.
 pub fn seed_flag() -> Option<u64> {
     std::env::var("WIREBOND_SEED").ok().and_then(|v| v.parse().ok()).filter(|&s| s != 0)
 }
 
-/// WIREBOND_FAKE: drive the acceptance scenarios with the fake (Go -fake).
+/// WIREBOND_FAKE: drive the acceptance scenarios with the fake.
 pub fn fake_flag() -> bool {
     flag("WIREBOND_FAKE")
 }
@@ -76,7 +76,7 @@ pub fn show_hash(run: &str, w: &mut World) {
 }
 
 /// The PR seed set (1–3), the nightly set (1–20) with WIREBOND_LONG, or the one WIREBOND_SEED
-/// names (Go seeds).
+/// names.
 pub fn seeds() -> Vec<u64> {
     match seed_flag() {
         Some(s) => vec![s],
@@ -84,19 +84,19 @@ pub fn seeds() -> Vec<u64> {
     }
 }
 
-/// The simulated time per scenario: 60 s for the PR set, 5 minutes with WIREBOND_LONG (Go simTime).
+/// The simulated time per scenario: 60 s for the PR set, 5 minutes with WIREBOND_LONG.
 pub fn sim_time() -> Dur {
     if long() { 5 * MIN } else { 60 * SEC }
 }
 
 /// The one command that reproduces a failure of `test` in the sim test binary's module `module`
-/// (tests/sim/`module`.rs) on seed (Go repro).
+/// (tests/sim/`module`.rs) on seed.
 pub fn repro(module: &str, test: &str, seed: u64) -> String {
     let long = if long() { "WIREBOND_LONG=1 " } else { "" };
     format!("{long}WIREBOND_SEED={seed} cargo test -p wirebond-netsim --release --test sim -- --exact {module}::{test}")
 }
 
-/// Real core Sessions, or the fake in direct mode with WIREBOND_FAKE (Go maker).
+/// Real core Sessions, or the fake in direct mode with WIREBOND_FAKE.
 pub fn maker() -> Maker {
     if fake_flag() { fake_maker(true, Evil::None) } else { core_maker() }
 }
@@ -117,8 +117,8 @@ pub const fn sock(a: [u8; 4], port: u16) -> SocketAddr {
     SocketAddr::V4(std::net::SocketAddrV4::new(Ipv4Addr::new(a[0], a[1], a[2], a[3]), port))
 }
 
-/// §17.3's Hotel-clean: the shaper (38 Mbps, 64 KB burst, 180 ms buffer), 30 ms one way, jitter
-/// uniform 0–2 ms.
+/// Hotel-clean: the shaper (38 Mbps, 64 KB burst, 180 ms buffer), 30 ms one way (§23.3's hotel),
+/// jitter uniform 0–2 ms.
 pub fn hotel_clean() -> Profile {
     Profile { rate: 38e6, burst: 64 << 10, buffer: 180 * MS, delay: 30 * MS, jitter: 2 * MS, ..Profile::default() }
 }
@@ -128,7 +128,7 @@ pub fn hotel() -> Profile {
     Profile { hotel: true, ..hotel_clean() }
 }
 
-/// §17.3's Cell: 80 Mbps, 45 ms ± 10 ms (35 ms + 0–20 ms redrawn every 10 ms), 0.5% loss.
+/// Cell: 80 Mbps, 45 ms ± 10 ms (35 ms + 0–20 ms redrawn every 10 ms), 0.5% loss.
 pub fn cell() -> Profile {
     Profile {
         rate: 80e6,
@@ -158,8 +158,8 @@ pub fn spec(mode: &'static str) -> Opts {
     Opts { hotel: spec_hotel(), cell: spec_phone(), mode, ..defaults() }
 }
 
-/// The owner's topology (Go opts): the Mac's hotel Wi-Fi (default route) and iPhone (metered),
-/// xanth's Ethernet behind the home router with or without the UDP 7849 forward.
+/// The owner's topology: the Mac's hotel Wi-Fi (default route) and iPhone (metered), xanth's
+/// Ethernet behind the home router with or without the UDP 7849 forward.
 #[derive(Clone, Debug)]
 pub struct Opts {
     pub hotel: Profile,
@@ -174,11 +174,11 @@ pub struct Opts {
     pub client_nat: NatKind,
     pub home_nat: NatKind,
     pub mode: &'static str,
-    /// More client links (A4's four-link variant).
+    /// More client links (a four-link setting, with two phones).
     pub extra: Vec<LinkSpec>,
 }
 
-/// Hotel-clean and Cell behind easy NATs, xanth forwarding UDP 7849, `performance` (Go defaults).
+/// Hotel-clean and Cell behind easy NATs, xanth forwarding UDP 7849, `performance`.
 pub fn defaults() -> Opts {
     Opts {
         hotel: hotel_clean(),
@@ -195,7 +195,7 @@ pub fn defaults() -> Opts {
     }
 }
 
-/// One scenario's world and the links the criteria name (Go env); the Recorder is `w.rec`.
+/// One scenario's world and the links the criteria name; the Recorder is `w.rec`.
 pub struct Env {
     pub w: World,
     pub hotel: LinkId,
@@ -205,7 +205,7 @@ pub struct Env {
 }
 
 impl Env {
-    /// The owner's topology from o on a new world for seed, with a Recorder (Go newEnv).
+    /// The owner's topology from o on a new world for seed, with a Recorder.
     pub fn new(seed: u64, mk: Maker, o: &Opts) -> Env {
         let mut w = World::new(seed, mk);
         let hotel = w.add_link(
@@ -252,13 +252,13 @@ impl Env {
         Env { w, hotel, cell, eth, seed }
     }
 
-    /// The Recorder (Go e.rec).
+    /// The Recorder.
     pub fn rec(&self) -> &Recorder {
         self.w.rec.as_ref().expect("Env::new starts a Recorder")
     }
 
-    /// Starts the world if it has not run yet and runs it to d (Go env.run); Err carries the
-    /// seed and the safety failure, for the caller to print with its reproduce command.
+    /// Starts the world if it has not run yet and runs it to d; Err carries the seed and the
+    /// safety failure, for the caller to print with its reproduce command.
     pub fn run(&mut self, d: Dur) -> Result<(), String> {
         if self.w.now() == 0 {
             self.w.start();
@@ -270,8 +270,7 @@ impl Env {
 // ---------------------------------------------------------------------------------------------
 // Criteria
 
-/// Collects pass criteria: each is reported with its measured value next to its threshold (Go
-/// check).
+/// Collects pass criteria: each is reported with its measured value next to its threshold.
 #[derive(Clone, Debug, Default)]
 pub struct Check {
     pub seed: u64,
@@ -284,7 +283,7 @@ impl Check {
         Check { seed, ..Check::default() }
     }
 
-    /// Records one criterion's line; a failed one also goes to `bad` (Go is).
+    /// Records one criterion's line; a failed one also goes to `bad`.
     pub fn is(&mut self, ok: bool, line: impl Into<String>) {
         let line = line.into();
         if !ok {
@@ -293,8 +292,7 @@ impl Check {
         self.all.push(line);
     }
 
-    /// Ok with every criterion's line, or Err listing the failed ones and the reproduce command
-    /// (Go done, which failed the test once).
+    /// Ok with every criterion's line, or Err listing the failed ones and the reproduce command.
     pub fn done(&self, repro: &str) -> Result<String, String> {
         if self.bad.is_empty() {
             Ok(format!("seed {}: {}", self.seed, self.all.join("; ")))
@@ -310,17 +308,16 @@ impl Check {
     }
 }
 
-/// A scenario's evaluation of its pass criteria, called after the run (Go's third result).
+/// A scenario's evaluation of its pass criteria, called after the run.
 pub type Eval = Box<dyn FnOnce(&mut Env, &mut Check)>;
 
-/// Runs sc on every seed of the set (Go accept): one scoped thread per run (the World is built,
-/// run and dropped on its thread, so sc must be Sync), each running the scenario to its `until`
-/// and evaluating its criteria. On seed 1, and on every seed with WIREBOND_LONG (§17.3 limits the
-/// check to seed 1 for the PR set only), the scenario runs a second time, beside the other runs,
-/// and the criterion that the two event-log hashes match is added. Prints every passing seed's
-/// criteria line, then panics once listing each failed seed (a safety failure, a panic, or its
-/// failed criteria) with [`repro`]`("accept", test, seed)`. `sc(seed, sim_time())` gives (env,
-/// until, eval).
+/// Runs sc on every seed of the set: one scoped thread per run (the World is built, run and
+/// dropped on its thread, so sc must be Sync), each running the scenario to its `until` and
+/// evaluating its criteria. On seed 1, and on every seed with WIREBOND_LONG, the scenario runs a
+/// second time, beside the other runs, and the criterion that the two event-log hashes match is
+/// added. Prints every passing seed's criteria line, then panics once listing each failed seed (a
+/// safety failure, a panic, or its failed criteria) with [`repro`]`("accept", test, seed)`.
+/// `sc(seed, sim_time())` gives (env, until, eval).
 ///
 /// At most WIREBOND_JOBS runs (default: the available parallelism) run at once in the whole test
 /// process, whatever number of tests the harness runs at a time, [`par_runs`]' runs included; a
@@ -357,8 +354,8 @@ struct Job {
     hash: bool,
 }
 
-/// The runs for a seed set: seed 1 twice for the PR set (§17.3), every seed twice for the nightly
-/// set; each second run right after its first.
+/// The runs for a seed set: seed 1 twice for the PR set, every seed twice for the nightly set;
+/// each second run right after its first.
 fn plan(seeds: &[u64], long: bool) -> Vec<Job> {
     let mut jobs = Vec::with_capacity(2 * seeds.len());
     for &seed in seeds {
@@ -455,7 +452,7 @@ fn jobs_flag() -> usize {
 const STACK: usize = 16 << 20;
 
 /// A counting semaphore over the runs of one process, so the tests the harness runs at once
-/// share the limit (as Go's -parallel bounded every parallel subtest of the binary).
+/// share the limit.
 struct Pool {
     busy: Mutex<usize>,
     freed: Condvar,
@@ -562,17 +559,17 @@ pub fn each_run<T: Sync>(jobs: &[T], run: impl Fn(&T) -> Option<String> + Sync) 
     assert!(bad.is_empty(), "{} of {} runs failed:\n{}", bad.len(), jobs.len(), bad.join("\n"));
 }
 
-/// max(n, n × d ÷ per): a count allowed "per 5 min" over a run of d (Go allow).
+/// max(n, n × d ÷ per): a count allowed "per 5 min" over a run of d.
 pub fn allow(n: usize, per: Dur, d: Dur) -> usize {
     n.max((n as f64 * d as f64 / per as f64) as usize)
 }
 
-/// A bulk data packet: TYPE_DATA without the small bit (Go isBulk).
+/// A bulk data packet: TYPE_DATA without the small bit.
 pub fn is_bulk(b: &[u8]) -> bool {
     b.first() == Some(&TYPE_DATA)
 }
 
-/// Blackholes l from at for dur, in the chosen directions (Go hole).
+/// Blackholes l from at for dur, in the chosen directions.
 pub fn hole(w: &mut World, l: LinkId, at: Dur, dur: Dur, up: bool, down: bool) {
     w.at(at, move |w| {
         let k = &mut w[l];
@@ -610,27 +607,27 @@ pub fn first_when(
 }
 
 /// Checks that some frame sent in [from, to) became decodable, so no frame criterion passes on a
-/// stream that never ran (Go decoded).
+/// stream that never ran.
 pub fn decoded(c: &mut Check, m: &Moonlight, from: Dur, to: Dur) {
     let sent = m.frames.iter().filter(|f| f.sent >= from && f.sent < to);
     let (n, done) = sent.fold((0, 0), |(n, d), f| (n + 1, d + usize::from(f.done > 0)));
     c.is(done > 0, format!("{done} of {n} frames decoded (> 0)"));
 }
 
-/// Whether a Snapshot has an up direct lane on client link id (Go laneUp).
+/// Whether a Snapshot has an up direct lane on client link id.
 pub fn lane_up(s: &SessionStatus, id: u8) -> bool {
     s.lanes.iter().any(|l: &LaneStatus| l.id != 0 && (l.id >> 8) as u8 == id && l.state == "up")
 }
 
-/// A duration in milliseconds, "+Inf" for the empty-sample marker (≥ 2^62) (Go ms).
+/// A duration in milliseconds, "+Inf" for the empty-sample marker (≥ 2^62).
 pub fn ms(d: Dur) -> String {
     if d >= 1 << 62 { "+Inf".into() } else { format!("{:.1} ms", d as f64 / 1e6) }
 }
 
 #[cfg(test)]
 mod tests {
-    //! Go's env_test.go and the accept helpers had no tests of their own: these cover the parts
-    //! that need no world to run (the engine, the stand-in and the metrics are other modules').
+    //! The parts of the scenario API that need no world to run (the engine, the stand-in and the
+    //! metrics are other modules').
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 

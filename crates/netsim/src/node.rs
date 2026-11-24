@@ -1,11 +1,9 @@
-//! The node stand-in (Go netsim/node.go, §17.2): per device its links, sockets, clock and
-//! Session, and what node does around core: hello, the control channel, STUN on node's triggers,
-//! flows and their idle sweep, wakes and restarts; plus the routing of packets through links and
-//! NATs.
+//! The node stand-in: per device its links, sockets, clock and Session, and what node does around
+//! core: hello, the control channel, STUN on node's triggers, flows and their idle sweep, wakes
+//! and restarts; plus the routing of packets through links and NATs.
 //!
-//! Go's Device methods are `World` methods taking a [`DevId`] (they all reach the world: the
-//! clock, the queue, the links, the peer). How netsim drives core is in notes/netsim.md ("How
-//! netsim drives core"); the Rust differences are in SKELETON.md and notes/rust.md. Owner: N2.
+//! A device's methods are `World` methods taking a [`DevId`] (they all reach the world: the clock,
+//! the queue, the links, the peer).
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -14,8 +12,8 @@ use std::ops::{Index, IndexMut};
 
 use crate::sim::{FlowId, REASM_MAX, fragment, inner, is_anchor, is_client, is_fragment, outer, path};
 
-/// 1.x's daemon timings, which netsim's simulated daemon keeps until its 2.0 port (wave 2): the
-/// mesh's MTU, the redial while a connection waits, and how long a session outlives its channel.
+/// 1.x's daemon timings, which netsim's simulated daemon keeps until its 2.0 port: the mesh's
+/// MTU, the redial while a connection waits, and how long a session outlives its channel.
 const MESH_MTU: usize = 1280;
 const REDIAL_WAITING: Mono = wirebond_core::SEC;
 const SESSION_LINGER: Mono = 2 * wirebond_core::MIN;
@@ -46,10 +44,10 @@ pub const STUN_SERVER: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::n
 /// 255.255.255.255, which node never passes as a candidate.
 pub(crate) const BCAST: Ipv4Addr = Ipv4Addr::BROADCAST;
 
-/// The release version the stand-in's hello carries (Go's literal).
+/// The release version the stand-in's hello carries.
 const VERSION: &str = "0.3.0";
 
-/// Whether a is in Tailscale's ranges, 100.64.0.0/10 or fd7a:115c:a1e0::/48 (Go meshV4, meshV6).
+/// Whether a is in Tailscale's ranges, 100.64.0.0/10 or fd7a:115c:a1e0::/48.
 /// An IPv4-mapped IPv6 address counts as its IPv4 address.
 pub(crate) fn is_mesh(a: IpAddr) -> bool {
     match a.to_canonical() {
@@ -61,7 +59,7 @@ pub(crate) fn is_mesh(a: IpAddr) -> bool {
     }
 }
 
-/// A device: index into the world's two (Go *Device; Go's peer pointer is [`DevId::peer`]).
+/// A device: index into the world's two; [`DevId::peer`] names the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DevId {
     /// The Mac.
@@ -92,7 +90,7 @@ impl DevId {
     }
 }
 
-/// One datagram in flight (Go pkt).
+/// One datagram in flight.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pkt {
     pub data: Vec<u8>,
@@ -112,14 +110,14 @@ pub struct Pkt {
 }
 
 impl Pkt {
-    /// A bare packet carrying data (the model tests' &pkt{data}).
+    /// A bare packet carrying data, for the model tests.
     pub fn new(data: Vec<u8>) -> Pkt {
         Pkt { data, ..Pkt::default() }
     }
 }
 
-/// The node stand-in on one device (§17.2). Exported Go fields are `pub`; unexported ones are
-/// `pub(crate)`, except the few Go's same-package tests touched, which are `pub` and say so.
+/// The node stand-in on one device. Fields the scenarios use are `pub`, the rest `pub(crate)`,
+/// except the few the self-tests touch, which are `pub` and say so.
 pub struct Device {
     pub name: &'static str,
     pub role: Role,
@@ -140,17 +138,17 @@ pub struct Device {
     pub dropped: u64,
     /// Wire bytes of every lane packet the Sessions sent (IP and UDP headers included).
     pub sent: i64,
-    // Go's Event field (the event being handled) is HookArgs::event.
+    // The event being handled is not kept here: hooks get it as HookArgs::event.
     pub(crate) sess: Option<Box<dyn Endpoint>>,
-    /// The Snapshot after the previous handle call: the checker's "before" (Go snap).
+    /// The Snapshot after the previous handle call: the checker's "before".
     pub(crate) last_snap: SessionStatus,
-    /// pub for the self-tests (TestCheckerCatches sets it).
+    /// pub for the self-tests (`checker_catches` sets it).
     pub peer_inst: u64,
     /// The current pairing in [`World::pair`]; pub for the self-tests.
     pub pair_id: u16,
     pub(crate) rids: RidTable,
-    /// The owner key the current Session was made with (new in Rust: core's RidTable names
-    /// sessions by node's key). The device uses `sessions` at creation.
+    /// The owner key the current Session was made with (core's RidTable names sessions by node's
+    /// key). The device uses `sessions` at creation.
     pub(crate) owner: u64,
     /// The device's monotonic clock is world time + off.
     pub(crate) off: Dur,
@@ -163,9 +161,9 @@ pub struct Device {
     pub(crate) last_tick: Dur,
     /// Ticks in a row at one time: more than 100,000 fails the run.
     pub(crate) same: u32,
-    /// The action recorder handed to handle, reused (Go out).
+    /// The action recorder handed to handle, reused.
     pub(crate) out: Actions,
-    /// Live flows (Go map; sorted, so the idle sweep goes in flow order).
+    /// Live flows, sorted, so the idle sweep goes in flow order.
     pub(crate) flows: BTreeMap<FlowId, Flow>,
     /// Client: port << 16 | the program's source port → its flow.
     pub(crate) by_app: BTreeMap<u32, FlowId>,
@@ -175,7 +173,7 @@ pub struct Device {
     pub(crate) last_stun: Dur,
 }
 
-/// One live flow (Go flow).
+/// One live flow.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Flow {
     pub(crate) last: Dur,
@@ -184,8 +182,7 @@ pub(crate) struct Flow {
 }
 
 impl Device {
-    /// A device with no links and no Session; draws its inst and clock offset from rng (Go
-    /// w.device).
+    /// A device with no links and no Session; draws its inst and clock offset from rng.
     pub(crate) fn new(name: &'static str, role: Role, mesh: SocketAddr, rng: &mut Rng) -> Device {
         let inst = rng.u64() | 1;
         let off = 1_000_000_000_000_000 + rng.dur(1_000_000_000_000_000);
@@ -224,12 +221,12 @@ impl Device {
         }
     }
 
-    /// Whether the device runs: not asleep and not restarting (Go Awake).
+    /// Whether the device runs: not asleep and not restarting.
     pub fn awake(&self) -> bool {
         !self.asleep && !self.down
     }
 
-    /// The current Session's Snapshot, or a zero one (Go Snap).
+    /// The current Session's Snapshot, or a zero one.
     pub fn snap(&self) -> SessionStatus {
         self.sess.as_ref().map(|s| s.snapshot()).unwrap_or_default()
     }
@@ -239,13 +236,13 @@ impl Device {
         self.sess.as_deref()
     }
 
-    /// The device's clock offset: its monotonic clock is world time + off (Go's d.off, which
-    /// TestSleepWake reads).
+    /// The device's clock offset: its monotonic clock is world time + off (the self-test
+    /// `sleep_wake` reads it).
     pub fn off(&self) -> Dur {
         self.off
     }
 
-    /// The device's byte in the event log (Go id: the role, Client 1, Server 2).
+    /// The device's byte in the event log, by its role: the client 1, the anchor 2.
     pub(crate) fn code(&self) -> u8 {
         match self.role {
             Role::Client => 1,
@@ -253,14 +250,14 @@ impl Device {
         }
     }
 
-    /// Invalidates the pending Tick (Go cancelTick).
+    /// Invalidates the pending Tick.
     pub(crate) fn cancel_tick(&mut self) {
         self.tick += 1;
         self.tick_set = false;
     }
 
     /// The client's next flow on port: numbers from 1 per session, wrapping after 65,535, never 0
-    /// or a live number (§5.1; node's sess.number). The caller checked that a flow is free.
+    /// or a live number. The caller checked that a flow is free.
     fn number(&mut self, port: u16) -> FlowId {
         loop {
             self.num = self.num.wrapping_add(1);
@@ -286,14 +283,14 @@ impl IndexMut<DevId> for World {
 }
 
 /// The control channel: TCP over Tailscale, reliable and ordered, with the mesh's delay. A
-/// scenario can cut it; every connect sends hello both ways (Go ctlChan).
+/// scenario can cut it; every connect sends hello both ways.
 #[derive(Clone, Debug, Default)]
 pub struct CtlChan {
     pub up: bool,
     pub cut: bool,
     /// When it last went down.
     pub(crate) since: Dur,
-    /// Bumped on every connect and drop: messages of an older generation are dropped (Go gen).
+    /// Bumped on every connect and drop: messages of an older generation are dropped.
     pub(crate) generation: u64,
     /// The last delivery time per direction (0: client → server), for ordering.
     pub(crate) last: [Dur; 2],
@@ -302,7 +299,7 @@ pub struct CtlChan {
 
 impl CtlChan {
     /// When a message sent in direction dir that could arrive at earliest arrives: never before
-    /// the one sent before it, since TCP delivers in order (Go's max(c.last[dir], …)).
+    /// the one sent before it, since TCP delivers in order.
     fn slot(&mut self, dir: usize, earliest: Dur) -> Dur {
         let at = self.last[dir].max(earliest);
         self.last[dir] = at;
@@ -311,14 +308,14 @@ impl CtlChan {
 }
 
 impl World {
-    /// The device's monotonic clock (Go Device.Mono).
+    /// The device's monotonic clock.
     pub fn mono(&self, d: DevId) -> Mono {
         self.now + self[d].off
     }
 
-    /// Gives d a link (Go AddLink): id = its position + 1, socket = id, a NAT drawing from a
-    /// sub-Rng, both directions, and the radio trains the spec asks for (spikes, AWDL, Starlink),
-    /// in that order of draws.
+    /// Gives d a link: id = its position + 1, socket = id, a NAT drawing from a sub-Rng, both
+    /// directions, and the radio trains the spec asks for (spikes, AWDL, Starlink), in that order
+    /// of draws.
     pub fn add_link(&mut self, d: DevId, s: LinkSpec) -> LinkId {
         let id = u8::try_from(self[d].links.len() + 1).expect("a device has at most 255 links");
         let nat = Nat::new(s.nat, s.local.ip(), s.public, self.sub());
@@ -358,7 +355,7 @@ impl World {
     }
 
     /// Brings both devices up: STUN on every link, housekeeping every second, the client dialling
-    /// the control channel (Go Start).
+    /// the control channel.
     pub fn start(&mut self) {
         for d in DevId::BOTH {
             self.stun_all(d);
@@ -370,13 +367,13 @@ impl World {
         self.ctl_dial();
     }
 
-    /// The link of d with socket s (Go d.link).
+    /// The link of d with socket s.
     pub fn link_of(&self, d: DevId, s: SockId) -> Option<LinkId> {
         self[d].links.iter().copied().find(|&l| self[l].sock == s)
     }
 
-    /// The default-route link of d (Go defaultLink); once it is pulled out ([`World::pull`]), the
-    /// first of d's links still in.
+    /// The default-route link of d; once it is pulled out ([`World::pull`]), the first of d's
+    /// links still in.
     pub fn default_link(&self, d: DevId) -> Option<LinkId> {
         let links = &self[d].links;
         match links.iter().copied().find(|&l| self[l].spec.default) {
@@ -386,14 +383,14 @@ impl World {
     }
 
     /// Whether node marks l as d's default link in Links, hello and links: only a client marks
-    /// its default-route link (§6.1).
+    /// its default-route link.
     fn node_default(&self, d: DevId, l: LinkId) -> bool {
         self[d].role == Role::Client && self[l].spec.default
     }
 
     /// Passes one event to d's Session, checks the invariants (when `check`) and carries out the
-    /// actions; then schedules the Tick (Go handle). p is the packet behind an `Event::Packet`.
-    /// Nothing happens without a Session, while asleep or down, or after a failure.
+    /// actions; then schedules the Tick. p is the packet behind an `Event::Packet`. Nothing
+    /// happens without a Session, while asleep or down, or after a failure.
     pub(crate) fn handle(&mut self, d: DevId, ev: Event<'_>, p: Option<&Pkt>) {
         if self.fail.is_some() || self[d].sess.is_none() || !self[d].awake() {
             return;
@@ -423,8 +420,8 @@ impl World {
         self.sched_tick(d);
     }
 
-    /// Carries out one action of d's Session; ev is the event that produced it (Go act):
-    /// Send → log, count, hook Sent, route; Deliver → log, deliver; Control → record keys, send.
+    /// Carries out one action of d's Session; ev is the event that produced it: Send → log, count,
+    /// hook Sent, route; Deliver → log, deliver; Control → record keys, send.
     pub(crate) fn act(&mut self, d: DevId, a: Action, ev: &Event<'_>) {
         let code = self[d].code();
         match a {
@@ -451,8 +448,7 @@ impl World {
     }
 
     /// Schedules one Tick at d's Session's next() (now if past); a newer schedule replaces the
-    /// pending one; `Mono::MAX` cancels it; 100,000 Ticks in a row at one time fail the run (Go
-    /// schedTick).
+    /// pending one; `Mono::MAX` cancels it; 100,000 Ticks in a row at one time fail the run.
     pub(crate) fn sched_tick(&mut self, d: DevId) {
         let now = self.now;
         let dev = &mut self.devs[d.idx()];
@@ -501,8 +497,8 @@ impl World {
         self.handle(d, Event::Tick, None);
     }
 
-    /// Takes a datagram that arrived on link l (None: the Tailscale lane) from src (Go recv):
-    /// STUN replies, the reach and hook bookkeeping, the adversary's look, then [`World::packet`].
+    /// Takes a datagram that arrived on link l (None: the Tailscale lane) from src: STUN replies,
+    /// the reach and hook bookkeeping, the adversary's look, then [`World::packet`].
     pub(crate) fn recv(&mut self, d: DevId, l: Option<LinkId>, src: SocketAddr, p: Pkt) {
         if !self[d].awake() {
             return;
@@ -534,8 +530,8 @@ impl World {
         self.packet(d, sock, src, p);
     }
 
-    /// Hands a lane packet to the Session that owns its rid, as node does (§4): a core Session
-    /// only if its RidTable lookup is the device's current owner key (Go packet).
+    /// Hands a lane packet to the Session that owns its rid, as node does: a core Session only if
+    /// its RidTable lookup is the device's current owner key.
     pub(crate) fn packet(&mut self, d: DevId, sock: SockId, src: SocketAddr, p: Pkt) {
         let dev = &self[d];
         let Some(s) = dev.sess.as_deref() else {
@@ -559,9 +555,9 @@ impl World {
     }
 
     /// Passes one datagram that a program on client d sent from source port src to
-    /// 127.0.0.1:port. A flow is (port, src), numbered 1, 2, 3 … per session (§5.1), wrapping
-    /// after 65,535 and never 0 or a live number, as node numbers them; waits for the next event
-    /// while busy; MAX_FLOWS drops (Go SendFrom).
+    /// 127.0.0.1:port. A flow is (port, src), numbered 1, 2, 3 … per session, wrapping after
+    /// 65,535 and never 0 or a live number, as node numbers them; waits for the next event while
+    /// busy; MAX_FLOWS drops.
     pub fn send_from(&mut self, d: DevId, port: u16, src: u16, data: Vec<u8>) {
         if self.busy {
             let now = self.now;
@@ -589,9 +585,9 @@ impl World {
         self.app(d, f, data);
     }
 
-    /// Passes one datagram from a server flow socket; a closed flow drops it (Go SendOn). A flow
-    /// whose far end is the internet server ([`path`]) first crosses the anchor's egress leg
-    /// ([`World::egress`]) back to the anchor, whose NAT hands it to the bond.
+    /// Passes one datagram from a server flow socket; a closed flow drops it. A flow whose far end
+    /// is the internet server ([`path`]) first crosses the anchor's egress leg ([`World::egress`])
+    /// back to the anchor, whose NAT hands it to the bond.
     pub fn send_on(&mut self, d: DevId, f: FlowId, data: Vec<u8>) {
         if d == DevId::Server && path(f.port()).internet && self.egress > 0 {
             let at = self.now + self.egress;
@@ -615,7 +611,7 @@ impl World {
         self.app(d, f, data);
     }
 
-    /// Go app: flow activity, idle tracking, the registry's submit, then `Event::App`.
+    /// Flow activity, idle tracking, the registry's submit, then `Event::App`.
     pub(crate) fn app(&mut self, d: DevId, f: FlowId, data: Vec<u8>) {
         let now = self.now;
         if let Some(fl) = self[d].flows.get_mut(&f) {
@@ -731,8 +727,8 @@ impl World {
         self.deliver(d, f, &data);
     }
 
-    /// Takes one datagram d's Session delivered on f (Go deliver): a client without the flow, or a
-    /// server at MAX_FLOWS, drops it; a server opens it; then the registry checks and passes it on.
+    /// Takes one datagram d's Session delivered on f: a client without the flow, or a server at
+    /// MAX_FLOWS, drops it; a server opens it; then the registry checks and passes it on.
     pub(crate) fn deliver(&mut self, d: DevId, f: FlowId, data: &[u8]) {
         let now = self.now;
         let dev = &mut self[d];
@@ -749,7 +745,7 @@ impl World {
         self.reg_deliver(d, f, data);
     }
 
-    /// Tracks idle as node does: the first datagram after IDLE_AFTER re-runs STUN (§6.3).
+    /// Tracks idle as node does: the first datagram after IDLE_AFTER re-runs STUN.
     pub(crate) fn data_seen(&mut self, d: DevId) {
         let now = self.now;
         if now - self[d].last_data > IDLE_AFTER {
@@ -759,7 +755,7 @@ impl World {
     }
 
     /// node's one-second timers: idle flows end after FLOW_IDLE (in flow order), the STUN refresh,
-    /// and the session linger after the channel went down (Go house).
+    /// and the session linger after the channel went down.
     pub(crate) fn house(&mut self, d: DevId) {
         if !self[d].awake() {
             return;
@@ -801,7 +797,7 @@ impl World {
         }
     }
 
-    /// STUN on every link of d (Go stunAll).
+    /// STUN on every link of d.
     pub(crate) fn stun_all(&mut self, d: DevId) {
         for i in 0..self[d].links.len() {
             let l = self[d].links[i];
@@ -812,7 +808,7 @@ impl World {
     }
 
     /// Sends one binding request from l's socket; the reply comes back through the NAT after a
-    /// round trip and is counted on the link like any packet (Go stun).
+    /// round trip and is counted on the link like any packet.
     pub(crate) fn stun(&mut self, d: DevId, l: LinkId) {
         if !self[d].awake() {
             return;
@@ -825,7 +821,7 @@ impl World {
     }
 
     /// Takes a STUN reply on l: within STUN_WAIT of the request, a changed mapping is a link
-    /// change (Go stunReply).
+    /// change.
     pub(crate) fn stun_reply(&mut self, d: DevId, l: Option<LinkId>, p: &Pkt) {
         let Some(l) = l else {
             return;
@@ -844,7 +840,7 @@ impl World {
     }
 
     /// Tells d's Session (a full `Event::Links`) and the peer (`links`) the device's links, as
-    /// node does on every change; waits for the next event while busy (Go LinksChanged).
+    /// node does on every change; waits for the next event while busy.
     pub fn links_changed(&mut self, d: DevId) {
         if self.busy {
             let now = self.now;
@@ -860,9 +856,9 @@ impl World {
         }
     }
 
-    /// Moves l to a new local address, as a DHCP renewal or a replugged iPhone does (Go
-    /// Link.SetLocal): the NAT's local address too, then links_changed and STUN. node reopens the
-    /// link's socket, so the old socket's mapping goes until STUN answers (Go kept it).
+    /// Moves l to a new local address, as a DHCP renewal or a replugged iPhone does: the NAT's
+    /// local address too, then links_changed and STUN. node reopens the link's socket, so the old
+    /// socket's mapping goes until STUN answers.
     pub fn set_local(&mut self, l: LinkId, a: SocketAddr) {
         let k = &mut self[l];
         k.local = a;
@@ -873,7 +869,7 @@ impl World {
         self.stun(d, l);
     }
 
-    /// d's links as core sees them (Go coreLinks).
+    /// d's links as core sees them.
     pub(crate) fn core_links(&self, d: DevId) -> Vec<wirebond_core::Link> {
         let link = |l: LinkId| {
             let k = &self[l];
@@ -891,22 +887,23 @@ impl World {
     }
 
     /// l's label as node gives it: a label two interfaces share gets the interface's name
-    /// ("iPhone en3"), since core groups bottlenecks by label (§6.1, notes/netsim.md 24). Each
-    /// netsim link is its own interface, en<id>.
+    /// ("iPhone en3"), since core groups bottlenecks by label. Each netsim link is its own
+    /// interface, en<id>.
     pub(crate) fn label(&self, d: DevId, l: LinkId) -> String {
         let k = &self[l];
         let shared = self[d].links.iter().any(|&o| o != l && self[o].spec.label == k.spec.label);
         if shared { format!("{} en{}", k.spec.label, k.id) } else { k.spec.label.to_string() }
     }
 
-    /// d's Tailscale lane (Go meshLane); `Event::Links` carries it as Some always: netsim's mesh
-    /// address never goes away (A21 is the netns tier's).
+    /// d's Tailscale lane; `Event::Links` carries it as Some always: netsim's mesh address never
+    /// goes away (a mesh address that goes away is left to the network-namespace harness, §23.1
+    /// tier 3).
     pub(crate) fn mesh_lane(&self, d: DevId) -> MeshLane {
         MeshLane { sock: MESH_SOCK, local: self[d].mesh, peer: self[d.peer()].mesh }
     }
 
-    /// The links as hello and links offer them: local address, STUN mapping, and the mapping's
-    /// address with PORT (§6.3) (Go infos).
+    /// The links as hello and links offer them: the local address and the STUN mapping (§9.3), and
+    /// the mapping's address with PORT.
     pub(crate) fn infos(&self, d: DevId) -> Vec<LinkInfo> {
         let info = |l: LinkId| {
             let k = &self[l];
@@ -959,9 +956,8 @@ impl World {
         m
     }
 
-    /// Takes one control message from the peer. A hello from a new inst makes a new Session (§7.6
-    /// rule 8); hello and links are filtered and their candidates recorded for the checker (Go
-    /// control).
+    /// Takes one control message from the peer. A hello from a new inst makes a new Session
+    /// (§10.5 rule 7); hello and links are filtered and their candidates recorded for the checker.
     pub(crate) fn control(&mut self, d: DevId, mut m: Msg) {
         if !self[d].awake() {
             return;
@@ -971,7 +967,7 @@ impl World {
                 self.new_session(d, m.inst);
             }
             m.links = filter(std::mem::take(&mut m.links));
-            // Only the checker reads the offered candidates (Go recorded them unconditionally).
+            // Only the checker reads the offered candidates, so only a checked run records them.
             if self.check {
                 self.chk.offered(d, &m.links);
             }
@@ -980,7 +976,7 @@ impl World {
     }
 
     /// Makes d's Session for peer inst peer and gives it, in order, the device's links and, on a
-    /// client, the connection's mode; the caller then passes the peer's hello (Go newSession).
+    /// client, the connection's mode; the caller then passes the peer's hello.
     pub(crate) fn new_session(&mut self, d: DevId, peer: u64) {
         self.close_session(d);
         let rand = key_reader(self.sub());
@@ -1007,7 +1003,7 @@ impl World {
         }
     }
 
-    /// Closes d's Session, if any, freeing its rids and cancelling its Tick (Go closeSession).
+    /// Closes d's Session, if any, freeing its rids and cancelling its Tick.
     pub(crate) fn close_session(&mut self, d: DevId) {
         let dev = &mut self[d];
         if let Some(mut s) = dev.sess.take() {
@@ -1016,7 +1012,7 @@ impl World {
         }
     }
 
-    /// Changes the client's mode, as `wirebond connect xanth bandwidth` does (Go SetMode).
+    /// Changes the client's mode, as `wirebond connect xanth bandwidth` does.
     pub fn set_mode(&mut self, d: DevId, mode: &str) {
         self[d].mode = mode.into();
         let m = Msg { t: "mode".into(), mode: mode.into(), ..Msg::default() };
@@ -1026,7 +1022,7 @@ impl World {
 
     /// Freezes d for dur: no timers, no packets, no programs. With advance its monotonic clock
     /// counts the sleep (as Windows may); otherwise it pauses (macOS, Linux). On wake node injects
-    /// `Event::Wake`, re-runs STUN and redials the control channel (§8.4) (Go Sleep).
+    /// `Event::Wake`, re-runs STUN and redials the control channel.
     pub fn sleep(&mut self, d: DevId, dur: Dur, advance: bool) {
         if !self[d].awake() {
             return;
@@ -1049,7 +1045,7 @@ impl World {
     }
 
     /// Stops d's process for down; it comes back with a new inst, no Session and a new rid table,
-    /// and the control channel is redialled (§7.6 rule 8) (Go Restart).
+    /// and the control channel is redialled (§10.5 rule 7).
     pub fn restart(&mut self, d: DevId, down: Dur) {
         if !self[d].awake() {
             return;
@@ -1070,9 +1066,9 @@ impl World {
         });
     }
 
-    /// Sends data from d's socket sock to `to` through the link and NAT models (Go route): the
-    /// Tailscale lane rides the client's default link (Up from the client, Down from the server)
-    /// with TS_OVER more bytes per packet and MESH_MTU.
+    /// Sends data from d's socket sock to `to` through the link and NAT models: the Tailscale lane
+    /// rides the client's default link (Up from the client, Down from the server) with TS_OVER more
+    /// bytes per packet and MESH_MTU.
     pub(crate) fn route(&mut self, d: DevId, sock: SockId, to: SocketAddr, data: Vec<u8>, stun: bool) {
         let p = Pkt { data, stun, from: Some(d), sock, to: Some(to), t0: self.now, ..Pkt::default() };
         if sock == MESH_SOCK {
@@ -1114,8 +1110,8 @@ impl World {
         self.dir_send(l.up(), p, n, k, Then::Arrive { from: l, src, to });
     }
 
-    /// Takes a packet that left link sl with public source src, addressed to `to` (Go arrive):
-    /// the STUN server answers; otherwise the other device's link with that public address.
+    /// Takes a packet that left link sl with public source src, addressed to `to`: the STUN server
+    /// answers; otherwise the other device's link with that public address.
     pub(crate) fn arrive(&mut self, p: Pkt, sl: LinkId, src: SocketAddr, to: SocketAddr) {
         if to == STUN_SERVER {
             if p.stun {
@@ -1131,7 +1127,7 @@ impl World {
         }
     }
 
-    /// Passes p from src through link l's NAT and down direction to its device (Go inbound).
+    /// Passes p from src through link l's NAT and down direction to its device.
     pub(crate) fn inbound(&mut self, p: Pkt, l: LinkId, src: SocketAddr, to: SocketAddr) {
         let now = self.now;
         let lk = &mut self[l];
@@ -1153,24 +1149,24 @@ impl World {
         self.dir_send(l.down(), p, n, k, then);
     }
 
-    /// Takes the control channel's path down (Go CutControl).
+    /// Takes the control channel's path down.
     pub fn cut_control(&mut self) {
         self.ctl.cut = true;
         self.ctl_drop();
     }
 
-    /// Brings it back; the client redials within REDIAL_WAITING (Go RestoreControl).
+    /// Brings it back; the client redials within REDIAL_WAITING.
     pub fn restore_control(&mut self) {
         self.ctl.cut = false;
         self.ctl_dial();
     }
 
-    /// Whether the control channel is connected (Go ControlUp).
+    /// Whether the control channel is connected.
     pub fn control_up(&self) -> bool {
         self.ctl.up
     }
 
-    /// Go ctlChan.drop.
+    /// Drops the control channel if it is up; messages still in flight are dropped with it.
     pub(crate) fn ctl_drop(&mut self) {
         let c = &mut self.ctl;
         if c.up {
@@ -1180,13 +1176,13 @@ impl World {
         }
     }
 
-    /// Whether a dial would connect: not cut, both devices awake (Go ready).
+    /// Whether a dial would connect: not cut, both devices awake.
     pub(crate) fn ctl_ready(&self) -> bool {
         !self.ctl.cut && self[DevId::Client].awake() && self[DevId::Server].awake()
     }
 
-    /// Connects within one round trip, or tries again every REDIAL_WAITING (§7.1) (Go dial).
-    /// Every connect sends hello both ways.
+    /// Connects within one round trip, or tries again every REDIAL_WAITING. Every connect sends
+    /// hello both ways.
     pub(crate) fn ctl_dial(&mut self) {
         if self.ctl.up || self.ctl.dialing {
             return;
@@ -1213,7 +1209,7 @@ impl World {
     }
 
     /// The mesh's one-way delay: the client's default link's propagation delay + 1 ms; dir 0 is
-    /// client → server (Go delay). 30 ms without a default link.
+    /// client → server. 30 ms without a default link.
     pub(crate) fn ctl_delay(&self, dir: usize) -> Dur {
         let side = if dir == 0 { Side::Up } else { Side::Down };
         let Some(l) = self.default_link(DevId::Client) else {
@@ -1224,7 +1220,7 @@ impl World {
 
     /// Carries m to the peer as node does: one JSON line of at most MAX_MSG bytes, its newline
     /// included (node's reader holds MAX_MSG), decoded again on arrival, in order; dropped while
-    /// the channel is down (Go ctlChan.send).
+    /// the channel is down.
     pub(crate) fn ctl_send(&mut self, from: DevId, m: Msg) {
         if !self.ctl.up {
             return;
@@ -1262,8 +1258,8 @@ impl World {
     }
 }
 
-/// Drops the candidates node never passes to core (§6.3), as node's filter does: at most
-/// MAX_LINKS links and MAX_CANDS candidates each; no loopback, unspecified, multicast, link-local,
+/// Drops the candidates node never passes to core, as node's filter does: at most MAX_LINKS links
+/// (§9.1) and MAX_CANDS candidates each (§9.3); no loopback, unspecified, multicast, link-local,
 /// broadcast or mesh address and no port 0; an IPv4-mapped address is kept as its IPv4 address.
 pub(crate) fn filter(mut ls: Vec<LinkInfo>) -> Vec<LinkInfo> {
     ls.truncate(MAX_LINKS);
@@ -1284,8 +1280,8 @@ pub(crate) fn filter(mut ls: Vec<LinkInfo>) -> Vec<LinkInfo> {
     ls
 }
 
-/// Whether node would take a as a peer's candidate address (Go netip's IsGlobalUnicast, which
-/// node's filter uses): not unspecified, broadcast, loopback, multicast or link-local.
+/// Whether node would take a as a peer's candidate address: not unspecified, broadcast,
+/// loopback, multicast or link-local.
 fn unicast(a: IpAddr) -> bool {
     match a {
         IpAddr::V4(v) => {
@@ -1295,9 +1291,9 @@ fn unicast(a: IpAddr) -> bool {
     }
 }
 
-/// A link's candidates as node offers them (§6.3 item 2), most preferred first: the local
-/// address, the STUN mapping, and the mapping's address on PORT (a router forward usually keeps
-/// the port); none twice.
+/// A link's candidates as node offers them, most preferred first: the local address and the STUN
+/// mapping (§9.3), and the mapping's address on PORT (a router forward usually keeps the port);
+/// none twice.
 fn cands(local: SocketAddr, mapped: Option<SocketAddr>) -> Vec<SocketAddr> {
     let mut cs = vec![local];
     if let Some(m) = mapped {
@@ -1310,7 +1306,7 @@ fn cands(local: SocketAddr, mapped: Option<SocketAddr>) -> Vec<SocketAddr> {
     cs
 }
 
-/// handle's event-log record of ev (Go's `uint64(ev.Flow)<<16 | uint64(ev.Sock)` and ev.Data).
+/// handle's event-log record of ev: a received packet's socket, else 0, and the bytes ev carries.
 fn log_args<'a>(ev: &Event<'a>) -> (u64, &'a [u8]) {
     match *ev {
         Event::Send { packet } => (0, packet),
@@ -1321,10 +1317,10 @@ fn log_args<'a>(ev: &Event<'a>) -> (u64, &'a [u8]) {
 
 #[cfg(test)]
 mod tests {
-    //! The stand-in's own tests (Go had none for node.go; the self-tests in tests/sim/selftest.rs
-    //! covered it). The first group runs on its own: pure functions, and fixtures that build
-    //! links without the link model. The second group runs the stand-in end to end with a
-    //! scripted endpoint in place of core, over the real engine, links, NAT and registry.
+    //! The stand-in's own tests (the self-tests in tests/sim/selftest.rs cover it as well). The
+    //! first group runs on its own: pure functions, and fixtures that build links without the
+    //! link model. The second group runs the stand-in end to end with a scripted endpoint in place
+    //! of core, over the real engine, links, NAT and registry.
 
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
@@ -1361,7 +1357,7 @@ mod tests {
         }
     }
 
-    /// node's TestFilter: what a receiver ignores (§6.3 item 3), the caps, port 0 and unmapping.
+    /// What a receiver ignores, the caps, port 0 and unmapping.
     #[test]
     fn filter_drops_what_node_drops() {
         let mut ls = vec![LinkInfo::default(); MAX_LINKS + 3];
@@ -1402,8 +1398,8 @@ mod tests {
         assert_eq!(cands(fwd, Some(fwd)), [fwd]);
     }
 
-    /// node's TestFlowNumbers: from 1, wrapping after 65,535, never 0 or a live number; one
-    /// counter per session across ports.
+    /// Flow numbers: from 1, wrapping after 65,535, never 0 or a live number; one counter per
+    /// session across ports.
     #[test]
     fn flow_numbers() {
         let mut d = Device::new("mac", Role::Client, ADDR_HOTEL, &mut Rng::new(1, 2));
@@ -1414,7 +1410,7 @@ mod tests {
         assert_eq!(d.number(48000), FlowId::new(48000, 3));
     }
 
-    /// handle's event-log record: Go's (flow << 16 | sock, data).
+    /// handle's event-log record: a received packet's socket, else 0, and the bytes it carries.
     #[test]
     fn handle_log_records() {
         let f = FlowId::new(47998, 3);
@@ -1644,8 +1640,8 @@ mod tests {
         Profile { delay: d, ..Profile::default() }
     }
 
-    /// A label two interfaces share gets the interface's name (§6.1, notes/netsim.md 24: A4's
-    /// four-link variant has two phones); only a client marks its default link (§6.1).
+    /// A label two interfaces share gets the interface's name (A4's four-link variant has two
+    /// phones); only a client marks its default link.
     #[test]
     fn labels_unique_per_interface() {
         let (mut w, _, _) = scripted();
@@ -1870,8 +1866,7 @@ mod tests {
         w.send_from(DevId::Client, port, src, b);
     }
 
-    /// One seed replays the same run, the same event-log hash; another seed does not (§17.3's
-    /// double-run check, Rust against Rust).
+    /// One seed replays the same run, the same event-log hash; another seed does not.
     #[test]
     fn same_seed_same_run() {
         let run = |seed| {
@@ -1968,7 +1963,7 @@ mod tests {
         assert_eq!(msgs(&log, "xanth#1", "hello").len(), 2);
     }
 
-    /// A STUN reply later than STUN_WAIT after its request is not taken (§6.3 item 1).
+    /// A STUN reply later than STUN_WAIT after its request is not taken (§9.2).
     #[test]
     fn late_stun_reply_is_ignored() {
         let (mut w, _, _, [hotel, ..]) = topology();
@@ -2010,7 +2005,7 @@ mod tests {
     }
 
     /// A restart ends the Session and comes back with a new inst and rid table; the reconnect
-    /// makes new Sessions at both ends (§7.6 rule 8), which exchange new keys.
+    /// makes new Sessions at both ends (§10.5 rule 7), which exchange new keys.
     #[test]
     fn restart_makes_new_sessions() {
         let (mut w, log, _, _) = connected();
@@ -2097,7 +2092,7 @@ mod tests {
     }
 
     /// A STUN reply with a new mapping is a link change: the Session gets Links with it and the
-    /// peer a links message. The first datagram after idle runs STUN (§6.3, §8.1).
+    /// peer a links message. The first datagram after idle runs STUN.
     #[test]
     fn new_mapping_is_a_link_change() {
         let (mut w, log, _, [hotel, ..]) = connected();
