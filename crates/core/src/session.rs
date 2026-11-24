@@ -12,7 +12,7 @@ use crate::buf::{BufIx, Pool};
 use crate::estimate::Meter;
 use crate::flow::Flow;
 use crate::keys::{Challenger, EpochKey, Receiver, Sender, Slot};
-use crate::lane::{Arrival, LaneIx, Lanes, PENDING_COPIES};
+use crate::lane::{Arrival, LaneIx, Lanes, PENDING_COPIES, State};
 use crate::wire::{Echo, Probe, Window};
 use crate::{
     DATA_LEN, FlowId, HEADER_LEN, IDLE_AFTER, Link, LinkInfo, LogEvent, MAX_CANDS, MAX_ECHOES, MAX_LINKS, MAX_PACKET,
@@ -97,6 +97,8 @@ pub struct Session {
     pub(crate) last_echo: Mono,
     /// The client's idle-probe lane.
     pub(crate) idle: Option<LaneIx>,
+    /// The control channel is down (`Event::Channel`).
+    pub(crate) chan_down: bool,
     pub(crate) punch_at: Mono,
     pub(crate) punch_until: Mono,
     pub(crate) next_punch: Mono,
@@ -181,6 +183,7 @@ impl Session {
             woke: Mono::MIN,
             last_echo: 0,
             idle: None,
+            chan_down: false,
             punch_at: Mono::MIN / 2,
             punch_until: 0,
             next_punch: 0,
@@ -225,6 +228,15 @@ impl Session {
             self.wake_at(self.last_data.saturating_add(IDLE_AFTER));
         }
         if self.punch_pending {
+            self.punch(now);
+        }
+        // While data flows, a direct lane that is not up is punched round after round: a pair that
+        // never validated has no return address, so only a round probes it, and a path that opened
+        // after its round stayed punching until the session next went idle (the system harness: 30 s
+        // of traffic on the mesh lane alone). 71 bytes on the wire, five times a second, to each of
+        // its candidates.
+        let unpunched = |x: &crate::lane::Lane| !x.mesh && !matches!(x.state, State::Up | State::Suspect);
+        if self.active && now >= self.punch_until && self.lanes.iter().any(unpunched) {
             self.punch(now);
         }
         if !self.active && !self.dozing && now >= self.punch_until {

@@ -425,6 +425,108 @@ fn suspect_lane_leaves_with_rewind() {
     assert!(now < s.rewind_until, "in flight");
 }
 
+/// What a suspect lane delivered moves with its packets (§14.2): a lane still in startup that
+/// takes them adds it to its rate at once; a rate learned from overuse stays.
+#[test]
+fn rewind_moves_the_delivery_rate() {
+    let now = 30 * SEC;
+    let (wifi, phone) = (ix(1), ix(3));
+    for (startup, rate) in [(true, 42e6), (false, 12e6)] {
+        let mut s = spreading(now);
+        (s.lanes[wifi].state, s.lanes[wifi].delivery) = (State::Suspect, 30e6);
+        let p = &mut s.lanes[phone];
+        (p.rate, p.startup, p.bulk_at) = (12e6, startup, now);
+        s.schedule(&mut Acts::default(), now);
+        assert_eq!((spread_of(&s), s.lanes[phone].rate, s.lanes[phone].startup), (vec![2, 3], rate, startup));
+    }
+}
+
+/// A lane back from a bar is on trial for twice BANDWIDTH_FLOOR_HOLD (§14.2): it takes a copy of
+/// every bulk packet and none alone, and when it leaves again its queue, all copies, is dropped.
+#[test]
+fn barred_lane_returns_on_trial() {
+    let (now, trial) = (30 * SEC, 2 * BANDWIDTH_FLOOR_HOLD);
+    let (wifi, phone) = (ix(1), ix(3));
+    let mut s = spreading(now);
+    s.lanes[wifi].trial_until = now + trial;
+    assert_eq!(s.earliest(now, 1400), Some(phone));
+    assert_eq!(s.bulk_lanes(now, 1400).collect::<Vec<_>>(), [phone, wifi]);
+    // Every lane on trial: the fastest carries, the others copy.
+    s.lanes[phone].trial_until = now + trial;
+    assert_eq!(s.bulk_lanes(now, 1400).collect::<Vec<_>>(), [wifi, phone]);
+    s.lanes[phone].trial_until = 0;
+    // Barred again: nothing of its queue moves to the lanes that stay.
+    packets(&mut s, wifi, 300, 2, now, true);
+    s.lanes[wifi].bar_until = now + BAR;
+    let mut out = Acts::default();
+    s.schedule(&mut out, now + MS);
+    assert_eq!((spread_of(&s), s.rewinds), (vec![2, 3], 0));
+    assert!(out.0.is_empty() && s.lanes.iter().all(|l| l.q.is_empty()));
+    // The trial over, it carries its share alone.
+    let mut s = spreading(now);
+    s.lanes[wifi].trial_until = now + trial;
+    assert_eq!(s.bulk_lanes(now + trial, 1400).collect::<Vec<_>>(), [wifi]);
+}
+
+/// A trial begins when a lane is taken for the first time since its bar ended, and only then
+/// (§14.2): not while the blind pair takes it still barred, and not when it leaves for another
+/// reason later and returns, however often. By its count of bars, which never falls, a lane
+/// barred once was on trial after every return, the other lanes alone with the stream meanwhile.
+#[test]
+fn only_the_return_from_a_bar_is_a_trial() {
+    let (now, trial) = (30 * SEC, 2 * BANDWIDTH_FLOOR_HOLD);
+    let (wifi, phone) = (ix(1), ix(3));
+    let mut s = spreading(now);
+    s.bar(now, phone);
+    let on = |s: &Session, t: Mono| s.lanes[phone].on_trial(t);
+    s.take(now + SEC, phone); // as the blind pair does
+    assert!(!on(&s, now + SEC) && s.lanes[phone].trial_due);
+    let mut out = Acts::default();
+    fresh(&mut s, now + SEC);
+    s.schedule(&mut out, now + SEC);
+    assert_eq!(spread_of(&s), [1]);
+    let back = now + BAR;
+    fresh(&mut s, back);
+    s.schedule(&mut out, back);
+    assert_eq!(spread_of(&s), [1, 3]);
+    assert!(on(&s, back) && on(&s, back + trial - 1) && !on(&s, back + trial));
+    assert_eq!(s.bulk_lanes(back, 1400).collect::<Vec<_>>(), [wifi, phone]);
+    // Suspect for a moment ten seconds on, and back: its share again at once.
+    let (t1, t2) = (back + 10 * SEC, back + 10 * SEC + 100 * MS);
+    for (t, state, spread) in [(t1, State::Suspect, vec![1]), (t2, State::Up, vec![1, 3])] {
+        fresh(&mut s, t);
+        s.lanes[phone].state = state;
+        s.schedule(&mut out, t);
+        assert_eq!(spread_of(&s), spread);
+    }
+    assert!(!on(&s, t2));
+    s.lanes[wifi].q_bytes = 1 << 20;
+    assert_eq!(s.bulk_lanes(t2, 1400).collect::<Vec<_>>(), [phone]);
+}
+
+/// What a lane on trial holds is copies of what another lane carried, dropped when it leaves.
+/// Not when it was the whole spread: it took the packets themselves, and those are rewound as
+/// any suspect lane's are.
+#[test]
+fn a_trial_lane_that_carried_alone_is_rewound() {
+    let now = 30 * SEC;
+    let (wifi, phone) = (ix(1), ix(3));
+    let mut s = spreading(now);
+    set_spread(&mut s, &[3]);
+    s.lanes[wifi].bar_until = now + BAR;
+    let p = &mut s.lanes[phone];
+    (p.trial_until, p.state, p.last_echo, p.acked) = (now + SEC, State::Suspect, now - 150 * MS, 101);
+    packets(&mut s, phone, 100, 10, now - 250 * MS, false);
+    packets(&mut s, phone, 110, 3, now - MS, true);
+    let mut out = Acts::default();
+    s.schedule(&mut out, now);
+    assert_eq!((spread_of(&s), s.rewinds), (vec![2], 1));
+    let mut got = sent(&out, peer(2));
+    got.extend(s.lanes[ix(2)].q.iter().map(|p| p.c));
+    got.sort_unstable();
+    assert_eq!(got, (102..113).collect::<Vec<_>>());
+}
+
 /// While blind (§11.4) the spread is the blind pair, and a lane that leaves it takes its queue
 /// along, unrewound.
 #[test]
@@ -467,15 +569,16 @@ fn joining_lane_is_taken_first() {
     }
 }
 
-/// §14.2, earliest arrival: newest OWD + 2 × dev + (queued bytes + size) ÷ pace, a lane other
+/// §14.2, earliest arrival: newest OWD + 2 × dev + (queued bytes + size) ÷ rate, a lane other
 /// than the fastest winning by ECF_MARGIN.
 #[test]
 fn earliest_arrival() {
     let now = 30 * SEC;
     let (wifi, phone) = (ix(1), ix(3));
     let mut s = spreading(now);
-    // Both pace at PACE_FLOOR (nothing offered), so 1,400 bytes take 2.24 ms; Wi-Fi's newest OWD
-    // is 34 ms, the iPhone's 47.
+    // Both at PACE_FLOOR, where bandwidth starts a lane, so 1,400 bytes take 2.24 ms; Wi-Fi's
+    // newest OWD is 34 ms, the iPhone's 47.
+    (s.lanes[wifi].rate, s.lanes[phone].rate) = (PACE_FLOOR, PACE_FLOOR);
     assert_eq!(s.earliest(now, 1400), Some(wifi));
     s.lanes[wifi].q_bytes = 8_900; // 34 + 16.48 ms against 49.24: the iPhone wins by 1.24 ms
     assert_eq!(s.earliest(now, 1400), Some(phone));

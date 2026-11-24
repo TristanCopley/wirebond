@@ -249,7 +249,7 @@ A link offers at most `MAX_CANDS` (4) candidates: its local addresses and its ST
 
 ### 9.4 Punching and validation
 
-- **Punching:** both sides probe every candidate pair every `PROBE_PUNCH` (200 ms) for `PUNCH_FOR` (5 s) after any link or candidate change, a wake, or a new control channel. At most one round per peer per `PUNCH_GAP` (5 s).
+- **Punching:** both sides probe every candidate pair every `PROBE_PUNCH` (200 ms) for `PUNCH_FOR` (5 s) after any link or candidate change, a wake, or a new control channel. At most one round per peer per `PUNCH_GAP` (5 s). While data flows and a direct lane is not up, a new round begins when one ends: a pair that never validated has no return address, so only a round probes it, and a path that opens late is found this way.
 - **Validation:** a lane carries data only once validated. An echo must return the challenge of a probe sent to that address (§11.2). Until then, an address gets at most `VALIDATE_AMP` (3×) the bytes received from it.
 
 ## 10. Security
@@ -325,8 +325,8 @@ Overhead is 11 + 6 + 16 = **33 bytes**, plus 28 (IPv4/UDP) or 48 (IPv6/UDP) for 
 | When | Probe |
 | --- | --- |
 | Data flowed within `IDLE_AFTER` (5 s) | every lane, every `PROBE_ACTIVE` (20 ms) |
-| Punching | every candidate pair, every 200 ms, for 5 s |
-| A client's channel down, no data flowing | as punching, round after round, until the channel is back or the bond is lost (§17) |
+| Punching | every candidate pair, every 200 ms, for 5 s; round after round while data flows and a direct lane is not up |
+| A client's channel down, no data flowing | one probe every `PROBE_CHAN_DOWN` (1 s) on the idle lane, from a probe at once, until the channel is back; a punch round once no echo came for 3 s (§17) |
 | Idle | one probe every `PROBE_IDLE` (25 s) on one direct lane; down after `IDLE_MISSES` (3) misses |
 
 ### 11.2 Probe and echo
@@ -399,9 +399,11 @@ Each lane has its own delay-based controller and token-bucket pacer.
 
 | Part | Rule |
 | --- | --- |
+| Pace | the lane's rate and nothing else. A performance lane has no rate until its first overuse and sends what it is given at once; a bandwidth lane starts at the floor |
 | Target queueing delay | max(`TARGET_FLOOR` 20 ms, `TARGET_DEV` 2 × dev, while app-limited) |
 | Overuse | loss ≥ `LOSS_OVERUSE` (2%) and ≥ `LOSS_MIN` (5) packets within `RATE_WINDOW`, or queueing above target |
-| On overuse | cut the rate, never below `BETA` (0.85) × the current rate |
+| On overuse | cut the rate to what the lane delivered, less the further its queue is past target, and at least to `BETA` (0.85) × the current rate |
+| Light loss (under 5%, no queueing above target) | cut no lower than twice the stream's rate: what the lane is offered in performance mode, what the spread's lanes are offered together in bandwidth mode |
 | Startup | × `STARTUP_GAIN` (1.25) per RTT while backlogged, until the first overuse |
 | Then | + `INCREASE_STEP` (1%) of rate per RTT |
 | Floor | `PACE_FLOOR` (5 Mbit/s) |
@@ -440,7 +442,7 @@ The mode belongs to the bond. The client sets it, and it applies in both directi
 
 ### 14.1 Performance (default)
 
-- **The spread:** one lane per bottleneck group that is up, validated, not suspect and not barred. In each group, the lane with the lowest base OWD. The mesh lane is in the spread only for a group with no usable direct lane: a direct lane is usable while it is validated and up or suspect, barred or not. While blind, and while no lane qualifies though echoes still arrive, the spread is the blind pair (§11.4).
+- **The spread:** one lane per bottleneck group that is validated, not barred, and up or suspect. In each group, an up lane before a suspect one, then the lane with the lowest base OWD. A suspect lane still answers, so it stays in the race: its copies lose while it stalls and win again from the first packet after. Taken out of the spread, it returned only a probe's round trip after it recovered, and the stream rode the slower lane alone until then; with hotel spikes of 10–50 ms every 2–5 s, more frames were late for that than for the spikes themselves (A1). A lane leaves the spread when it goes down (§11.4). The mesh lane is in the spread only for a group with no usable direct lane: a direct lane is usable while it is validated and up or suspect, barred or not. While blind, and while no lane qualifies though echoes still arrive, the spread is the blind pair (§11.4).
 - **Sending:** every packet of every flow goes on every lane of the spread.
   - Each lane's controller is offered the whole stream and drops its excess at its own pacer, so a lane too slow for the stream never holds the others back.
   - A lane that leaves the spread drops its queue.
@@ -465,9 +467,9 @@ The mesh lane is eligible only for a group with no usable direct lane (validated
 
 **Small flows** are copied (§13).
 
-**Leaving the spread.** A lane in overuse at `PACE_FLOOR` for `BANDWIDTH_FLOOR_HOLD` (500 ms) is barred for `BAR` (60 s). The bar doubles, up to `BAR_MAX` (10 min), while the lane keeps failing.
+**Leaving the spread.** A lane in overuse at `PACE_FLOOR` for `BANDWIDTH_FLOOR_HOLD` (500 ms) is barred for `BAR` (60 s). The bar doubles, up to `BAR_MAX` (10 min), while the lane keeps failing. A lane that returns to the spread from a bar is on trial for twice `BANDWIDTH_FLOOR_HOLD`: it carries a copy of every bulk packet and none alone, so what it loses while it is judged again is not lost, and the copies it holds are dropped if it leaves. Only that return is a trial: a lane that leaves for another reason later, suspect for a moment, has its share again when it comes back.
 
-**Rewind.** When a lane turns suspect, its unacknowledged packets from the last `REWIND_WINDOW` (300 ms, or its suspect timeout plus RTT if longer) are re-sent on the other eligible lanes. A packet's echoed `last_counter` marks it acknowledged.
+**Rewind.** When a lane turns suspect, its unacknowledged packets from the last `REWIND_WINDOW` (300 ms, or its suspect timeout plus RTT if longer) are re-sent on the other eligible lanes. A packet's echoed `last_counter` marks it acknowledged. A lane still in startup that takes them adds the suspect lane's delivery rate to its own, so it paces for the stream at once.
 
 ## 15. Reorder and delivery
 
@@ -505,7 +507,7 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 | Event | Behaviour |
 | --- | --- |
 | Anchor unreachable at start | No capture; traffic goes direct. Problem `anchor_unreachable`. Redial with backoff from `REDIAL_MIN` (1 s) to `REDIAL_MAX` (30 s). |
-| Bond lost | The channel down and no echo on any lane, each for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. The lanes' states do not decide it: an idle bond's lanes are dormant, never down. While its channel is down a client keeps its lanes probed (§11.1), so an idle bond is judged as a busy one is. An anchor frees a bond whose channel is down and from which no packet came, each for `FAIL_OPEN_AFTER`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
+| Bond lost | The channel down and no echo on any lane, each for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. The lanes' states do not decide it: an idle bond's lanes are dormant, never down. While its channel is down a client probes its idle lane every second (§11.1), so an idle bond is judged as a busy one is; when that lane has not answered for 3 s, a punch round probes every lane, so that one dead lane does not cost the bond. An anchor frees a bond whose channel has been down for `FAIL_OPEN_AFTER` and from which no packet came for `IDLE_MISSES` × `PROBE_IDLE` (75 s): it can see the channel go before the client does, and until then an idle client sends one probe per `PROBE_IDLE`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
 | Captive portal | On link up, and at every link scan while the link is marked captive, the node fetches `http://captive.apple.com/hotspot-detect.html` over that link. Anything but `Success` marks the link captive, and it carries no lane. If the bond is up through another link, the login page would go through the anchor, so status shows `captive_portal <link>`: run `wirebond client off`, log in, then `wirebond client <anchor>`. |
 | Sleep and wake | Wake detection (§11.4): re-punch, fresh estimates, keys kept. |
 | A link appears or vanishes | Rescan within 2 s, re-punch, recompute groups. |
@@ -585,12 +587,14 @@ wirebond run                               the daemon (started by the service ma
 
 ### 20.1 Local API
 
-**Where it listens**
+**Where it listens:** two Unix-domain sockets in the daemon's state directory (§22.4), on every OS; Windows has them since Windows 10 1803.
 
-| OS | Endpoint | Access |
+| Socket | For | Who may connect |
 | --- | --- | --- |
-| Unix | `/var/run/wirebond.sock` | owner root, group `wirebond`, mode 0660. Install adds the installing user to the group. |
-| Windows | `\\.\pipe\wirebond` | Administrators: read and write; the interactive user: read |
+| `status.sock` | reads: the status and the views | anyone on the device |
+| `ctl.sock` | changes | the service's owner only: root, or an administrator on Windows |
+
+Reading needs no rights, and a change needs the rights that installed the service (§19), so there is no group to join.
 
 **Protocol:** one JSON request and one JSON reply per line, at most 64 KiB. The verbs are those of the CLI.
 
@@ -670,6 +674,7 @@ Durations are monotonic. All constants live in `crates/core/src/consts.rs`.
 | `MAX_FLOWS`, `REORDER_SLOTS`, `FLOW_IDLE` | 4096, 2048, 60 s | per bond, per flow |
 | `PROBE_ACTIVE`, `PROBE_PUNCH`, `PUNCH_FOR`, `PUNCH_GAP` | 20 ms, 200 ms, 5 s, 5 s | §9, §11 |
 | `PROBE_IDLE`, `IDLE_AFTER`, `IDLE_MISSES` | 25 s, 5 s, 3 | idle cost: about 70 KB per bond per hour |
+| `PROBE_CHAN_DOWN` | 1 s | a client's idle lane while its channel is down (§17): about 1 MB per hour, on one lane, unmetered if there is one |
 | `ECHO_WINDOW`, `RTT_RING`, `ECHO_HISTORY`, `MAD_SAMPLES` | 2 s, 256, 8, 128 | §11 |
 | `EWMA_GAIN`, `DEV_WINDOW`, `MIN_WINDOW`, `RATE_WINDOW` | 1/8, 2 s, 10 s, 100 ms | §11.3 |
 | `SUSPECT_MIN`, `SUSPECT_DEV`, `LAG_FLOOR`, `LAG_JITTER` | 20 ms, 4, 10 ms, 3 | §11.4 |
@@ -733,6 +738,7 @@ Every role runs as a system service:
 - **Smoke test:** `<exe>.new version --json` must answer within `SMOKE_TIMEOUT` (10 s).
 - **Swap:** the new binary replaces the old atomically, after `UPDATE_IDLE` (10 min) without traffic.
 - **Healthy or rolled back:** the new version is good once it has been healthy for `UPDATE_HEALTHY` (60 s). Otherwise it is rolled back after `UPDATE_MAX_STARTS` (3) failed starts.
+- **Which version is newer:** a release is newer than an earlier release and than its own pre-releases. A pre-release (`v2.0.0-rc.2`) is newer only than an earlier pre-release, in semver's order: a device on a release candidate takes the next one, and a device on a release never takes one.
 - **Version skew:** a node whose peer runs a newer major version shows `peer_newer`.
 
 ### 22.4 Config
@@ -785,7 +791,7 @@ Scenarios run in netsim and, where marked, in the harness. They use 30 Mbit/s vi
 | A2 | Performance, the owner's recorded hotel jitter | as A1, and the worst frame at least 3× lower than the baseline's (mesh lane only) |
 | A3 | Performance, clean hotel | median within 1 ms of the hotel alone; no frame lost |
 | A4 | Bandwidth, both links clean, bulk TCP | throughput ≥ 0.9 × (hotel + phone) − overhead; reorder wait p99 ≤ base skew + 10 ms |
-| A5 | Either mode, hotel link pulled mid-stream | no gap over 130 ms; no flow ends |
+| A5 | Either mode, hotel link pulled mid-stream | no gap over 130 ms; no flow ends. In bandwidth mode the gap cannot be shorter than detecting the pulled lane takes: up to 127 ms on these links |
 | A6 | Either mode, the hotel drops full-size packets | traffic moves to the phone lane within 1 s; no flow ends |
 | A7 | Bond down for 10 s (harness) | fail open within `FAIL_OPEN_AFTER` + 1 s; capture back within 3 s of a lane validating |
 | A8 | Client → internet server through anchor NAT (harness) | TCP and UDP work, IPv4 and IPv6; a forged source from the client is dropped |

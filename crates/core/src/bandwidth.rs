@@ -2,13 +2,14 @@
 //! bottleneck group, by earliest arrival. Its spread, blind pair included, is also performance's
 //! (§14.1), which sends every packet on all of it (performance.rs).
 //!
-//! Eligible lanes are up (not suspect), validated and not barred; one per group, its lowest base
-//! OWD; the mesh lane only for a group with no usable direct lane; in bandwidth, within
-//! BANDWIDTH_SKEW_MAX of the fastest's base OWD and carrying at least a tenth of the fastest lane's
-//! rate. While blind (§11.4) the spread is the blind pair `two()`, paced, with no rewind and no
-//! bar; the normal rules resume when echoes return. A lane that turns suspect leaves the spread
-//! and, in bandwidth, its unacknowledged packets of the last REWIND_WINDOW are re-sent across the
-//! lanes that stay (rewind.rs).
+//! Eligible lanes are up, validated and not barred, and in performance also suspect ones, which
+//! still answer and so stay in the race (`Lane::eligible`); one per group, an up lane before a
+//! suspect one, then its lowest base OWD; the mesh lane only for a group with no usable direct
+//! lane; in bandwidth, within BANDWIDTH_SKEW_MAX of the fastest's base OWD and carrying at least a
+//! tenth of the fastest lane's rate. While blind (§11.4) the spread is the blind pair `two()`,
+//! paced, with no rewind and no bar; the normal rules resume when echoes return. In bandwidth a
+//! lane that turns suspect leaves the spread, and its unacknowledged packets of the last
+//! REWIND_WINDOW are re-sent across the lanes that stay (rewind.rs).
 
 use crate::lane::{Lane, LaneIx, State};
 use crate::performance::since;
@@ -24,7 +25,8 @@ impl Session {
     /// the lanes that join before any packet moves onto them (R2-04). The new spread is set first,
     /// so what a leaving lane hands on goes across it: in bandwidth a lane that turned suspect is
     /// rewound (§14.2), any other leaving lane's queue moves; in performance a leaving lane's queue
-    /// is dropped while another lane stays, as that lane carries the same packets.
+    /// is dropped while another lane stays, as that lane carries the same packets, and so is what
+    /// a lane on trial holds while another lane carried the packets themselves.
     pub(crate) fn schedule(&mut self, out: &mut dyn Out, now: Mono) {
         if !self.active {
             return;
@@ -57,7 +59,10 @@ impl Session {
         self.nspread = n;
         let to = keep;
         for &l in old.iter().filter(|l| !keep.contains(l)) {
-            if self.mode == Mode::Performance && n > 0 {
+            // What a lane on trial holds is copies, unless it took the packets themselves, the
+            // whole spread on trial (`bulk_lanes`): then they are its own to hand on.
+            let copies = self.lanes[l].on_trial(now) && self.earliest_of(now, old, 0) != Some(l);
+            if self.mode == Mode::Performance && n > 0 || copies {
                 self.rewind(out, now, l, &[]);
             } else if !blind && self.lanes[l].state == State::Suspect {
                 self.rewinds += 1;
@@ -92,14 +97,16 @@ impl Session {
                 self.bar(now, l);
             }
             let x = &self.lanes[l];
-            if !x.eligible(now) {
+            if !x.eligible(now, self.mode) {
                 continue;
             }
+            // Of a group's lanes, an up one before a suspect one, then the lower base OWD.
+            let rank = |x: &Lane| (x.state != State::Up, x.min_owd.get());
             if x.mesh {
                 mesh = Some(l);
             } else if let Ok(g) = usize::try_from(x.group)
                 && g < MAX_LINKS
-                && best[g].is_none_or(|b| x.min_owd.get() < self.lanes[b].min_owd.get())
+                && best[g].is_none_or(|b| rank(x) < rank(&self.lanes[b]))
             {
                 best[g] = Some(l);
             }
@@ -181,22 +188,43 @@ impl Session {
     }
 
     /// When a bulk packet of `size` bytes queued on `l` now would arrive, on the peer's clock:
-    /// l's newest echoed OWD + 2 × dev + (queued bytes + size) ÷ pace (§14.2). The newest OWD, not
+    /// l's newest echoed OWD + 2 × dev + (queued bytes + size) ÷ its rate (§14.2). The newest OWD, not
     /// the base OWD, since it carries the standing queue of the lane's path, which the base OWD
     /// does not see: by the base OWD alone, a lane whose path buffer holds 60 ms won packets that
     /// then arrived later than REORDER_MAX behind their gaps. 2 × dev covers the lane's jitter.
-    fn arrival(&mut self, now: Mono, l: LaneIx, size: usize) -> Mono {
-        let x = &mut self.lanes[l];
-        let wait = ((x.q_bytes + size) as f64 * 8e9 / x.pace(now)) as Mono;
+    /// Never, for a lane on trial: it is the earliest only if every lane is on trial.
+    fn arrival(&self, now: Mono, l: LaneIx, size: usize) -> Mono {
+        let x = &self.lanes[l];
+        if x.on_trial(now) {
+            return Mono::MAX;
+        }
+        let wait = ((x.q_bytes + size) as f64 * 8e9 / x.rate) as Mono;
         x.owd_now.saturating_add(x.dev.saturating_mul(2)).saturating_add(wait)
     }
 }
 
 impl Lane {
-    /// Up (not suspect), validated and not barred: the first rule of §14.1's spread and §14.2's
-    /// eligible lanes.
-    pub(crate) fn eligible(&self, now: Mono) -> bool {
-        self.state == State::Up && self.validated && now >= self.bar_until
+    /// Validated, not barred and up: the first rule of §14.1's spread and §14.2's eligible lanes.
+    /// In performance a suspect lane too: every lane of the spread carries every packet, so one
+    /// that stalls only loses the race, and it wins again from the first packet after the stall.
+    /// Taken out, it came back a probe's round trip after it recovered (`estimate.rs`), the
+    /// stream on the slower lane alone until then: with hotel spikes of 10–50 ms every 2–5 s,
+    /// more frames were late for that than for the spikes (A1; 644 against 233 on seed 8).
+    pub(crate) fn eligible(&self, now: Mono, mode: Mode) -> bool {
+        let answers = self.state == State::Up || mode == Mode::Performance && self.state == State::Suspect;
+        answers && self.validated && now >= self.bar_until
+    }
+
+    /// Back in the spread from a bar for less than twice BANDWIDTH_FLOOR_HOLD, the time the floor
+    /// rule needs to bar it again (§14.2): it carries a copy of every bulk packet, as a
+    /// performance lane does, and none alone (`bulk_lanes`, `arrival`), so what it loses is not
+    /// lost. Given its share of the stream at once, a lane that drops full-size packets lost
+    /// frames each time its bar ended (A6). Only that once (`take`): a lane that left for another
+    /// reason, suspect for a moment, has its share again as it returns. By `bars`, which never
+    /// falls, a lane barred once was on trial after every later return, and the other lanes
+    /// carried the whole stream alone each time.
+    pub(crate) fn on_trial(&self, now: Mono) -> bool {
+        now < self.trial_until
     }
 }
 

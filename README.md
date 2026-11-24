@@ -99,13 +99,71 @@ GitHub's CLI checks: `gh attestation verify wirebond-Linux-x86_64 --repo Tristan
 
 4. **Moonlight:** on the client, add the host at the anchor's bond address, **10.77.0.1**
    (**192.168.137.1** for a Windows anchor, whose Internet Connection Sharing fixes that subnet).
-   `wirebond status` prints that line while the bond is up. No ports to forward: traffic to the
-   anchor's mesh address stays on the mesh and is not bonded.
+   `wirebond status` prints that line while the bond is up. Sunshine's ports need no forwarding.
+   Not the anchor's mesh address: traffic to that stays on the mesh and is not bonded.
 
 Commands that change something need `sudo`, or an administrator PowerShell on Windows, where the
 commands are the same without `sudo`. Reading the status needs nothing. `sudo wirebond client off`
 stops the bond, and traffic goes direct again. Fedora and RHEL leave `/usr/local/bin` off sudo's
 PATH: there, run `sudo /usr/local/bin/wirebond …`.
+
+## Streaming a game with Moonlight and Sunshine
+
+What wirebond was made for: Sunshine on a PC at home, which is the anchor, and Moonlight on a
+laptop at a hotel, which is the client, with the hotel's Wi-Fi and a phone on USB as its two links.
+
+**Once, at home**
+
+1. Pair Moonlight with the PC as you normally would. Sunshine needs no change: it listens on every
+   address, the bond's included.
+2. Keep the mesh up on the PC with nobody signed in: in Tailscale, turn on "Run unattended" and turn
+   off the PC's key expiry. Note both devices' mesh addresses (`tailscale ip -4`): wirebond takes an
+   address wherever it takes a name, and an address needs no lookup from a hotel.
+3. Forward UDP port 7849 on the home router to the PC. Lanes are UDP between the client's links
+   and the anchor, and a phone carrier's address translation is of the kind a home router does not
+   let in unasked; with the port forwarded, the phone's lane reaches the anchor whatever the carrier
+   does. If the home line has IPv6, let UDP 7849 in to the PC there too.
+4. Know what the phone will carry. Performance mode sends the whole stream on every link: about
+   13.5 GB an hour at 30 Mbit/s, out of the phone's hotspot allowance. Moonlight's bitrate is the
+   lever.
+
+**At the hotel**
+
+1. Join the Wi-Fi and get through its sign-in page first, before the phone is plugged in. Under
+   the bond a browser's traffic leaves at the anchor and never meets that page.
+2. On the phone: Personal Hotspot on, cable in, "Trust This Computer".
+3. On a Mac, check two things in System Settings, Network. "Disable unless needed" on the iPhone USB
+   service must be off: with it on, macOS leaves the phone's link idle while Wi-Fi works, and the
+   bond has one link. And Wi-Fi stays above iPhone USB in the service order, so that whatever is
+   outside the bond prefers Wi-Fi.
+4. Start the bond and watch it:
+
+   ```sh
+   sudo wirebond client 100.x.y.z        # the anchor's mesh address
+   wirebond status --watch
+   ```
+
+   A lane through each link is `up` within a few seconds.
+5. In Moonlight, add the host at the address on status's `Moonlight:` line. It becomes one more
+   address of the PC you paired; nothing is paired again. 1080p at 120 FPS and 20 to 30 Mbit/s is
+   a good place to start.
+
+## When it does not work
+
+`wirebond status` lists what the daemon knows to be wrong under `problems`, each with its next
+step. The daemon's log is `wirebond.log` in its state directory: `/var/lib/wirebond` on Linux,
+`/Library/Application Support/wirebond` on macOS, `%ProgramData%\wirebond` on Windows.
+
+| What you see | Likely cause | What to do |
+| --- | --- | --- |
+| Status lists one link | The phone's link is not up | Hotspot on, cable in, "Trust"; on a Mac, "Disable unless needed" off |
+| The phone's lanes stay `punching` | The anchor's router does not let the carrier in | Forward UDP 7849 to the anchor |
+| `captive_portal` on a link | The hotel's sign-in ran out | `sudo wirebond client off`, sign in, start the bond again |
+| `mesh_captured`, and capture is removed | The mesh's own packets entered the bond: an exit node is on, or Tailscale restarted | Exit node off, then start the bond again |
+| Moonlight cannot reach the host | It is aimed at another address | Use the address on status's `Moonlight:` line. On the client, `curl http://<that address>:47989/serverinfo` prints XML when Sunshine answers |
+| The stream stutters | A link is late or losing | `wirebond status --watch` shows each lane's delay, loss and share. Lower Moonlight's bitrate |
+| No internet after the bond ended | Capture is still in place | `sudo wirebond client off` |
+| The phone's link turned slow | Its hotspot allowance is used up | The carrier's app says |
 
 ## What it does and does not promise
 

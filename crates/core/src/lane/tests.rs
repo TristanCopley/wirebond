@@ -11,7 +11,10 @@ use std::net::SocketAddr;
 use super::*;
 use crate::estimate::NO_MIN;
 use crate::pair::*;
-use crate::{Event, Link, LinkInfo, MS, MeshLane, PROBE_IDLE, PUNCH_FOR, PUNCH_GAP, SEC, TYPE_PROBE, VALIDATE_AMP};
+use crate::{
+    Event, Link, LinkInfo, MS, MeshLane, PROBE_CHAN_DOWN, PROBE_IDLE, PUNCH_FOR, PUNCH_GAP, SEC, TYPE_PROBE,
+    VALIDATE_AMP,
+};
 
 const fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
     SocketAddr::V4(std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(a, b, c, d), port))
@@ -383,6 +386,56 @@ fn idle_ticks() {
     c.lane_tick(&mut out, SEC + PROBE_IDLE, WIFI);
     assert!(out.0.is_empty());
     assert_eq!((c.lanes[WIFI].state, c.idle, c.lanes[PHONE].state), (State::Down, Some(PHONE), State::Up));
+}
+
+/// While its channel is down a client probes its idle lane every PROBE_CHAN_DOWN, from a probe
+/// at once, and no other lane: echoes are then all that says the anchor is still there (§17),
+/// and one small packet a second on an unmetered lane says it, where punch rounds on every lane
+/// cost megabytes an hour, the phone's included. The next idle lane takes over at that pace, and
+/// the pace is PROBE_IDLE again once the channel is back. An anchor only answers.
+#[test]
+fn a_client_without_its_channel_probes_its_idle_lane_every_second() {
+    let mut c = hotel_side(Role::Client);
+    c.tx.rid = 9; // the peer's key: without it no probe is sent
+    for l in [WIFI, PHONE] {
+        (c.lanes[l].peer, c.lanes[l].validated) = (Some(S_ETH), true);
+    }
+    c.go_idle(SEC);
+    assert_eq!((c.idle, c.lanes[WIFI].next_probe), (Some(WIFI), SEC + PROBE_IDLE));
+    let probes = |c: &mut Session, now: Mono| {
+        let mut out = Acts::default();
+        c.next = NEVER;
+        for l in c.lanes.ixs() {
+            c.lane_tick(&mut out, now, l);
+        }
+        out.0.len()
+    };
+    c.channel(2 * SEC, false);
+    assert_eq!((c.lanes[WIFI].next_probe, c.next), (2 * SEC, 2 * SEC));
+    assert_eq!(probes(&mut c, 2 * SEC), 1);
+    assert_eq!((c.lanes[WIFI].next_probe, c.next), (2 * SEC + PROBE_CHAN_DOWN, 2 * SEC + PROBE_CHAN_DOWN));
+    assert_eq!(probes(&mut c, 2 * SEC + PROBE_CHAN_DOWN - MS), 0);
+    c.lanes[WIFI].wait_seq = 0; // answered
+    assert_eq!(probes(&mut c, 3 * SEC), 1);
+    // Its third probe unanswered: the phone takes over, at the same pace.
+    let x = &mut c.lanes[WIFI];
+    (x.wait_seq, x.misses) = (x.tx_seq, 2);
+    assert_eq!(probes(&mut c, 4 * SEC), 0);
+    assert_eq!((c.idle, c.lanes[PHONE].next_probe), (Some(PHONE), 4 * SEC + PROBE_CHAN_DOWN));
+    assert_eq!(probes(&mut c, 5 * SEC), 1);
+    // The channel back: PROBE_IDLE from the next probe on.
+    c.channel(5 * SEC + MS, true);
+    assert_eq!(probes(&mut c, 6 * SEC), 1);
+    assert_eq!(c.lanes[PHONE].next_probe, 6 * SEC + PROBE_IDLE);
+    // An anchor has no idle lane: nothing changes for it.
+    let mut a = hotel_side(Role::Anchor);
+    a.tx.rid = 9;
+    for l in a.lanes.iter_mut() {
+        (l.peer, l.validated, l.state) = (Some(C_MESH), true, State::Up);
+    }
+    a.go_idle(SEC);
+    a.channel(2 * SEC, false);
+    assert_eq!((a.idle, probes(&mut a, 3 * SEC)), (None, 0));
 }
 
 #[test]

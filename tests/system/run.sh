@@ -761,9 +761,9 @@ perf() {
 	bonded
 	local p="client=${pid[client]},anchor=${pid[anchor]}" bond base f worse=
 	lanes_until "$name" 15 "every lane up" all || true
-	# A stream that starts as the lanes come up can run late in its first second, while no lane's
-	# rate is known yet (NOTES.md, Open 1): that start is reported here and not judged, and the
-	# judged run that follows is the bond in its stride.
+	# A stream that started as the lanes came up ran late in its first second while the pacer began
+	# every stream at PACE_FLOOR (NOTES.md, Closed). Its first 3 s are still reported apart and not
+	# judged; the judged run that follows is the bond in its stride.
 	measure "$C" video --to "$BOND_A4:48000" --mbps 30 --fps 120 --size "$FIT4" --duration 3 --pids "$p" \
 		--label "$name: the stream's first 3 s (informative)" || true
 	check "$name" measure "$C" video --to "$BOND_A4:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" \

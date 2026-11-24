@@ -91,12 +91,29 @@ fn name(os: &str, arch: &str) -> &'static str {
     }
 }
 
-/// Whether version `a` is newer than `b` (vX.Y.Z, with or without v; "dev" is never newer, and
-/// nothing is newer than it). A release is newer than its own pre-releases, so that a device
-/// running one still updates (R1-34), but a pre-release is never newer.
+/// Whether version `a` is newer than `b` (vX.Y.Z, with or without v, and with or without a
+/// pre-release after a hyphen; "dev" is never newer, and nothing is newer than it). A release is
+/// newer than its own pre-releases, so that a device running one still updates (R1-34). A
+/// pre-release is newer only than an earlier pre-release: a device on a release never takes one,
+/// and a device on a release candidate takes the next. Newer than nothing, a candidate left such
+/// a device on the one before, and `wirebond update` said it was up to date.
 pub fn newer(a: &str, b: &str) -> bool {
-    let (b, pre) = b.split_once('-').map_or((b, false), |(b, _)| (b, true));
-    matches!((version(a), version(b)), (Some(x), Some(y)) if x > y || (pre && x == y))
+    let parts = |s| {
+        let (core, pre) = str::split_once(s, '-').map_or((s, None), |(core, pre)| (core, Some(pre)));
+        Some((version(core)?, pre))
+    };
+    let (Some((x, p)), Some((y, q))) = (parts(a), parts(b)) else { return false };
+    match (p, q) {
+        (None, _) => x > y || x == y && q.is_some(),
+        (Some(_), None) => false,
+        (Some(p), Some(q)) => (x, pre(p)) > (y, pre(q)),
+    }
+}
+
+/// A pre-release's identifiers in semver's order: a number by its value and below any word, a
+/// word by its bytes, and more identifiers above fewer that are the same.
+fn pre(s: &str) -> Vec<(bool, u64, &str)> {
+    s.split('.').map(|i| i.parse().map_or((true, 0, i), |n| (false, n, ""))).collect()
 }
 
 /// Parses X.Y.Z after an optional v; printing it back rejects signs, leading zeros and suffixes.

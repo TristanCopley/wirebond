@@ -7,9 +7,10 @@
 //! (QUEUE_AGE) and never holds the others back. The receiver keeps the first copy (the replay
 //! window drops the rest), and its reorder buffer does not wait for a lagging lane's copy
 //! (`flow::release`, DUP_GRACE). No failover, rewind, trial or return: a lane that stalls simply
-//! loses the race, and one that leaves the spread drops its queue, whose packets the other lanes
-//! carry. Throughput is the best single lane's; latency and steadiness the best of the lanes per
-//! packet. The prototype: research_notes jitter_simulation.md, netsim's tests/jitter.rs.
+//! loses the race, suspect or not, until it goes down; and one that leaves the spread drops its
+//! queue, whose packets the other lanes carry. Throughput is the best single lane's; latency and
+//! steadiness the best of the lanes per packet. The prototype: research_notes
+//! jitter_simulation.md, netsim's tests/jitter.rs.
 
 use crate::lane::{Lane, LaneIx, State};
 use crate::session::Mode;
@@ -44,12 +45,19 @@ impl Session {
     }
 
     /// Where a bulk packet of `size` bytes goes now (§11), the first lane taking the packet itself
-    /// and the others a copy: every lane of the spread in performance, the earliest arrival in
-    /// bandwidth; none means every lane (`send_unpaced`).
+    /// and the others a copy: every lane of the spread in performance; in bandwidth the earliest
+    /// arrival, and a copy on each other lane on trial (`Lane::on_trial`); none means every lane
+    /// (`send_unpaced`).
     pub(crate) fn bulk_lanes(&mut self, now: Mono, size: usize) -> impl Iterator<Item = LaneIx> + use<> {
         let (mut ls, mut n) = (self.spread, self.nspread);
         if self.mode == Mode::Bandwidth {
+            let (spread, all) = (ls, n);
             (ls[0], n) = self.earliest(now, size).map_or((LaneIx::default(), 0), |l| (l, 1));
+            for &l in &spread[..all] {
+                if n > 0 && l != ls[0] && self.lanes[l].on_trial(now) {
+                    (ls[n], n) = (l, n + 1);
+                }
+            }
         }
         ls.into_iter().take(n)
     }
@@ -77,11 +85,12 @@ impl Session {
         (a, a.and_then(|a| self.best(|l| ok(l) && apart(l, &self.lanes[a]), lower)))
     }
 
-    /// Keeps bulk off `l` for BAR, doubling while it keeps failing, up to BAR_MAX (§11.2 rule 4).
+    /// Keeps bulk off `l` for BAR, doubling while it keeps failing, up to BAR_MAX (§11.2 rule 4);
+    /// when it next joins the spread it is on trial (`take`).
     pub(crate) fn bar(&mut self, now: Mono, l: LaneIx) {
         let l = &mut self.lanes[l];
         l.bar_until = now.saturating_add((BAR << l.bars.min(8)).min(BAR_MAX));
-        l.bars = (l.bars + 1).min(8);
+        (l.bars, l.trial_due) = ((l.bars + 1).min(8), true);
     }
 
     /// The slot of the heaviest bulk flow I send, if any (the first of equals): a flow I receive

@@ -194,7 +194,23 @@ fn newer_compares_versions() {
         ("v0.4.0", "v0.4.0-rc1", true),
         ("v0.4.1", "v0.4.0-rc1", true),
         ("v0.3.9", "v0.4.0-rc1", false),
-        ("v0.4.0-rc2", "v0.4.0-rc1", false),
+        // A device on a release candidate takes the next, by semver's order of the identifiers;
+        // a device on a release never takes one.
+        ("v0.4.0-rc2", "v0.4.0-rc1", true),
+        ("v2.0.0-rc.3", "v2.0.0-rc.2", true),
+        ("v2.0.0-rc.10", "v2.0.0-rc.9", true),
+        ("v2.0.0-rc.1.1", "v2.0.0-rc.1", true),
+        ("v2.0.0-rc.1", "v2.0.0-beta", true),
+        ("v2.0.0-rc", "v2.0.0-1", true),
+        ("v2.1.0-rc.1", "v2.0.0-rc.2", true),
+        ("v2.0.0", "v2.0.0-rc.3", true),
+        ("v2.0.0-rc.2", "v2.0.0-rc.2", false),
+        ("v2.0.0-rc.2", "v2.0.0-rc.3", false),
+        ("v2.0.0-rc.9", "v2.1.0-rc.1", false),
+        ("v2.0.0-rc.1", "v2.0.0", false),
+        ("v2.1.0-rc.1", "v2.0.0", false),
+        ("v2.0.x-rc.2", "v2.0.0-rc.1", false),
+        ("dev-rc.2", "v2.0.0-rc.1", false),
     ] {
         assert_eq!(newer(a, b), want, "newer({a:?}, {b:?})");
     }

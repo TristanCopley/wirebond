@@ -2,7 +2,8 @@
 # system.yml, then the executables, SHA256SUMS and a GitHub release. A manual run builds them and
 # keeps the assets as a workflow artifact, with no checks and no release. A manual run given a tag
 # publishes too: ci.yml's checks without netsim's full set, system.yml, then the release, whose tag
-# it makes at the commit it built. That is how a release candidate goes out while the full set fails.
+# it makes at the commit it built. That is how a release candidate goes out: by hand, in a third of
+# the time (the full set takes 25 to 45 minutes on a runner), where a pushed tag waits for it.
 # Once a release is out, the README's install lines are run against it on each OS.
 name: release
 

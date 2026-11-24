@@ -8,8 +8,8 @@ use crate::estimate::INF;
 use crate::lane::{Lane, LaneIx, State};
 use crate::session::{Mode, NEVER};
 use crate::{
-    BETA, BOND_BYTES, INCREASE_STEP, MAX_PACKET, MIN_WINDOW, MS, Mono, Out, PACE_BURST, PACE_FLOOR, QUEUE_AGE,
-    RATE_WINDOW, REWIND_SHARE, REWIND_WINDOW, STARTUP_GAIN, Session, TARGET_DEV, TARGET_FLOOR,
+    BANDWIDTH_FLOOR_HOLD, BETA, BOND_BYTES, INCREASE_STEP, MAX_PACKET, MIN_WINDOW, MS, Mono, Out, PACE_BURST,
+    PACE_FLOOR, QUEUE_AGE, RATE_WINDOW, REWIND_SHARE, REWIND_WINDOW, STARTUP_GAIN, Session, TARGET_DEV, TARGET_FLOOR,
 };
 
 /// A lane that delivers this share of its offered rate is not cut below that rate.
@@ -27,11 +27,19 @@ impl Session {
     /// Readies `l` to carry bulk: a rate learned within MIN_WINDOW still holds, an older one
     /// restarts (§9). Callers take a lane before any packet moves onto it (R2-04: rewind, shift
     /// and enqueue set `bulk_at`, which would make a stale rate look fresh).
+    ///
+    /// A lane taken for the first time since its bar ended is on trial for twice
+    /// BANDWIDTH_FLOOR_HOLD (§14.2, `Lane::on_trial`). The blind pair, which takes a lane still
+    /// barred, does not use the trial up.
     pub(crate) fn take(&mut self, now: Mono, l: LaneIx) {
         if now.saturating_sub(self.lanes[l].bulk_at) >= MIN_WINDOW {
             self.restart(now, l);
         }
-        self.lanes[l].took_at = now;
+        let x = &mut self.lanes[l];
+        x.took_at = now;
+        if x.trial_due && now >= x.bar_until {
+            (x.trial_due, x.trial_until) = (false, now.saturating_add(2 * BANDWIDTH_FLOOR_HOLD));
+        }
     }
 
     /// Runs the rate controller on a fresh echo of `l` (§9); `lossy`: the echo's loss window lost
@@ -49,11 +57,17 @@ impl Session {
         // gone) leaves this one alone at once.
         let late = |x: &Lane| x.state == State::Suspect && now.saturating_sub(x.last_echo) <= x.rtt;
         let alone = bandwidth && self.spread() == [l] && !self.lanes.iter().any(|x| x.validated && !x.mesh && late(x));
+        // What the spread's lanes are offered together: in bandwidth, where they share it, the
+        // stream.
+        let shared: f64 = self.spread().iter().map(|&x| self.lanes[x].offered.peek(now, RATE_WINDOW)).sum();
         let ln = &mut self.lanes[l];
         let target = TARGET_FLOOR.max((TARGET_DEV * ln.dev_app as f64) as Mono);
         ln.over_n = if ln.qd > target { ln.over_n.saturating_add(1) } else { 0 };
         let rtt = if ln.rtt != 0 { ln.rtt } else { RATE_WINDOW };
         let o = ln.offered.rate(now, RATE_WINDOW);
+        // The stream's rate, which any lane may have to carry whole; a performance lane is offered
+        // it.
+        let stream = if bandwidth { shared } else { o };
         if ln.over_n >= 2 || lossy {
             (ln.last_over, ln.clean_at) = (now, NEVER);
             // Only a lane carrying bulk now, whose delivery sample covers that bulk, is cut: one
@@ -62,11 +76,15 @@ impl Session {
             // drains that queue in a few RTTs, so within 3 RTTs only a queue still growing is cut
             // again; bandwidth runs its lanes at bandwidth and keeps the spec's once per RTT. Light
             // loss without a queue is the link's own (a radio's random loss), which no lower rate
-            // cures: it keeps the lane's room, twice its offered rate. And a lane that delivers
-            // what it is offered is not cut below that: its queue came from a burst above it (a
-            // takeover, a rate raised past bandwidth), and a lower rate would only hold the stream
-            // in the pacer. Heavy loss, a policer's, and a lane too small for its stream deliver
-            // less, and are cut to delivery (notes/core.md 49, 52).
+            // cures: it keeps the lane's room, twice the stream's rate. By twice its own offered
+            // rate, a bandwidth lane that earliest arrival gave next to nothing fell to PACE_FLOOR
+            // and out of startup, and when the lane that carried the stream was pulled it climbed
+            // from there by STARTUP_GAIN per RTT while its pacer aged the stream out, a gap of
+            // 620 ms (A5, A6). And a lane that delivers what it is offered is not cut below that:
+            // its queue came from a burst above it (a takeover, a rate raised past bandwidth), and
+            // a lower rate would only hold the stream in the pacer. Heavy loss, a policer's, and a
+            // lane too small for its stream deliver less, and are cut to delivery (notes/core.md
+            // 49, 52).
             let due = now - ln.took_at >= rtt + RATE_WINDOW
                 && now - ln.last_cut >= rtt
                 && (bandwidth || now - ln.last_cut >= 3 * rtt || ln.qd > ln.cut_qd);
@@ -76,7 +94,7 @@ impl Session {
                 // Go's `loss <= 1 − TrialPass` against the exact constant 0.05: f64's 1 − 0.95 is
                 // 0.050000000000000044, and `<` gives Go's answer for every loss 1 − got/sent.
                 if ln.over_n < 2 && ln.loss < 1.0 - CARRIES {
-                    r = r.max(ln.rate.min(2.0 * o));
+                    r = r.max(ln.rate.min(2.0 * stream));
                 } else if ln.delivery >= CARRIES * o {
                     r = r.max(ln.rate.min(o));
                 }
@@ -93,7 +111,8 @@ impl Session {
         // drifts above what it carries [Congestion 3]: in bandwidth while offered is at or above it
         // (bandwidth offers a lane more the faster it paces, so more would only feed itself); in
         // performance, whose offered rate is the stream's, also while a backlog waits and the rate is
-        // under the 2 × offered the pacer would use. By STARTUP_GAIN in startup; back up to
+        // under twice the offered rate: a stream comes in bursts, a frame at a time, and a rate
+        // nearer the stream's than that holds each burst in the pacer. By STARTUP_GAIN in startup; back up to
         // regain once startup's overshoot has drained (its cut was sized by a queue that grew
         // while the overuse was in flight, and left the lane far below what it had delivered); in
         // performance once any cut has drained the queue (qd under half the target), so that a lane
@@ -138,6 +157,13 @@ impl Session {
     /// Sends l's queue as its token bucket allows, drops packets older than QUEUE_AGE, asks for a
     /// tick when the head is due, and tracks `load_at` (§9, §11.1 rule 2).
     ///
+    /// The pace is the lane's rate and nothing else (§12): a lane with no known limit sends what it
+    /// is given at once. A cap at twice the rate offered over the last RATE_WINDOW stood here
+    /// before: it met a stream's first frames with an empty window, paced them from PACE_FLOOR and
+    /// held them up to 25 ms each way, and spread every later frame over about 3 ms, on every lane
+    /// alike, so the bond ran behind the bare path it is promised never to be worse than. A path
+    /// that cannot take a burst says so in loss or delay, and from that cut on its lane has a rate.
+    ///
     /// The head packet goes once the bucket holds its bytes, and credit accrues at pace up to
     /// PACE_BURST plus one full-size packet: the Tick comes at the first millisecond after the head
     /// is due, so a bucket of PACE_BURST alone lost the credit left after the last packet that fit
@@ -148,12 +174,14 @@ impl Session {
     /// alone is no load, since paced bursts keep one at any rate near the offered (notes/core.md
     /// 35, 41).
     pub(crate) fn drain(&mut self, out: &mut dyn Out, now: Mono, l: LaneIx) {
-        let pace = self.lanes[l].pace(now) / 8.0; // bytes per second
+        let pace = self.lanes[l].rate / 8.0; // bytes per second; INF while the lane is unlimited
         // The most credit the bucket holds: PACE_BURST at pace, at least one full-size packet,
         // plus one full-size packet (notes/core.md 46, 52a). Seconds are Go's Duration.Seconds.
         let burst = (pace * (PACE_BURST as f64 / 1e9)).max(MAX_PACKET as f64) + MAX_PACKET as f64;
         let ln = &mut self.lanes[l];
-        ln.tokens = (ln.tokens + pace * ((now - ln.filled) as f64 / 1e9)).min(burst);
+        // An unlimited pace is unlimited credit, also over no time at all, where INF × 0 is NaN.
+        let credit = if pace.is_finite() { pace * ((now - ln.filled) as f64 / 1e9) } else { pace };
+        ln.tokens = (ln.tokens + credit).min(burst);
         ln.filled = now;
         while let Some(p) = self.lanes[l].q.front().copied() {
             let ln = &self.lanes[l];
@@ -211,14 +239,6 @@ impl Session {
                 self.pool.put(b);
             }
         }
-    }
-}
-
-impl Lane {
-    /// The pacer rate, bits per second: min(rate, max(2 × offered, PACE_FLOOR)) (§9). Rolls the
-    /// `offered` meter, hence `&mut`.
-    pub(crate) fn pace(&mut self, now: Mono) -> f64 {
-        self.rate.min((2.0 * self.offered.rate(now, RATE_WINDOW)).max(PACE_FLOOR))
     }
 }
 

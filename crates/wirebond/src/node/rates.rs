@@ -60,13 +60,16 @@ impl Rates {
 
     /// How much lane `l`'s counters grew over the last `span`, and over how long exactly: since
     /// the newest sample at least `span` old, or the oldest while the history is shorter. A lane
-    /// that sample does not have was made after it, so it grew from nothing. None without a
-    /// sample older than `now`.
+    /// that sample does not have was made after it, so it grew from nothing; and so did one whose
+    /// counter is below the sample's: the engine built the lane again under its id (its socket,
+    /// address or the peer's candidates changed), and its counters began again. Taken as no
+    /// growth, a working lane showed no share and no first arrivals for the minute after. None
+    /// without a sample older than `now`.
     pub fn over(&self, now: Mono, span: Mono, l: &LaneStatus) -> Option<(Mono, Counts)> {
         let old = self.samples.iter().rev().find(|(at, _)| now - at >= span).or(self.samples.front())?;
         let (at, lanes) = old;
         let was = lanes.iter().find(|(id, _)| *id == l.id).map_or(Counts::default(), |(_, c)| *c);
-        let (is, grew) = (Counts::of(l), |a: u64, b: u64| a.saturating_sub(b));
+        let (is, grew) = (Counts::of(l), |a: u64, b: u64| if a >= b { a - b } else { a });
         let d = Counts {
             tx: grew(is.tx, was.tx),
             rx: grew(is.rx, was.rx),
@@ -116,9 +119,9 @@ mod tests {
         assert!(r.samples.len() <= (MINUTE / EVERY) as usize + 2, "{} samples kept", r.samples.len());
     }
 
-    /// A lane made after the old sample grew from nothing; one whose counters began again (a new
-    /// session under the same id) shows nothing rather than a negative rate; a young history
-    /// gives what it has.
+    /// A lane made after the old sample grew from nothing; one whose counters began again (the
+    /// lane built again under its id) grew by what it has counted since; a young history gives
+    /// what it has.
     #[test]
     fn new_lanes_and_short_histories() {
         let mut r = Rates::default();
@@ -126,8 +129,9 @@ mod tests {
         r.sample(SEC, &[lane(257, 2000, 2000, 0, 0)]);
         let (span, d) = r.over(SEC, MINUTE, &lane(513, 500, 0, 3, 1)).unwrap();
         assert_eq!((span, d), (SEC, Counts { tx: 500, rx: 0, firsts: 3, rescues: 1 }));
+        // Lane 257 built again: what it has counted since is its growth.
         let (_, d) = r.over(SEC + 1, NOW, &lane(257, 10, 10, 0, 0)).unwrap();
-        assert_eq!(d.bytes(), 0);
+        assert_eq!(d.bytes(), 20);
         assert_eq!(Counts::mbps(1_000_000, 0), 0.0);
     }
 }
