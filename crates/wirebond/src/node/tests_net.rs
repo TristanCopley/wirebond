@@ -448,10 +448,10 @@ fn a_client_of_an_anchor_without_egress_leaves_dns_alone() {
 /// and asks the anchor's relay. Bonds whose terms did not change are left alone.
 #[test]
 fn egress_that_appears_later_reopens_the_bonds_with_it() {
-    let acfg = Config { role: Role::Anchor, allow: vec![ip(74, 10).to_string()], ..Config::default() };
-    let ccfg = Config { role: Role::Client, anchor: Some(ip(74, 20).to_string()), ..Config::default() };
-    let mut a = node("xanth", &[("eth0", ip(74, 2))], ip(74, 20), acfg);
-    let mut c = node("mac", &[("lo-a", ip(74, 1))], ip(74, 10), ccfg);
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(75, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(75, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(75, 2))], ip(75, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(75, 1))], ip(75, 10), ccfg);
     a.knobs.lock().unwrap().egress_err = Some("sharing is off".into());
     run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
     assert_eq!(c.d.capture.as_ref().map(|cap| cap.routes), Some(host::Routes::BondOnly));
