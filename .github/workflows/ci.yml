@@ -75,7 +75,7 @@ jobs:
           ALLOWED: >-
             aead aes aes-gcm block-buffer cfg-if cipher cmov const-oid cpubits cpufeatures
             crypto-common ctr ctutils digest getrandom ghash hmac hybrid-array inout itoa libc
-            memchr polyval proc-macro2 quote r-efi rand_core serde serde_core serde_derive
+            memchr polyval proc-macro2 quote r-efi serde serde_core serde_derive
             serde_json sha2 socket2 syn typenum unicode-ident universal-hash windows-link
             windows-sys zeroize zmij
         run: |

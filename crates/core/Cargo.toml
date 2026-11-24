@@ -12,8 +12,10 @@ autotests = false
 
 [dependencies]
 # zeroize: superseded and dropped keys are zeroed (§7.2), with the AES round keys and GHASH key, and
-# the HMAC state and output that derive the next epoch's key.
-aes-gcm = { version = "0.11.1", features = ["zeroize"] }
+# the HMAC state and output that derive the next epoch's key. aes-gcm's default getrandom is left
+# out: core draws no randomness (SPEC §4.2), so it has no OS random source to link. alloc is for
+# tests/pair.rs's Aead::decrypt.
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 hmac = { version = "0.13.0", features = ["zeroize"] }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = { version = "0.11.0", features = ["zeroize"] }
