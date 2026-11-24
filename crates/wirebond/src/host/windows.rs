@@ -8,7 +8,7 @@
 use std::ffi::{OsStr, c_void};
 use std::fs::OpenOptions;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::os::windows::io::{AsRawHandle, AsRawSocket};
 use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt};
 use std::path::{Path, PathBuf};
@@ -51,27 +51,16 @@ const ENVIRONMENT: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Env
 /// operationally up, point-to-point for PPP, tunnel and ATM, and IPv4-mapped addresses unmapped.
 /// Wi-Fi is IfType 71 (IF_TYPE_IEEE80211) in the same listing.
 pub fn ifaces() -> io::Result<Vec<Iface>> {
-    let (mut buf, mut len) = (Vec::<u64>::new(), 15_000u32); // u64: the records are 8-aligned
     let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-    let r = loop {
-        buf.resize(len.div_ceil(8) as usize, 0);
-        let p = buf.as_mut_ptr().cast();
-        // SAFETY: p holds len bytes, aligned for IP_ADAPTER_ADDRESSES_LH; len is in and out.
-        match unsafe { GetAdaptersAddresses(AF_UNSPEC.into(), flags, null(), p, &mut len) } {
-            ERROR_BUFFER_OVERFLOW => continue,
-            r => break r,
-        }
+    let list = match adapters(flags) {
+        Err(e) if e.raw_os_error() == Some(ERROR_NO_DATA as i32) => return Ok(Vec::new()),
+        r => r?,
     };
-    if r == ERROR_NO_DATA {
-        return Ok(Vec::new());
-    }
-    win32(r)?;
-    let (mut ifs, mut p) = (Vec::new(), buf.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>());
-    // SAFETY: GetAdaptersAddresses wrote a list of records into buf, which outlives the loop: their
-    // links, NUL-terminated names and addresses point into buf, each address is the SOCKADDR_IN or
-    // SOCKADDR_IN6 its family says, and IfIndex is the union arm the API fills.
-    unsafe {
-        while let Some(a) = p.as_ref() {
+    let mut ifs = Vec::new();
+    for a in list.iter() {
+        // SAFETY: the name is NUL-terminated and the unicast records lie in the list's buffer, each
+        // address as large as its family's; IfIndex is the union arm the API fills.
+        unsafe {
             let (name, index) = (a.FriendlyName, a.Anonymous1.Anonymous.IfIndex);
             let n = (0..).take_while(|&i| *name.add(i) != 0).count();
             let mut ifc = Iface {
@@ -86,25 +75,57 @@ pub fn ifaces() -> io::Result<Vec<Iface>> {
             };
             let mut u = a.FirstUnicastAddress;
             while let Some(ua) = u.as_ref() {
-                let sa = ua.Address.lpSockaddr;
-                match (*sa).sa_family {
-                    AF_INET => {
-                        let a4 = &*sa.cast::<SOCKADDR_IN>();
-                        ifc.addrs.push(a4.sin_addr.S_un.S_addr.to_ne_bytes().into());
-                    }
-                    AF_INET6 => {
-                        let a6 = Ipv6Addr::from((*sa.cast::<SOCKADDR_IN6>()).sin6_addr.u.Byte);
-                        ifc.addrs.push(a6.to_canonical());
-                    }
-                    _ => {}
-                }
+                ifc.addrs.extend(sockaddr_ip(ua.Address.lpSockaddr).map(|ip| ip.to_canonical()));
                 u = ua.Next;
             }
             ifs.push(ifc);
-            p = a.Next;
         }
     }
     Ok(ifs)
+}
+
+/// What GetAdaptersAddresses wrote: a list of IP_ADAPTER_ADDRESSES_LH records, in u64s because the
+/// records are 8-aligned. Their links, names, address lists and addresses all point into it.
+struct Adapters(Vec<u64>);
+
+/// The adapters GetAdaptersAddresses lists with `flags`, in a buffer grown until they fit; else its
+/// error, ERROR_NO_DATA when there are none.
+fn adapters(flags: u32) -> io::Result<Adapters> {
+    let (mut buf, mut len) = (Vec::<u64>::new(), 15_000u32);
+    loop {
+        buf.resize(len.div_ceil(8) as usize, 0);
+        // SAFETY: buf holds len bytes, rounded up to whole u64s, aligned for IP_ADAPTER_ADDRESSES_LH.
+        // len is in and out: ERROR_BUFFER_OVERFLOW sets it to the size needed, and the loop grows
+        // buf to that before it asks again.
+        match unsafe { GetAdaptersAddresses(AF_UNSPEC.into(), flags, null(), buf.as_mut_ptr().cast(), &mut len) } {
+            ERROR_BUFFER_OVERFLOW => continue,
+            r => return win32(r).map(|()| Adapters(buf)),
+        }
+    }
+}
+
+impl Adapters {
+    /// The records, in the API's order.
+    fn iter(&self) -> impl Iterator<Item = &IP_ADAPTER_ADDRESSES_LH> {
+        let first = self.0.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        // SAFETY: a successful call wrote the first record at the start of the buffer, and each
+        // record's Next is the next one in it, or null after the last. self owns the buffer and
+        // never changes it, so every record stays valid while self is borrowed.
+        std::iter::successors(unsafe { first.as_ref() }, |a| unsafe { a.Next.as_ref() })
+    }
+}
+
+/// The address at `sa`, a SOCKADDR_IN or SOCKADDR_IN6 as its family says; None for another
+/// family. Safety: `sa` points at a socket address as large as its family's.
+unsafe fn sockaddr_ip(sa: *const SOCKADDR) -> Option<IpAddr> {
+    // SAFETY: the caller's.
+    unsafe {
+        match (*sa).sa_family {
+            AF_INET => Some(IpAddr::from((*sa.cast::<SOCKADDR_IN>()).sin_addr.S_un.S_addr.to_ne_bytes())),
+            AF_INET6 => Some(IpAddr::from((*sa.cast::<SOCKADDR_IN6>()).sin6_addr.u.Byte)),
+            _ => None,
+        }
+    }
 }
 
 /// Pins a link's socket with IP_UNICAST_IF or IPV6_UNICAST_IF, turns the UDP resets off and asks
@@ -690,7 +711,7 @@ mod v2 {
     use windows_sys::core::GUID;
 
     use super::super::net::{Capture, Egress, EgressOn, Routes, Share, TunConfig};
-    use super::{CREATE_NO_WINDOW, wide, win32};
+    use super::{CREATE_NO_WINDOW, adapters, sockaddr_ip, wide, win32};
 
     /// The adapter's name, tunnel type and fixed GUID: Windows keeps one network profile for it.
     const NAME: &str = "wirebond";
@@ -1198,42 +1219,24 @@ mod v2 {
     /// The first DNS server of the default-route adapter, from GetAdaptersAddresses (§7), port 53.
     pub fn upstream_resolver() -> io::Result<SocketAddr> {
         let index = best_index().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no default route"))?;
-        let (mut buf, mut len) = (Vec::<u64>::new(), 15_000u32);
         let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_UNICAST;
-        let r = loop {
-            buf.resize(len.div_ceil(8) as usize, 0);
-            // SAFETY: buf holds len bytes, aligned for IP_ADAPTER_ADDRESSES_LH; len is in and out.
-            match unsafe { GetAdaptersAddresses(AF_UNSPEC.into(), flags, null(), buf.as_mut_ptr().cast(), &mut len) } {
-                ERROR_BUFFER_OVERFLOW => continue,
-                r => break r,
-            }
-        };
-        win32(r)?;
-        let mut p = buf.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
-        // SAFETY: as in super::ifaces: the records and their DNS server lists point into buf.
-        unsafe {
-            while let Some(a) = p.as_ref() {
+        let list = adapters(flags)?;
+        for a in list.iter() {
+            // SAFETY: as in super::ifaces: IfIndex is the union arm the API fills, and the DNS
+            // server records lie in the list's buffer, each address as large as its family's.
+            unsafe {
                 if a.Anonymous1.Anonymous.IfIndex == index || a.Ipv6IfIndex == index {
                     let mut d = a.FirstDnsServerAddress;
                     while let Some(s) = d.as_ref() {
-                        let sa = s.Address.lpSockaddr;
-                        let ip = match (*sa).sa_family {
-                            AF_INET => {
-                                Some(IpAddr::from((*sa.cast::<SOCKADDR_IN>()).sin_addr.S_un.S_addr.to_ne_bytes()))
-                            }
-                            AF_INET6 => Some(IpAddr::from((*sa.cast::<SOCKADDR_IN6>()).sin6_addr.u.Byte)),
-                            _ => None,
-                        };
                         // A site-local fec0::/10 server is Windows' placeholder for none.
-                        if let Some(ip) =
-                            ip.filter(|ip| !matches!(ip, IpAddr::V6(a) if a.segments()[0] & 0xffc0 == 0xfec0))
-                        {
+                        let placeholder =
+                            |ip: &IpAddr| matches!(ip, IpAddr::V6(a) if a.segments()[0] & 0xffc0 == 0xfec0);
+                        if let Some(ip) = sockaddr_ip(s.Address.lpSockaddr).filter(|ip| !placeholder(ip)) {
                             return Ok(SocketAddr::new(ip, 53));
                         }
                         d = s.Next;
                     }
                 }
-                p = a.Next;
             }
         }
         Err(io::Error::new(io::ErrorKind::NotFound, "the default route's adapter has no DNS server"))
