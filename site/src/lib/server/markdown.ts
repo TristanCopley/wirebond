@@ -14,11 +14,11 @@ const REPO = 'https://github.com/TristanCopley/wirebond';
 const REF = process.env.GITHUB_SHA || 'main';
 
 /** A repository file on GitHub, at the revision this site is built from. */
-export function blob(file: string): string {
+function blob(file: string): string {
 	return `${REPO}/blob/${REF}/${file}`;
 }
 
-export type Heading = { depth: number; text: string; id: string };
+type Heading = { depth: number; text: string; id: string };
 export type Doc = { title: string; html: string; toc: Heading[]; url: string };
 
 type Name = 'README.md' | 'SPEC.md';
@@ -42,7 +42,7 @@ function escape(text: string): string {
 		.replace(/'/g, '&#39;');
 }
 
-export function plain(tokens: Token[]): string {
+function plain(tokens: Token[]): string {
 	return tokens
 		.map((t) => ('tokens' in t && t.tokens ? plain(t.tokens) : 'text' in t ? t.text : ''))
 		.join('');
