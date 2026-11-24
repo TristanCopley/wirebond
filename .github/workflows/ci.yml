@@ -122,8 +122,8 @@ jobs:
           done <<< "$entries"
       - name: cargo test, with crates/load's loopback tests of the echo, UDP, video and TCP
         run: cargo test --workspace --exclude wirebond-netsim --locked
-      - name: cargo test netsim's PR seed set, in a release build since it is heavy
-        run: cargo test -p wirebond-netsim --release --locked
+      - name: cargo test netsim's PR seed set, optimized (the sim profile) since it is heavy
+        run: cargo test -p wirebond-netsim --profile sim --locked
       - name: netsim's full acceptance set (SPEC §23.3)
         if: github.event_name == 'schedule' || inputs.long
         env:
