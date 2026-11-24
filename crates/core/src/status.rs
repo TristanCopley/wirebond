@@ -6,8 +6,7 @@ use crate::estimate::INF;
 use crate::flow::Flow;
 use crate::lane::LaneIx;
 use crate::{
-    FlowStatus, LaneOut, LaneStatus, MIN, Mono, Problem, REORDER_LANES, SMALL_WINDOW, STATUS_EVENTS, Session,
-    SessionStatus,
+    FlowStatus, LaneOut, LaneStatus, MIN, Mono, REORDER_LANES, SMALL_WINDOW, STATUS_EVENTS, Session, SessionStatus,
 };
 
 impl Session {
@@ -31,7 +30,6 @@ impl Session {
             flows_dropped: self.flows_dropped,
             bytes: self.pool.held(),
             last_auth: self.last_auth,
-            problems: self.problems(now),
             events: (self.nevents.saturating_sub(STATUS_EVENTS)..self.nevents)
                 .map(|i| self.events[i % STATUS_EVENTS].clone())
                 .collect(),
@@ -106,11 +104,6 @@ impl Session {
             _ if self.lanes[l].in_copy => "copies",
             _ => "standby",
         }
-    }
-
-    /// Problems the engine detects (§17).
-    pub(crate) fn problems(&self, _now: Mono) -> Vec<Problem> {
-        Vec::new() // 2.0: §17's problems are the daemon's; the engine raises none yet
     }
 }
 

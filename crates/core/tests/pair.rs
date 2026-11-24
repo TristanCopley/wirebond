@@ -759,7 +759,6 @@ fn status_shows_bulk_on_every_group() {
     // 10 Mbps for 3 s and 30 Mbps for 3 s of the last minute on the iPhone is 2 Mbps over it:
     // 0.9 GB/h, and a little more with the packets' overhead and the copies.
     assert!((0.85..=1.2).contains(&st.metered_gb_per_hour), "metered {:.2} GB/h", st.metered_gb_per_hour);
-    assert!(st.problems.is_empty(), "problems {:?}", st.problems);
     assert!(
         st.events.len() <= STATUS_EVENTS && st.bytes > 0 && st.bytes <= BOND_BYTES,
         "events {}, bytes {}",

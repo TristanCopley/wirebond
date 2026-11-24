@@ -295,7 +295,6 @@ pub struct SessionStatus {
     pub bytes: usize,
     /// Arrival of the newest authenticated packet; None if none yet.
     pub last_auth: Option<Mono>,
-    pub problems: Vec<Problem>,
     /// The last STATUS_EVENTS, oldest first.
     pub events: Vec<LogEvent>,
 }
@@ -360,15 +359,6 @@ pub struct FlowStatus {
     pub mbps: f64,
     /// Lanes that carried it in the last 100 ms, either direction.
     pub lanes: Vec<u16>,
-}
-
-/// A condition the engine detects; node adds the fix and command (§14.4).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Problem {
-    /// bulk_on_slower_lane or bulk_exceeds_every_lane.
-    pub code: &'static str,
-    /// For a person, with the numbers.
-    pub message: String,
 }
 
 /// One entry of a session's event log, such as "47998 moved Wi-Fi → iPhone (Wi-Fi lagging
