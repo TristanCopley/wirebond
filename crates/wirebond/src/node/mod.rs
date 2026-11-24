@@ -248,8 +248,6 @@ pub struct Daemon {
     name: String,
     /// Random per process (§16 hello).
     inst: u64,
-    /// The control port: PORT.
-    port: u16,
     /// Tests: loopback candidates count as usable.
     loopback: bool,
     /// Receive ids across every session (core's RidTable).
@@ -535,7 +533,6 @@ impl Daemon {
             plat,
             name,
             inst: getrandom::u64().unwrap_or(1),
-            port: PORT,
             loopback: false,
             rids: RidTable::new(),
             bonds: Vec::new(),
@@ -1575,11 +1572,7 @@ impl Daemon {
             .collect();
         let Some(peer) = self.bond_ref(bi).map(|b| b.peer_addr) else { return };
         let mesh = self.socks.iter().position(|s| s.id == 0 && s.link.addr.is_ipv4() == peer.is_ipv4()).map(|i| {
-            core::MeshLane {
-                sock: (i + 1) as SockId,
-                local: self.socks[i].local,
-                peer: SocketAddr::new(peer, self.port),
-            }
+            core::MeshLane { sock: (i + 1) as SockId, local: self.socks[i].local, peer: SocketAddr::new(peer, PORT) }
         });
         self.handle_bond(bi, core::Event::Links { links: &links, mesh });
     }
@@ -1700,7 +1693,7 @@ impl Daemon {
                 Err(e) => self.log(format!("{} {}: {e}", l.name, l.addr)),
             }
             if *m && !self.listening.contains(&l.addr) {
-                match ctl::listen(SocketAddr::new(l.addr, self.port), self.ev_tx.clone(), self.waker.clone()) {
+                match ctl::listen(SocketAddr::new(l.addr, PORT), self.ev_tx.clone(), self.waker.clone()) {
                     Ok(()) => self.listening.push(l.addr),
                     Err(e) => self.log(format!("control on {}: {e}", l.addr)),
                 }
@@ -1839,7 +1832,7 @@ impl Daemon {
                 let id = ctl::next_id();
                 self.dialing = Some(id);
                 self.redial_at = now + self.backoff;
-                ctl::dial(anchor, self.port, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
+                ctl::dial(anchor, PORT, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
             }
             if let Some(b) = self.bonds.first()
                 && b.mode != self.cfg.mode
@@ -2143,14 +2136,14 @@ impl Daemon {
     /// Starts measuring the next candidate, or selects when every one is measured (§18).
     fn pick_next(&mut self) {
         let now = self.now();
-        let (mesh, tx, waker, port) = (self.mesh_addr(), self.ev_tx.clone(), self.waker.clone(), self.port);
+        let (mesh, tx, waker) = (self.mesh_addr(), self.ev_tx.clone(), self.waker.clone());
         let Some(p) = self.pick.as_mut() else { return };
         if p.i >= p.cands.len() {
             return self.pick_finish();
         }
         let id = ctl::next_id();
         (p.dialing, p.chan, p.bond, p.started, p.result) = (Some(id), None, None, now, None);
-        ctl::dial(p.cands[p.i].clone(), port, mesh, id, tx, waker);
+        ctl::dial(p.cands[p.i].clone(), PORT, mesh, id, tx, waker);
     }
 
     /// Ends the temporary bond and records `m` for the current candidate.
@@ -2209,7 +2202,7 @@ impl Daemon {
             Request::Status { device: Some(d) } => {
                 let id = ctl::next_id();
                 self.view_waiting.insert(id, reply);
-                ctl::dial(d, self.port, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
+                ctl::dial(d, PORT, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
             }
             Request::Pick { devices, mode, seconds, dry_run } => {
                 if self.pick.is_some() {
