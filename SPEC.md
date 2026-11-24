@@ -737,6 +737,7 @@ Every role runs as a system service:
 - **Smoke test:** `<exe>.new version --json` must answer within `SMOKE_TIMEOUT` (10 s).
 - **Swap:** the new binary replaces the old atomically, after `UPDATE_IDLE` (10 min) without traffic.
 - **Healthy or rolled back:** the new version is good once it has been healthy for `UPDATE_HEALTHY` (60 s). Otherwise it is rolled back after `UPDATE_MAX_STARTS` (3) failed starts.
+- **Which version is newer:** a release is newer than an earlier release and than its own pre-releases. A pre-release (`v2.0.0-rc.2`) is newer only than an earlier pre-release, in semver's order: a device on a release candidate takes the next one, and a device on a release never takes one.
 - **Version skew:** a node whose peer runs a newer major version shows `peer_newer`.
 
 ### 22.4 Config
