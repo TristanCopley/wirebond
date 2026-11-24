@@ -2,7 +2,7 @@
 //! the control sockets and the local API, with a timeout from the engines' next deadline
 //! (`Session::next`), then drains each source without blocking (§4.3). Owner: node daemon.
 //!
-//! Per packet (§4.3): a TUN read goes to the bond's session (`Session::send_packet`); a lane
+//! Per packet (§4.3): a TUN read goes to the bond's session (`Event::Send`); a lane
 //! datagram goes to the session its receive id names (`wirebond_core::packet_rid`, `RidTable`);
 //! what a session delivers (`Out::deliver`) is checked (§10.5 rule 6) and written to the TUN
 //! device.

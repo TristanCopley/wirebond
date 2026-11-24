@@ -14,8 +14,8 @@
 //! §13) and numbers them per direction; a data payload is flow (2) + seq (4) + one inner packet
 //! (§10.3), 33 bytes of overhead.
 
-// No unsafe code; under test, only the counting allocator in pair.rs opts out, so the allocation
-// tests can count (TestSendAllocs, TestSteadyAllocs).
+// No unsafe code; under test, only the counting allocator in pair.rs opts out, so the tests that
+// count allocations can.
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![cfg_attr(test, deny(unsafe_code))]
 
@@ -165,7 +165,8 @@ fn zero<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
-/// One control-channel message. The JSON is the Go implementation's, field for field.
+/// One control-channel message. The JSON of these four messages is the Go implementation's,
+/// field for field; its view and error messages are the daemon's own (node/proto.rs).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Msg {
     /// "hello", "key", "links" or "mode".

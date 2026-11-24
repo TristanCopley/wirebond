@@ -165,7 +165,7 @@ pub struct Device {
     pub(crate) same: u32,
     /// The action recorder handed to handle, reused (Go out).
     pub(crate) out: Actions,
-    /// Live flows (Go map; sorted for the FlowEnd sweep).
+    /// Live flows (Go map; sorted, so the idle sweep goes in flow order).
     pub(crate) flows: BTreeMap<FlowId, Flow>,
     /// Client: port << 16 | the program's source port → its flow.
     pub(crate) by_app: BTreeMap<u32, FlowId>,
@@ -2054,7 +2054,7 @@ mod tests {
 
     /// The client numbers flows (port, source) 1, 2, 3 … per session; the server opens a flow on
     /// its first datagram; each end ends a flow at its first housekeeping FLOW_IDLE after the
-    /// flow's last datagram, in flow order; MAX_FLOWS live flows drop a new one.
+    /// flow's last datagram; MAX_FLOWS live flows drop a new one.
     #[test]
     fn flows_numbered_ended_and_capped() {
         let (mut w, _, _, _) = connected();
