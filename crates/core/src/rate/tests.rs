@@ -82,9 +82,6 @@ fn cut_is_never_nan_nor_under_the_floor() {
             "cut({rate}, qd {qd}, delivery {delivery}) = {got}, want {want}"
         );
     }
-    let mut l = Lane::new(1, 1);
-    (l.state, l.validated) = (State::Up, true);
-    assert_eq!(l.pace(0), PACE_FLOOR, "an idle unlimited lane paces at PACE_FLOOR");
     // Rust's min and max drop a NaN where Go's would return it: still never NaN.
     for (rate, delivery) in [(f64::NAN, 30e6), (INF, f64::NAN), (f64::NAN, f64::NAN)] {
         let got = cut(rate, 30 * MS, TARGET_FLOOR, delivery);
@@ -92,15 +89,34 @@ fn cut_is_never_nan_nor_under_the_floor() {
     }
 }
 
+/// The pace is the lane's rate and nothing else (§12). A cap at twice the rate offered over the
+/// last RATE_WINDOW stood in the pacer before: a stream's first burst met an empty window and was
+/// paced from PACE_FLOOR, 25 ms of delay each way at 30 Mbit/s.
 #[test]
-fn pace_is_twice_the_offered_rate_within_the_rate() {
+fn the_pace_is_the_lanes_rate_whatever_it_was_offered() {
+    // Unlimited, with nothing offered before: a frame's 30 full-size packets leave in the turn
+    // they came, no tick is asked for, and the bucket is unlimited, not NaN (INF × 0 s).
     let mut s = bulk(Mode::Performance, INF);
-    offer(&mut s, T0, 30e6);
-    assert!(near(s.lanes[A].pace(T0), 60e6));
-    s.lanes[A].rate = 40e6;
-    assert_eq!(s.lanes[A].pace(T0), 40e6);
-    offer(&mut s, T0, 1e6);
-    assert_eq!(s.lanes[A].pace(T0), PACE_FLOOR);
+    s.next = NEVER;
+    for c in 0..30 {
+        s.enqueue(&mut Acts::default(), T0, A, pkt(c, T0, 1500));
+    }
+    let ln = &s.lanes[A];
+    assert_eq!((ln.q.len(), ln.q_bytes, ln.tokens, s.next), (0, 0, INF, NEVER));
+    // Once the lane has a rate, a full bucket of it is what the unlimited credit leaves.
+    s.lanes[A].rate = 80e6;
+    s.drain(&mut Acts::default(), T0, A);
+    assert!(near(s.lanes[A].tokens, 10_000.0 + MAX_PACKET as f64), "{}", s.lanes[A].tokens);
+    // A lane at 40 Mbit/s gains half a millisecond's 2,500 bytes of credit in half a millisecond,
+    // whether it was offered 1 Mbit/s or 300.
+    for offered in [1e6, 300e6] {
+        let mut s = bulk(Mode::Performance, 40e6);
+        s.lanes[A].validated = false; // drains nothing: only the bucket fills
+        offer(&mut s, T0, offered);
+        starve(&mut s, T0);
+        s.drain(&mut Acts::default(), T0 + MS / 2, A);
+        assert!(near(s.lanes[A].tokens, 2_500.0), "offered {offered}: {}", s.lanes[A].tokens);
+    }
 }
 
 #[test]
@@ -128,19 +144,20 @@ fn take_restarts_a_stale_rate_before_bulk_moves_onto_the_lane() {
     assert_eq!((s.lanes[A].rate, s.lanes[A].startup), (PACE_FLOOR, true));
     s.mode = Mode::Performance;
 
-    // R2-04: taken first, a rewind's 150 kB moved onto the lane paces at twice its offered rate,
-    // not at the PACE_FLOOR an old cut left. (Not validated: the pacer sends nothing here.)
+    // R2-04: taken first, a rewind's 150 kB moved onto the lane goes at the rate the restart gave
+    // it, which in performance is no limit, not at the PACE_FLOOR an old cut left. (Not validated:
+    // the pacer sends nothing here.)
     let rewind = |s: &mut Session, now| {
         for c in 0..100 {
             s.enqueue(&mut Acts::default(), now, A, pkt(c, 0, 1500));
         }
-        s.lanes[A].pace(now)
+        s.lanes[A].rate
     };
     s.lanes[A].validated = false;
     let now = T0 + 2 * SEC;
     cut_long_ago(&mut s, now - MIN_WINDOW);
     s.take(now, A);
-    assert!(near(rewind(&mut s, now), 2.0 * 150_000.0 * 8.0 / 0.1), "{}", s.lanes[A].pace(now));
+    assert_eq!(rewind(&mut s, now), INF);
     assert_eq!((s.lanes[A].bulk_at, s.lanes[A].q.len(), s.lanes[A].q_bytes), (now, 100, 150_000));
     // Moved first, the same packets make the old cut look fresh (enqueue marks the lane as
     // carrying bulk now), and a take after them keeps it: callers take first.
@@ -149,7 +166,7 @@ fn take_restarts_a_stale_rate_before_bulk_moves_onto_the_lane() {
     cut_long_ago(&mut s, now - MIN_WINDOW);
     assert_eq!(rewind(&mut s, now), PACE_FLOOR);
     s.take(now, A);
-    assert_eq!((s.lanes[A].rate, s.lanes[A].pace(now)), (PACE_FLOOR, PACE_FLOOR));
+    assert_eq!(s.lanes[A].rate, PACE_FLOOR);
 }
 
 #[test]
@@ -314,11 +331,10 @@ fn adjust_combine_climbs_back_to_regain_after_startup() {
 #[test]
 fn adjust_combine_lane_alone_starts_and_climbs_as_stable() {
     // Restarted alone (the Tailscale lane under a hard NAT, back up after a stall), offered the
-    // 21 Mbit/s stream: unlimited at once, so it paces at twice the offered rate.
+    // 21 Mbit/s stream: unlimited at once.
     let mut s = bulk(Mode::Bandwidth, 0.0);
     s.restart(T0, A);
     assert_eq!(echo(&mut s, T0, 0, 21e6, false), INF);
-    assert!(near(s.lanes[A].pace(T0), 42e6), "{}", s.lanes[A].pace(T0));
     // Its first overuse, a loss burst of 6% with no queue, ends that: down to what it delivers,
     // at least the offered rate it carries.
     (s.lanes[A].loss, s.lanes[A].delivery) = (0.06, 20e6);
@@ -362,14 +378,13 @@ fn adjust_combine_lane_alone_starts_and_climbs_as_stable() {
 
 #[test]
 fn drain_holds_at_most_pace_burst_plus_a_packet() {
-    let mut s = bulk(Mode::Performance, INF);
+    let mut s = bulk(Mode::Performance, PACE_FLOOR);
     s.lanes[A].validated = false; // drains nothing: only the bucket fills
     // At PACE_FLOOR a millisecond is 625 bytes: the bucket holds two full-size packets.
     s.drain(&mut Acts::default(), T0, A);
     assert_eq!(s.lanes[A].tokens, 2.0 * MAX_PACKET as f64);
     // At 80 Mbit/s, a millisecond's 10 kB plus one packet, however late the tick.
     s.lanes[A].rate = 80e6;
-    offer(&mut s, T0 + SEC, 50e6);
     s.drain(&mut Acts::default(), T0 + SEC, A);
     assert!(near(s.lanes[A].tokens, 10_000.0 + MAX_PACKET as f64), "{}", s.lanes[A].tokens);
     // Credit accrues at pace.
@@ -381,7 +396,7 @@ fn drain_holds_at_most_pace_burst_plus_a_packet() {
 
 #[test]
 fn drain_ticks_at_the_first_millisecond_after_the_head_is_due() {
-    let mut s = bulk(Mode::Performance, INF);
+    let mut s = bulk(Mode::Performance, PACE_FLOOR);
     s.lanes[A].q.push_back(pkt(1, T0, 1471));
     s.lanes[A].q_bytes = 1471;
     // At PACE_FLOOR, 1,471 bytes of credit take 2.35 ms.
@@ -398,7 +413,7 @@ fn drain_ticks_at_the_first_millisecond_after_the_head_is_due() {
 
 #[test]
 fn drain_drops_what_waited_past_queue_age() {
-    let mut s = bulk(Mode::Performance, INF);
+    let mut s = bulk(Mode::Performance, PACE_FLOOR); // a rate, so that a starved bucket holds the rest
     for (c, at) in [(1, T0 - QUEUE_AGE - 1), (2, T0 - QUEUE_AGE - 1), (3, T0 - QUEUE_AGE), (4, T0)] {
         s.lanes[A].q.push_back(pkt(c, at, 1471));
         s.lanes[A].q_bytes += 1471;

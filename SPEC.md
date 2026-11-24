@@ -396,6 +396,7 @@ Each lane has its own delay-based controller and token-bucket pacer.
 
 | Part | Rule |
 | --- | --- |
+| Pace | the lane's rate and nothing else. A performance lane has no rate until its first overuse and sends what it is given at once; a bandwidth lane starts at the floor |
 | Target queueing delay | max(`TARGET_FLOOR` 20 ms, `TARGET_DEV` 2 × dev, while app-limited) |
 | Overuse | loss ≥ `LOSS_OVERUSE` (2%) and ≥ `LOSS_MIN` (5) packets within `RATE_WINDOW`, or queueing above target |
 | On overuse | cut the rate to what the lane delivered, less the further its queue is past target, and at least to `BETA` (0.85) × the current rate |

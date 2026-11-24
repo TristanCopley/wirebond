@@ -103,7 +103,8 @@ impl Session {
         // drifts above what it carries [Congestion 3]: in bandwidth while offered is at or above it
         // (bandwidth offers a lane more the faster it paces, so more would only feed itself); in
         // performance, whose offered rate is the stream's, also while a backlog waits and the rate is
-        // under the 2 × offered the pacer would use. By STARTUP_GAIN in startup; back up to
+        // under twice the offered rate: a stream comes in bursts, a frame at a time, and a rate
+        // nearer the stream's than that holds each burst in the pacer. By STARTUP_GAIN in startup; back up to
         // regain once startup's overshoot has drained (its cut was sized by a queue that grew
         // while the overuse was in flight, and left the lane far below what it had delivered); in
         // performance once any cut has drained the queue (qd under half the target), so that a lane
@@ -148,6 +149,13 @@ impl Session {
     /// Sends l's queue as its token bucket allows, drops packets older than QUEUE_AGE, asks for a
     /// tick when the head is due, and tracks `load_at` (§9, §11.1 rule 2).
     ///
+    /// The pace is the lane's rate and nothing else (§12): a lane with no known limit sends what it
+    /// is given at once. A cap at twice the rate offered over the last RATE_WINDOW stood here
+    /// before: it met a stream's first frames with an empty window, paced them from PACE_FLOOR and
+    /// held them up to 25 ms each way, and spread every later frame over about 3 ms, on every lane
+    /// alike, so the bond ran behind the bare path it is promised never to be worse than. A path
+    /// that cannot take a burst says so in loss or delay, and from that cut on its lane has a rate.
+    ///
     /// The head packet goes once the bucket holds its bytes, and credit accrues at pace up to
     /// PACE_BURST plus one full-size packet: the Tick comes at the first millisecond after the head
     /// is due, so a bucket of PACE_BURST alone lost the credit left after the last packet that fit
@@ -158,12 +166,14 @@ impl Session {
     /// alone is no load, since paced bursts keep one at any rate near the offered (notes/core.md
     /// 35, 41).
     pub(crate) fn drain(&mut self, out: &mut dyn Out, now: Mono, l: LaneIx) {
-        let pace = self.lanes[l].pace(now) / 8.0; // bytes per second
+        let pace = self.lanes[l].rate / 8.0; // bytes per second; INF while the lane is unlimited
         // The most credit the bucket holds: PACE_BURST at pace, at least one full-size packet,
         // plus one full-size packet (notes/core.md 46, 52a). Seconds are Go's Duration.Seconds.
         let burst = (pace * (PACE_BURST as f64 / 1e9)).max(MAX_PACKET as f64) + MAX_PACKET as f64;
         let ln = &mut self.lanes[l];
-        ln.tokens = (ln.tokens + pace * ((now - ln.filled) as f64 / 1e9)).min(burst);
+        // An unlimited pace is unlimited credit, also over no time at all, where INF × 0 is NaN.
+        let credit = if pace.is_finite() { pace * ((now - ln.filled) as f64 / 1e9) } else { pace };
+        ln.tokens = (ln.tokens + credit).min(burst);
         ln.filled = now;
         while let Some(p) = self.lanes[l].q.front().copied() {
             let ln = &self.lanes[l];
@@ -221,14 +231,6 @@ impl Session {
                 self.pool.put(b);
             }
         }
-    }
-}
-
-impl Lane {
-    /// The pacer rate, bits per second: min(rate, max(2 × offered, PACE_FLOOR)) (§9). Rolls the
-    /// `offered` meter, hence `&mut`.
-    pub(crate) fn pace(&mut self, now: Mono) -> f64 {
-        self.rate.min((2.0 * self.offered.rate(now, RATE_WINDOW)).max(PACE_FLOOR))
     }
 }
 

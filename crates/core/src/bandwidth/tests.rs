@@ -512,15 +512,16 @@ fn joining_lane_is_taken_first() {
     }
 }
 
-/// §14.2, earliest arrival: newest OWD + 2 × dev + (queued bytes + size) ÷ pace, a lane other
+/// §14.2, earliest arrival: newest OWD + 2 × dev + (queued bytes + size) ÷ rate, a lane other
 /// than the fastest winning by ECF_MARGIN.
 #[test]
 fn earliest_arrival() {
     let now = 30 * SEC;
     let (wifi, phone) = (ix(1), ix(3));
     let mut s = spreading(now);
-    // Both pace at PACE_FLOOR (nothing offered), so 1,400 bytes take 2.24 ms; Wi-Fi's newest OWD
-    // is 34 ms, the iPhone's 47.
+    // Both at PACE_FLOOR, where bandwidth starts a lane, so 1,400 bytes take 2.24 ms; Wi-Fi's
+    // newest OWD is 34 ms, the iPhone's 47.
+    (s.lanes[wifi].rate, s.lanes[phone].rate) = (PACE_FLOOR, PACE_FLOOR);
     assert_eq!(s.earliest(now, 1400), Some(wifi));
     s.lanes[wifi].q_bytes = 8_900; // 34 + 16.48 ms against 49.24: the iPhone wins by 1.24 ms
     assert_eq!(s.earliest(now, 1400), Some(phone));

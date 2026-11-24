@@ -182,17 +182,17 @@ impl Session {
     }
 
     /// When a bulk packet of `size` bytes queued on `l` now would arrive, on the peer's clock:
-    /// l's newest echoed OWD + 2 × dev + (queued bytes + size) ÷ pace (§14.2). The newest OWD, not
+    /// l's newest echoed OWD + 2 × dev + (queued bytes + size) ÷ its rate (§14.2). The newest OWD, not
     /// the base OWD, since it carries the standing queue of the lane's path, which the base OWD
     /// does not see: by the base OWD alone, a lane whose path buffer holds 60 ms won packets that
     /// then arrived later than REORDER_MAX behind their gaps. 2 × dev covers the lane's jitter.
     /// Never, for a lane on trial: it is the earliest only if every lane is on trial.
-    fn arrival(&mut self, now: Mono, l: LaneIx, size: usize) -> Mono {
-        let x = &mut self.lanes[l];
+    fn arrival(&self, now: Mono, l: LaneIx, size: usize) -> Mono {
+        let x = &self.lanes[l];
         if x.on_trial(now) {
             return Mono::MAX;
         }
-        let wait = ((x.q_bytes + size) as f64 * 8e9 / x.pace(now)) as Mono;
+        let wait = ((x.q_bytes + size) as f64 * 8e9 / x.rate) as Mono;
         x.owd_now.saturating_add(x.dev.saturating_mul(2)).saturating_add(wait)
     }
 }
