@@ -85,11 +85,12 @@ impl Session {
         (a, a.and_then(|a| self.best(|l| ok(l) && apart(l, &self.lanes[a]), lower)))
     }
 
-    /// Keeps bulk off `l` for BAR, doubling while it keeps failing, up to BAR_MAX (§11.2 rule 4).
+    /// Keeps bulk off `l` for BAR, doubling while it keeps failing, up to BAR_MAX (§11.2 rule 4);
+    /// when it next joins the spread it is on trial (`take`).
     pub(crate) fn bar(&mut self, now: Mono, l: LaneIx) {
         let l = &mut self.lanes[l];
         l.bar_until = now.saturating_add((BAR << l.bars.min(8)).min(BAR_MAX));
-        l.bars = (l.bars + 1).min(8);
+        (l.bars, l.trial_due) = ((l.bars + 1).min(8), true);
     }
 
     /// The slot of the heaviest bulk flow I send, if any (the first of equals): a flow I receive

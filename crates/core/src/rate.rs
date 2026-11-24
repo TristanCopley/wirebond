@@ -8,8 +8,8 @@ use crate::estimate::INF;
 use crate::lane::{Lane, LaneIx, State};
 use crate::session::{Mode, NEVER};
 use crate::{
-    BETA, BOND_BYTES, INCREASE_STEP, MAX_PACKET, MIN_WINDOW, MS, Mono, Out, PACE_BURST, PACE_FLOOR, QUEUE_AGE,
-    RATE_WINDOW, REWIND_SHARE, REWIND_WINDOW, STARTUP_GAIN, Session, TARGET_DEV, TARGET_FLOOR,
+    BANDWIDTH_FLOOR_HOLD, BETA, BOND_BYTES, INCREASE_STEP, MAX_PACKET, MIN_WINDOW, MS, Mono, Out, PACE_BURST,
+    PACE_FLOOR, QUEUE_AGE, RATE_WINDOW, REWIND_SHARE, REWIND_WINDOW, STARTUP_GAIN, Session, TARGET_DEV, TARGET_FLOOR,
 };
 
 /// A lane that delivers this share of its offered rate is not cut below that rate.
@@ -27,11 +27,19 @@ impl Session {
     /// Readies `l` to carry bulk: a rate learned within MIN_WINDOW still holds, an older one
     /// restarts (§9). Callers take a lane before any packet moves onto it (R2-04: rewind, shift
     /// and enqueue set `bulk_at`, which would make a stale rate look fresh).
+    ///
+    /// A lane taken for the first time since its bar ended is on trial for twice
+    /// BANDWIDTH_FLOOR_HOLD (§14.2, `Lane::on_trial`). The blind pair, which takes a lane still
+    /// barred, does not use the trial up.
     pub(crate) fn take(&mut self, now: Mono, l: LaneIx) {
         if now.saturating_sub(self.lanes[l].bulk_at) >= MIN_WINDOW {
             self.restart(now, l);
         }
-        self.lanes[l].took_at = now;
+        let x = &mut self.lanes[l];
+        x.took_at = now;
+        if x.trial_due && now >= x.bar_until {
+            (x.trial_due, x.trial_until) = (false, now.saturating_add(2 * BANDWIDTH_FLOOR_HOLD));
+        }
     }
 
     /// Runs the rate controller on a fresh echo of `l` (§9); `lossy`: the echo's loss window lost

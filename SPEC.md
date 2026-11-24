@@ -464,7 +464,7 @@ The mesh lane is eligible only for a group with no usable direct lane (validated
 
 **Small flows** are copied (§13).
 
-**Leaving the spread.** A lane in overuse at `PACE_FLOOR` for `BANDWIDTH_FLOOR_HOLD` (500 ms) is barred for `BAR` (60 s). The bar doubles, up to `BAR_MAX` (10 min), while the lane keeps failing. A lane that was barred before is on trial for twice `BANDWIDTH_FLOOR_HOLD` after it rejoins the spread: it carries a copy of every bulk packet and none alone, and its queue is dropped if it leaves, so what it loses while it is judged again is not lost.
+**Leaving the spread.** A lane in overuse at `PACE_FLOOR` for `BANDWIDTH_FLOOR_HOLD` (500 ms) is barred for `BAR` (60 s). The bar doubles, up to `BAR_MAX` (10 min), while the lane keeps failing. A lane that returns to the spread from a bar is on trial for twice `BANDWIDTH_FLOOR_HOLD`: it carries a copy of every bulk packet and none alone, so what it loses while it is judged again is not lost, and the copies it holds are dropped if it leaves. Only that return is a trial: a lane that leaves for another reason later, suspect for a moment, has its share again when it comes back.
 
 **Rewind.** When a lane turns suspect, its unacknowledged packets from the last `REWIND_WINDOW` (300 ms, or its suspect timeout plus RTT if longer) are re-sent on the other eligible lanes. A packet's echoed `last_counter` marks it acknowledged. A lane still in startup that takes them adds the suspect lane's delivery rate to its own, so it paces for the stream at once.
 
