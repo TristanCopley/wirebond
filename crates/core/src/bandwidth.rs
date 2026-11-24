@@ -12,7 +12,6 @@
 //! REWIND_WINDOW are re-sent across the lanes that stay (rewind.rs).
 
 use crate::lane::{Lane, LaneIx, State};
-use crate::performance::since;
 use crate::session::Mode;
 use crate::session::NEVER;
 use crate::{BANDWIDTH_FLOOR_HOLD, ECF_MARGIN, MAX_LINKS, MIN_WINDOW, Mono, Out, PACE_FLOOR, RATE_WINDOW, Session};
@@ -85,7 +84,7 @@ impl Session {
             let x = &self.lanes[l];
             let rtt = if x.rtt > 0 { x.rtt } else { RATE_WINDOW };
             let floor = x.state == State::Up
-                && since(now, x.last_over) < rtt.saturating_mul(2)
+                && now.saturating_sub(x.last_over) < rtt.saturating_mul(2)
                 && x.rate <= PACE_FLOOR
                 && self.carries(l);
             let x = &mut self.lanes[l];
@@ -93,7 +92,7 @@ impl Session {
                 x.floor_at = NEVER;
             } else if x.floor_at == NEVER {
                 x.floor_at = now;
-            } else if since(now, x.floor_at) >= BANDWIDTH_FLOOR_HOLD {
+            } else if now.saturating_sub(x.floor_at) >= BANDWIDTH_FLOOR_HOLD {
                 self.bar(now, l);
             }
             let x = &self.lanes[l];
@@ -126,7 +125,7 @@ impl Session {
             // At least a tenth of the fastest lane's rate. A rate is known once the lane has
             // carried bulk within MIN_WINDOW and left startup; until then (a lane that joins
             // restarts at PACE_FLOOR, §12) it is not known to be too slow.
-            let known = |x: &Lane| !x.startup && since(now, x.bulk_at) < MIN_WINDOW && x.rate.is_finite();
+            let known = |x: &Lane| !x.startup && now.saturating_sub(x.bulk_at) < MIN_WINDOW && x.rate.is_finite();
             let fast = &self.lanes[ls[0]];
             if known(fast) {
                 let tenth = fast.rate / 10.0;

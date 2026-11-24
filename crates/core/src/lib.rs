@@ -9,7 +9,7 @@
 //!
 //! This file is the public API both drivers are written against (notes/2.0-build.md). In 2.0 a
 //! bond carries whole IP packets: the daemon hands the session each packet it read from the TUN
-//! device ([`Session::send_packet`], or [`Event::Send`]) and writes each packet the session
+//! device ([`Event::Send`]) and writes each packet the session
 //! delivers ([`Out::deliver`]) to the TUN device. The session keys flows itself ([`flow::Key`],
 //! §13) and numbers them per direction; a data payload is flow (2) + seq (4) + one inner packet
 //! (§10.3), 33 bytes of overhead.
@@ -380,12 +380,6 @@ impl Session {
         if now >= self.next {
             self.tick(out, now);
         }
-    }
-
-    /// Sends one whole IP packet read from the TUN device: shorthand for `handle` with
-    /// [`Event::Send`], the daemon's hot path (§4.3).
-    pub fn send_packet(&mut self, now: Mono, packet: &[u8], rids: &mut RidTable, out: &mut dyn Out) {
-        self.handle(now, Event::Send { packet }, rids, out);
     }
 
     /// The earliest time `handle` wants an [`Event::Tick`]; `Mono::MAX` when nothing is due, as

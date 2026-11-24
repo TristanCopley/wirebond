@@ -172,7 +172,7 @@ fn take_restarts_a_stale_rate_before_bulk_moves_onto_the_lane() {
 #[test]
 fn adjust_cuts_on_two_queued_echoes_at_most_once_per_rtt() {
     let mut s = bulk(Mode::Performance, INF);
-    s.restart(T0, A); // startup, unlimited
+    s.restart(A); // startup, unlimited
     s.lanes[A].delivery = 25e6;
     assert_eq!(echo(&mut s, T0, 30 * MS, 30e6, false), INF); // one echo over target: not yet
     assert_eq!(s.lanes[A].over_n, 1);
@@ -293,7 +293,7 @@ fn adjust_combine_climbs_back_to_regain_after_startup() {
     // spread, as A4's hotel shares it with the cell (a lane alone: the next test).
     let mut s = bulk(Mode::Bandwidth, 0.0);
     share(&mut s);
-    s.restart(T0, A);
+    s.restart(A);
     assert_eq!(s.lanes[A].rate, PACE_FLOOR);
     assert_eq!(echo(&mut s, T0, 0, PACE_FLOOR, false), PACE_FLOOR * STARTUP_GAIN);
     // Startup overshot to 72.8 Mbit/s on a 37 Mbit/s lane: the cut, sized by a 100 ms queue,
@@ -333,7 +333,7 @@ fn adjust_combine_lane_alone_starts_and_climbs_as_stable() {
     // Restarted alone (the Tailscale lane under a hard NAT, back up after a stall), offered the
     // 21 Mbit/s stream: unlimited at once.
     let mut s = bulk(Mode::Bandwidth, 0.0);
-    s.restart(T0, A);
+    s.restart(A);
     assert_eq!(echo(&mut s, T0, 0, 21e6, false), INF);
     // Its first overuse, a loss burst of 6% with no queue, ends that: down to what it delivers,
     // at least the offered rate it carries.
@@ -343,7 +343,7 @@ fn adjust_combine_lane_alone_starts_and_climbs_as_stable() {
     // Sharing the spread, startup climbs by STARTUP_GAIN from PACE_FLOOR as before.
     let mut s = bulk(Mode::Bandwidth, 0.0);
     share(&mut s);
-    s.restart(T0, A);
+    s.restart(A);
     assert_eq!(echo(&mut s, T0, 0, 21e6, false), PACE_FLOOR * STARTUP_GAIN);
     // Alone at a startup rate above the offered one (the cell once A17 bars the hotel): it does
     // not bind, so nothing changes.

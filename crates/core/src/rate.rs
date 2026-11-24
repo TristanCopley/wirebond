@@ -18,7 +18,7 @@ const CARRIES: f64 = 0.95;
 impl Session {
     /// Begins a lane's rate afresh (§9): unlimited in performance until the first overuse, from
     /// PACE_FLOOR in startup in bandwidth.
-    pub(crate) fn restart(&mut self, _now: Mono, l: LaneIx) {
+    pub(crate) fn restart(&mut self, l: LaneIx) {
         let ln = &mut self.lanes[l];
         ln.rate = if self.mode == Mode::Bandwidth { PACE_FLOOR } else { INF };
         (ln.startup, ln.over_n, ln.regain) = (true, 0, 0.0);
@@ -33,7 +33,7 @@ impl Session {
     /// barred, does not use the trial up.
     pub(crate) fn take(&mut self, now: Mono, l: LaneIx) {
         if now.saturating_sub(self.lanes[l].bulk_at) >= MIN_WINDOW {
-            self.restart(now, l);
+            self.restart(l);
         }
         let x = &mut self.lanes[l];
         x.took_at = now;

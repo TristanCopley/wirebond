@@ -21,11 +21,6 @@ pub(crate) fn apart(a: &Lane, b: &Lane) -> bool {
     a.group >= 0 && b.group >= 0 && a.group != b.group
 }
 
-/// `now − t`; saturating, since `t` may be a sentinel (NEVER, `Mono::MIN / 2`). Go: `now.Sub(t)`.
-pub(crate) fn since(now: Mono, t: Mono) -> Mono {
-    now.saturating_sub(t)
-}
-
 impl Lane {
     /// Validated, and up or suspect: it still answers, and can carry bulk.
     pub(crate) fn usable(&self) -> bool {

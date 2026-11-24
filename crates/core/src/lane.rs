@@ -740,9 +740,7 @@ impl Session {
             }
             // A lane back up restarts its rate, unless it carried bulk within MIN_WINDOW, as the
             // blind pair's lanes do while they are down (§11.4): that rate still holds (§12).
-            State::Up if x.state != State::Suspect && now.saturating_sub(x.bulk_at) >= MIN_WINDOW => {
-                self.restart(now, l)
-            }
+            State::Up if x.state != State::Suspect && now.saturating_sub(x.bulk_at) >= MIN_WINDOW => self.restart(l),
             State::Up => {}
             State::Punching | State::Dormant => x.clean_at = NEVER,
         }

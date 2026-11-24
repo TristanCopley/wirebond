@@ -13,7 +13,7 @@ use crate::estimate::Meter;
 use crate::flow::Flow;
 use crate::keys::{Challenger, EpochKey, Receiver, Sender, Slot};
 use crate::lane::{Arrival, LaneIx, Lanes, PENDING_COPIES, State};
-use crate::wire::{Echo, Probe, Window};
+use crate::wire::{Echo, Probe, Window, be};
 use crate::{
     DATA_LEN, FlowId, HEADER_LEN, IDLE_AFTER, Link, LinkInfo, LogEvent, MAX_CANDS, MAX_ECHOES, MAX_LINKS, MAX_PACKET,
     MODE_BANDWIDTH, MODE_PERFORMANCE, MeshLane, Mono, Msg, Out, REORDER_SLOTS, REPLAY_WINDOW, Rand, Role, SMALL_BIT,
@@ -339,7 +339,7 @@ impl Session {
             (self.mode, self.nspread) = (m, 0);
             for l in self.lanes.ixs() {
                 if m == Mode::Bandwidth && !self.lanes[l].rate.is_finite() {
-                    self.restart(0, l);
+                    self.restart(l);
                 }
             }
         }
@@ -374,7 +374,7 @@ impl Session {
         if !probe && typ & !SMALL_BIT != TYPE_DATA {
             return;
         }
-        let c = u64::from_be_bytes(b[3..HEADER_LEN].try_into().unwrap_or_default());
+        let c = be(&b[3..HEADER_LEN]);
         if !probe && self.rx.key(c).is_some() && self.rx.win.seen(c) {
             // §10.4 step 2: a later copy is not opened; the session window, read only, has its
             // counter. It counts for its lane's arrival record alone (`later`).
@@ -394,7 +394,8 @@ impl Session {
         } else {
             self.lane_at(sock, from)
         };
-        let (id, seq) = (FlowId(u16::from_be_bytes([self.rxbuf[0], self.rxbuf[1]])), be32(&self.rxbuf[2..]));
+        let (id, seq) =
+            (FlowId(u16::from_be_bytes([self.rxbuf[0], self.rxbuf[1]])), be(&self.rxbuf[2..DATA_LEN]) as u32);
         if !probe {
             self.opened[(c % REPLAY_WINDOW) as usize] = Opened { c, id, seq, len: b.len() as u16, typ };
         }
@@ -500,11 +501,6 @@ pub(crate) struct Opened {
     seq: u32,
     len: u16,
     typ: u8,
-}
-
-/// The big-endian u32 at the front of `b`: a data payload's seq.
-fn be32(b: &[u8]) -> u32 {
-    u32::from_be_bytes([b[0], b[1], b[2], b[3]])
 }
 
 #[cfg(test)]
