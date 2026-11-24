@@ -1,6 +1,6 @@
 # wirebond's system harness (SPEC §23.1 tier 3): the daemon as released, as client and anchor, in
 # network namespaces, as root, with real TUN devices, nftables NAT, tc's tbf and netem; driven by
-# crates/load. tests/system/run.sh does it all; this job builds what it runs and installs the tools.
+# crates/load. tests/system/run.sh does it all; each job builds what it runs and installs the tools.
 # release.yml calls this workflow before it publishes.
 name: system
 
@@ -39,9 +39,19 @@ defaults:
     shell: bash
 
 jobs:
+  # The harness's targets in two halves side by side, each on a runner of its own, so a run takes
+  # the longer half's time, not both: each scenario makes and removes its own namespaces, so the
+  # halves are independent, and on two machines neither can disturb the other's measurements.
   rust:
+    name: rust ${{ matrix.part }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {part: functional, targets: net a7 a8 a9 a10}
+          - {part: perf, targets: a12 shaped netem}
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
@@ -58,10 +68,11 @@ jobs:
           sudo apt-get install -y -qq nftables jq
           sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" || echo "no linux-modules-extra: netem may be skipped"
           sudo modprobe -a sch_netem sch_tbf tun || true
-      - name: The namespaces and the load tool, with no daemon
-        run: sudo env PATH="$PATH" TMPDIR="$TMPDIR" LOAD_BIN="$LOAD_BIN" tests/system/run.sh net
-      - name: A7, A8, A9, A10, A12, and the shaped and netem runs against the mesh-lane baseline
+      # functional: the namespaces and the load tool with no daemon, then A7 to A10. perf: A12, and
+      # the shaped and netem runs against the mesh-lane baseline.
+      - name: run.sh ${{ matrix.targets }}
         env:
+          TARGETS: ${{ matrix.targets }}
           # A12's budget is 25% of one core per daemon on the device (SPEC §23.3). A runner is a few
           # shared virtual cores, and the harness bills each daemon for the kernel's work along the
           # whole simulated path, so here the same check guards against a regression: runners
@@ -73,7 +84,7 @@ jobs:
             echo '```'
             code=0
             sudo env PATH="$PATH" TMPDIR="$TMPDIR" WIREBOND_BIN="$WIREBOND_BIN" LOAD_BIN="$LOAD_BIN" \
-              WIREBOND_A12_CPU="$WIREBOND_A12_CPU" tests/system/run.sh daemons || code=$?
+              WIREBOND_A12_CPU="$WIREBOND_A12_CPU" tests/system/run.sh $TARGETS || code=$?
             echo '```'
             exit "$code"
           } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -82,5 +93,5 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: system
+          name: system-${{ matrix.part }}
           path: ${{ runner.temp }}/system
