@@ -11,6 +11,8 @@ const base = process.env.BASE_PATH ?? '';
 
 export default defineConfig({
 	testDir: 'tests',
+	// The tests share only the preview server; each has its own page and its own mocked API.
+	fullyParallel: true,
 	forbidOnly: !!process.env.CI,
 	reporter: 'list',
 	use: {
