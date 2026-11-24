@@ -403,15 +403,11 @@ fn ask(req: &Request, args: &[String], h: &dyn Host) -> Reply {
         } else {
             format!("wirebond is not running here, and installing it needs {} once", admin_shell(h))
         };
-        return Reply { message: format!("run: {}", again(h, &h.current_exe(), args)), ..Reply::fail("admin", why) };
+        return needs_admin(h, args, why);
     }
-    let installed = match h.install(s) {
-        Ok(changed) => changed,
-        Err(e) => return Reply::fail("failed", format!("installing wirebond failed: {e}")),
-    };
-    let c = match started(h, s) {
-        Ok(c) => c,
-        Err(e) => return silent(&e),
+    let (installed, c) = match install_started(h, s) {
+        Ok(started) => started,
+        Err(r) => return *r,
     };
     let mut r = exchange(c, req);
     if installed {
@@ -428,18 +424,28 @@ fn ask(req: &Request, args: &[String], h: &dyn Host) -> Reply {
 fn install(args: &[String], h: &dyn Host) -> Reply {
     let s = h.scope();
     if !h.admin() {
-        let msg = format!("run: {}", again(h, &h.current_exe(), args));
-        return Reply { message: msg, ..Reply::fail("admin", format!("installing wirebond needs {}", admin_shell(h))) };
+        return needs_admin(h, args, format!("installing wirebond needs {}", admin_shell(h)));
     }
-    let changed = match h.install(s) {
-        Ok(changed) => changed,
-        Err(e) => return Reply::fail("failed", format!("installing wirebond failed: {e}")),
+    let (changed, _) = match install_started(h, s) {
+        Ok(started) => started,
+        Err(r) => return *r,
     };
-    if let Err(e) = started(h, s) {
-        return silent(&e);
-    }
     let what = if changed { "wirebond is installed" } else { "wirebond was installed already" };
     Reply { changed, ..Reply::ok(format!("{what} {}", installed_at(h, s))) }
+}
+
+/// The refusal of a verb that needs administrator rights, with the command line to run instead.
+fn needs_admin(h: &dyn Host, args: &[String], why: impl Into<String>) -> Reply {
+    Reply { message: format!("run: {}", again(h, &h.current_exe(), args)), ..Reply::fail("admin", why) }
+}
+
+/// Installs and starts the service: whether the install changed anything, and the daemon once it
+/// answers; else the reply for the step that failed.
+fn install_started(h: &dyn Host, s: Scope) -> Result<(bool, Box<dyn LocalStream>), Box<Reply>> {
+    let fail = |code, msg| Box::new(Reply::fail(code, msg));
+    let changed = h.install(s).map_err(|e| fail("failed", format!("installing wirebond failed: {e}")))?;
+    let silent = |e| fail("no_daemon", format!("wirebond is installed but its daemon does not answer: {e}"));
+    Ok((changed, started(h, s).map_err(silent)?))
 }
 
 /// Where administrator rights come from on this OS.
@@ -457,11 +463,6 @@ fn started(h: &dyn Host, s: Scope) -> io::Result<Box<dyn LocalStream>> {
             r => return r,
         }
     }
-}
-
-/// The reply for a daemon that was installed but does not answer.
-fn silent(e: &io::Error) -> Reply {
-    Reply::fail("no_daemon", format!("wirebond is installed but its daemon does not answer: {e}"))
 }
 
 /// "as a system service at <exe>", and how to run it while `wirebond` on PATH is not it. On
@@ -504,8 +505,7 @@ fn exchange(mut c: Box<dyn LocalStream>, req: &Request) -> Reply {
 /// `wirebond uninstall` (§22.2): needs administrator rights.
 fn uninstall(args: &[String], h: &dyn Host) -> Reply {
     if !h.admin() {
-        let msg = format!("run: {}", again(h, &h.current_exe(), args));
-        return Reply { message: msg, ..Reply::fail("admin", "uninstalling wirebond needs administrator rights") };
+        return needs_admin(h, args, "uninstalling wirebond needs administrator rights");
     }
     match h.uninstall(h.scope()) {
         Ok((changed, step)) => {
