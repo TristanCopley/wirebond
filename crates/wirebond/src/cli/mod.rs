@@ -69,17 +69,15 @@ pub enum Cmd {
 /// What the CLI needs of this machine: host's install functions and local sockets, which the
 /// tests fake.
 trait Host {
-    /// The scope the daemon runs in (host::need).
-    fn scope(&self) -> Scope;
     /// Whether this process may install the system service.
     fn admin(&self) -> bool;
-    fn dial(&self, s: Scope, sock: &str) -> io::Result<Box<dyn LocalStream>>;
+    fn dial(&self, sock: &str) -> io::Result<Box<dyn LocalStream>>;
     /// Installs and starts the service; whether anything changed.
-    fn install(&self, s: Scope) -> io::Result<bool>;
-    fn uninstall(&self, s: Scope) -> io::Result<(bool, String)>;
-    fn on_path(&self, s: Scope) -> bool;
-    /// The scope's installed executable, and the one running.
-    fn exe(&self, s: Scope) -> PathBuf;
+    fn install(&self) -> io::Result<bool>;
+    fn uninstall(&self) -> io::Result<(bool, String)>;
+    fn on_path(&self) -> bool;
+    /// The installed executable, and the one running.
+    fn exe(&self) -> PathBuf;
     fn current_exe(&self) -> PathBuf;
     fn windows(&self) -> bool;
     /// How long a started daemon has to answer.
@@ -90,26 +88,23 @@ trait Host {
 struct System;
 
 impl Host for System {
-    fn scope(&self) -> Scope {
-        host::need(false)
-    }
     fn admin(&self) -> bool {
         host::admin()
     }
-    fn dial(&self, s: Scope, sock: &str) -> io::Result<Box<dyn LocalStream>> {
-        host::dial(s, sock)
+    fn dial(&self, sock: &str) -> io::Result<Box<dyn LocalStream>> {
+        host::dial(Scope::System, sock)
     }
-    fn install(&self, s: Scope) -> io::Result<bool> {
-        host::install(s)
+    fn install(&self) -> io::Result<bool> {
+        host::install(Scope::System)
     }
-    fn uninstall(&self, s: Scope) -> io::Result<(bool, String)> {
-        host::uninstall(s)
+    fn uninstall(&self) -> io::Result<(bool, String)> {
+        host::uninstall(Scope::System)
     }
-    fn on_path(&self, s: Scope) -> bool {
-        host::on_path(s)
+    fn on_path(&self) -> bool {
+        host::on_path(Scope::System)
     }
-    fn exe(&self, s: Scope) -> PathBuf {
-        s.paths().0
+    fn exe(&self) -> PathBuf {
+        Scope::System.paths().0
     }
     fn current_exe(&self) -> PathBuf {
         env::current_exe().unwrap_or_default()
@@ -378,9 +373,8 @@ fn exit_code(r: &Reply) -> i32 {
 /// install is idempotent, so the first changing verb installs and later ones mend. Installing
 /// needs administrator rights once; without them the reply says the exact command to run.
 fn ask(req: &Request, args: &[String], h: &dyn Host) -> Reply {
-    let s = h.scope();
     if !req.changes() {
-        return match h.dial(s, host::STATUS_SOCK) {
+        return match h.dial(host::STATUS_SOCK) {
             Ok(c) => exchange(c, req),
             Err(_) => Reply::fail(
                 "no_daemon",
@@ -388,24 +382,24 @@ fn ask(req: &Request, args: &[String], h: &dyn Host) -> Reply {
             ),
         };
     }
-    let exe = h.exe(s);
+    let exe = h.exe();
     let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.into());
     let download = canon(&h.current_exe()) != canon(&exe);
-    if let Ok(c) = h.dial(s, host::CTL_SOCK)
+    if let Ok(c) = h.dial(host::CTL_SOCK)
         && !(download && h.admin())
     {
         return exchange(c, req);
     }
     if !h.admin() {
         // A daemon that answers on status.sock is running: only the rights to change it are missing.
-        let why = if h.dial(s, host::STATUS_SOCK).is_ok() {
+        let why = if h.dial(host::STATUS_SOCK).is_ok() {
             format!("changing wirebond needs {}", admin_shell(h))
         } else {
             format!("wirebond is not running here, and installing it needs {} once", admin_shell(h))
         };
         return needs_admin(h, args, why);
     }
-    let (installed, c) = match install_started(h, s) {
+    let (installed, c) = match install_started(h) {
         Ok(started) => started,
         Err(r) => return *r,
     };
@@ -413,7 +407,7 @@ fn ask(req: &Request, args: &[String], h: &dyn Host) -> Reply {
     if installed {
         // What only the CLI knows: that it installed, and where wirebond is now.
         r.changed |= r.ok;
-        let line = format!("wirebond is installed {}", installed_at(h, s));
+        let line = format!("wirebond is installed {}", installed_at(h));
         r.message = if r.message.is_empty() { line } else { format!("{}\n{line}", r.message) };
     }
     r
@@ -422,16 +416,15 @@ fn ask(req: &Request, args: &[String], h: &dyn Host) -> Reply {
 /// `wirebond install` (§19): installs and starts the service as the first changing verb does, and
 /// changes no role; idempotent, so it also mends an install. Needs administrator rights.
 fn install(args: &[String], h: &dyn Host) -> Reply {
-    let s = h.scope();
     if !h.admin() {
         return needs_admin(h, args, format!("installing wirebond needs {}", admin_shell(h)));
     }
-    let (changed, _) = match install_started(h, s) {
+    let (changed, _) = match install_started(h) {
         Ok(started) => started,
         Err(r) => return *r,
     };
     let what = if changed { "wirebond is installed" } else { "wirebond was installed already" };
-    Reply { changed, ..Reply::ok(format!("{what} {}", installed_at(h, s))) }
+    Reply { changed, ..Reply::ok(format!("{what} {}", installed_at(h))) }
 }
 
 /// The refusal of a verb that needs administrator rights, with the command line to run instead.
@@ -441,11 +434,11 @@ fn needs_admin(h: &dyn Host, args: &[String], why: impl Into<String>) -> Reply {
 
 /// Installs and starts the service: whether the install changed anything, and the daemon once it
 /// answers; else the reply for the step that failed.
-fn install_started(h: &dyn Host, s: Scope) -> Result<(bool, Box<dyn LocalStream>), Box<Reply>> {
+fn install_started(h: &dyn Host) -> Result<(bool, Box<dyn LocalStream>), Box<Reply>> {
     let fail = |code, msg| Box::new(Reply::fail(code, msg));
-    let changed = h.install(s).map_err(|e| fail("failed", format!("installing wirebond failed: {e}")))?;
+    let changed = h.install().map_err(|e| fail("failed", format!("installing wirebond failed: {e}")))?;
     let silent = |e| fail("no_daemon", format!("wirebond is installed but its daemon does not answer: {e}"));
-    Ok((changed, started(h, s).map_err(silent)?))
+    Ok((changed, started(h).map_err(silent)?))
 }
 
 /// Where administrator rights come from on this OS.
@@ -455,10 +448,10 @@ fn admin_shell(h: &dyn Host) -> &'static str {
 
 /// The daemon an install has just started, once it answers on ctl.sock within the start wait;
 /// else the last dial's error.
-fn started(h: &dyn Host, s: Scope) -> io::Result<Box<dyn LocalStream>> {
+fn started(h: &dyn Host) -> io::Result<Box<dyn LocalStream>> {
     let end = Instant::now() + h.start_wait();
     loop {
-        match h.dial(s, host::CTL_SOCK) {
+        match h.dial(host::CTL_SOCK) {
             Err(_) if Instant::now() < end => thread::sleep(Duration::from_millis(50)),
             r => return r,
         }
@@ -467,9 +460,9 @@ fn started(h: &dyn Host, s: Scope) -> io::Result<Box<dyn LocalStream>> {
 
 /// "as a system service at <exe>", and how to run it while `wirebond` on PATH is not it. On
 /// Windows the install put its folder on the machine's PATH, which this shell read before.
-fn installed_at(h: &dyn Host, s: Scope) -> String {
-    let (exe, here) = (h.exe(s), invoke(h, &h.exe(s)));
-    let path = match (h.on_path(s), h.windows()) {
+fn installed_at(h: &dyn Host) -> String {
+    let (exe, here) = (h.exe(), invoke(h, &h.exe()));
+    let path = match (h.on_path(), h.windows()) {
         (true, _) => String::new(),
         (false, true) => format!("; open a new PowerShell to run it as wirebond, or here as {here}"),
         (false, false) => format!("; it is not on PATH: run it as {here}"),
@@ -507,7 +500,7 @@ fn uninstall(args: &[String], h: &dyn Host) -> Reply {
     if !h.admin() {
         return needs_admin(h, args, "uninstalling wirebond needs administrator rights");
     }
-    match h.uninstall(h.scope()) {
+    match h.uninstall() {
         Ok((changed, step)) => {
             let what = if changed { "wirebond is uninstalled" } else { "wirebond was not installed" };
             let step = if step.is_empty() { String::new() } else { format!("\nstill to do: {step}") };

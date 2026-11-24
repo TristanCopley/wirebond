@@ -10,10 +10,9 @@
 //! node, the daemon, calls [`links`] every LINK_SCAN and at once on a wake, [`default_addr`] for
 //! the default route's link (the link carrying the mesh, §8, and an anchor's uplink, §6.2),
 //! [`listen`] and [`listen_mesh`] for the lane sockets and [`Wake::tick`] on its 1 s tick. As
-//! `wirebond run` it runs inside [`run_service`], takes its scope from `need(false)` and opens
-//! [`listen_local`] in that scope's state directory, where [`Config::load`] and [`Config::save`]
-//! keep config.json. The CLI calls [`need`], [`admin`], [`on_path`], [`install`], [`uninstall`]
-//! and [`dial`].
+//! `wirebond run` it runs inside [`run_service`] and opens [`listen_local`] in the system scope's
+//! state directory, where [`Config::load`] and [`Config::save`] keep config.json. The CLI calls
+//! [`admin`], and [`on_path`], [`install`], [`uninstall`] and [`dial`] in the system scope.
 //!
 //! The shared code calls `os::<function>`, one set per OS: linux.rs and macos.rs, each completed
 //! by unix.rs, and windows.rs. The local sockets are AF_UNIX on every OS, Windows 10 included, so
@@ -68,9 +67,8 @@ pub use os::dns_local;
 pub fn dns_local() -> bool {
     false
 }
-// Install and uninstall, the scope they need, and whether `wirebond` on PATH is the installed
-// executable (install.rs).
-pub use install::{create, install, need, on_path, uninstall};
+// Install and uninstall, and whether `wirebond` on PATH is the installed executable (install.rs).
+pub use install::{create, install, on_path, uninstall};
 // The 2.0 platform API per OS (host/net.rs): the TUN device, capture, egress, the upstream resolver,
 // support sharing and stale-state cleanup.
 pub use os::{

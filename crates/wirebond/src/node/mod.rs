@@ -118,7 +118,7 @@ fn append_log(dir: &Path, line: &str) {
 /// The daemon. `wirebond run` calls it inside host::run_service; `version` is the build's. It
 /// returns when `stop` fires (Windows' service stop; SIGTERM and SIGINT elsewhere).
 pub fn run(version: &str, stop: Receiver<()>) -> io::Result<()> {
-    let scope = host::need(false);
+    let scope = host::Scope::System;
     let (_exe, dir) = scope.paths();
     let (cfg, bad) = match Config::load(&dir) {
         Ok(cfg) => (cfg, None),
