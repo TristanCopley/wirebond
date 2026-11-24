@@ -52,8 +52,10 @@ pub const DEFAULT_URL: &str = "https://github.com/TristanCopley/wirebond";
 /// 4 minutes for update.
 const MAX_TIME: &str = "15";
 const ASSET_TIME: &str = "45";
-/// SMOKE_TIMEOUT, which core keeps in nanoseconds.
-const SMOKE: Duration = Duration::from_nanos(SMOKE_TIMEOUT as u64);
+/// SMOKE_TIMEOUT, which core keeps in nanoseconds. A test build waits 3 s instead, so that the
+/// test of a smoke test that hangs does not hold every other spawning test for 10 s; 3 s still
+/// leaves a loaded runner time for the first exec of a freshly written script.
+const SMOKE: Duration = if cfg!(test) { Duration::from_secs(3) } else { Duration::from_nanos(SMOKE_TIMEOUT as u64) };
 
 /// config.json's "update" object, which §22.4's example does not show.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
