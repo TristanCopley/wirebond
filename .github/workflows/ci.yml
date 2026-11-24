@@ -6,10 +6,13 @@ name: ci
 
 on:
   # A branch's pushes are checked as its pull request, once, not also as pushes; a branch with no
-  # pull request is run by hand. Tags run release.yml, which calls this workflow.
+  # pull request is run by hand. Tags run release.yml, which calls this workflow. A change to the
+  # website alone runs site.yml only: nothing here reads site/.
   push:
     branches: [main]
+    paths-ignore: ['site/**', '.github/workflows/site.yml']
   pull_request:
+    paths-ignore: ['site/**', '.github/workflows/site.yml']
   schedule:
     - cron: '23 9 * * *'
   workflow_dispatch:

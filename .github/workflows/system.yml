@@ -5,10 +5,13 @@
 name: system
 
 on:
-  # As in ci.yml: a branch's pushes are checked as its pull request, and tags run release.yml.
+  # As in ci.yml: a branch's pushes are checked as its pull request, tags run release.yml, and a
+  # change to the website alone runs site.yml only.
   push:
     branches: [main]
+    paths-ignore: ['site/**', '.github/workflows/site.yml']
   pull_request:
+    paths-ignore: ['site/**', '.github/workflows/site.yml']
   schedule:
     - cron: '41 10 * * *'
   workflow_dispatch:
