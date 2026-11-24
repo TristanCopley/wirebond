@@ -19,7 +19,7 @@ problems
     next: allow UDP 7849 to and from both devices
   mesh_only: only the mesh lane carries the bond, which gains nothing over the mesh alone
     next: cable a phone or another network, or try another anchor: wirebond pick
-  bond_down: every lane and the channel are down; traffic goes direct
+  bond_down: the channel is down and no lane has an echo; traffic goes direct
     next: wait: capture returns when a lane validates
   no_egress: the anchor offers no internet: only its own services go through the bond
     next: check xanth's uplink: wirebond status xanth

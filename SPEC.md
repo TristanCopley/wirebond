@@ -165,7 +165,7 @@ When the anchor offers IPv4 egress only, the client still captures IPv6, so noth
 
 The anchor's interface has 10.77.0.1/24 and fd77:b0d::1/64, or 192.168.137.1/24 on Windows (§6.2).
 
-- **Delivered locally:** packets for these addresses go to the anchor's own services. Moonlight on the client adds the host at the anchor's bond address (`10.77.0.1`, or `192.168.137.1` for a Windows anchor), and status prints that line.
+- **Delivered locally:** packets for these addresses go to the anchor's own services. Moonlight on the client adds the host at the anchor's bond address (`10.77.0.1`, or `192.168.137.1` for a Windows anchor), and status prints that line while the bond is up.
 - **Not routed through the bond:** the anchor's mesh address. Traffic to it, the control channel included, stays on the mesh.
 
 ### 6.2 Forwarding and NAT
@@ -213,6 +213,8 @@ Every change is undone when capture is removed. Resolving near the anchor means 
 | --- | --- | --- | --- |
 | iPhone (Personal Hotspot over USB) | `iPhone USB` | Apple Mobile Device Ethernet | `ipheth` |
 | Android (USB tethering) | — | RNDIS or NCM interface | RNDIS or NCM interface |
+
+On macOS the `iPhone USB` network service has "Disable unless needed" on by default, and the phone's interface then gets no address while Wi-Fi works: it must be turned off for the phone to be a link (§17).
 
 **A computer as a support.** `wirebond support on <uplink> <cable> [--for <client>]` shares `<uplink>` to `<cable>` with the OS's own sharing:
 
@@ -324,6 +326,7 @@ Overhead is 11 + 6 + 16 = **33 bytes**, plus 28 (IPv4/UDP) or 48 (IPv6/UDP) for 
 | --- | --- |
 | Data flowed within `IDLE_AFTER` (5 s) | every lane, every `PROBE_ACTIVE` (20 ms) |
 | Punching | every candidate pair, every 200 ms, for 5 s; round after round while data flows and a direct lane is not up |
+| A client's channel down, no data flowing | one probe every `PROBE_CHAN_DOWN` (1 s) on the idle lane, from a probe at once, until the channel is back; a punch round once no echo came for 3 s (§17) |
 | Idle | one probe every `PROBE_IDLE` (25 s) on one direct lane; down after `IDLE_MISSES` (3) misses |
 
 ### 11.2 Probe and echo
@@ -504,13 +507,14 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 | Event | Behaviour |
 | --- | --- |
 | Anchor unreachable at start | No capture; traffic goes direct. Problem `anchor_unreachable`. Redial with backoff from `REDIAL_MIN` (1 s) to `REDIAL_MAX` (30 s). |
-| Bond lost | Every lane down and the channel down for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
+| Bond lost | The channel down and no echo on any lane, each for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. The lanes' states do not decide it: an idle bond's lanes are dormant, never down. While its channel is down a client probes its idle lane every second (§11.1), so an idle bond is judged as a busy one is; when that lane has not answered for 3 s, a punch round probes every lane, so that one dead lane does not cost the bond. An anchor frees a bond whose channel has been down for `FAIL_OPEN_AFTER` and from which no packet came for `IDLE_MISSES` × `PROBE_IDLE` (75 s): it can see the channel go before the client does, and until then an idle client sends one probe per `PROBE_IDLE`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
 | Captive portal | On link up, and at every link scan while the link is marked captive, the node fetches `http://captive.apple.com/hotspot-detect.html` over that link. Anything but `Success` marks the link captive, and it carries no lane. If the bond is up through another link, the login page would go through the anchor, so status shows `captive_portal <link>`: run `wirebond client off`, log in, then `wirebond client <anchor>`. |
 | Sleep and wake | Wake detection (§11.4): re-punch, fresh estimates, keys kept. |
 | A link appears or vanishes | Rescan within 2 s, re-punch, recompute groups. |
-| Mesh down, lanes up | Direct lanes keep carrying the bond. Keys ratchet by derivation. The channel redials. |
+| Mesh down, lanes up | Direct lanes keep carrying the bond, idle or not: the client's probes (§11.1) tell each side the other is there. Keys ratchet by derivation. The channel redials. |
 | Every lane down, channel up for `ALL_LANES_DOWN` (2 s) | Redial the channel, then re-punch. |
 | Only the mesh lane after `MESH_ONLY_AFTER` (30 s) | Problem `mesh_only`: the bond gives no gain over the baseline. |
+| Lanes through one client link only, after `MESH_ONLY_AFTER` | A note on the bond in status, not a problem: with one link the bond has nothing to fail over to and no capacity to add. The mesh lane rides one of the links, so it does not count. On macOS the note names the setting that hides a phone on USB: "Disable unless needed" on the `iPhone USB` network service, on by default, leaves the phone's interface unconfigured while Wi-Fi works. |
 | No lane validated `LANES_BLOCKED_AFTER` (3 s) after connect | Problem `lanes_blocked`. |
 
 ## 18. Measure and select: `wirebond pick`
@@ -616,7 +620,11 @@ Reading needs no rights, and a change needs the rights that installed the servic
 }
 ```
 
-A lane's `links` are the client's link, then the anchor's, each by its label. `dev_ms` is left out until the engine reports it.
+A lane's `links` are the client's link, then the anchor's, each by its label. Its figures:
+- `tx_mbps` and `rx_mbps`: what it carried over the last 2 s, out of this device and into it. `tx` counts every packet sent, probes too; `rx` counts data.
+- `share`, `first_arrivals` and `rescues_per_min`: over the last minute; `share` counts both directions (§11.5).
+- `rate_mbps`: the rate it is paced at (§12); 0 is unlimited.
+- `dev_ms`: the jitter of §11.3, in this device's sending direction.
 
 What each role sees:
 - **Anchor:** an `anchor` object listing its bonds, each client's addresses, bytes egressed and delivered locally, and its uplink.
@@ -665,6 +673,7 @@ Durations are monotonic. All constants live in `crates/core/src/consts.rs`.
 | `MAX_FLOWS`, `REORDER_SLOTS`, `FLOW_IDLE` | 4096, 2048, 60 s | per bond, per flow |
 | `PROBE_ACTIVE`, `PROBE_PUNCH`, `PUNCH_FOR`, `PUNCH_GAP` | 20 ms, 200 ms, 5 s, 5 s | §9, §11 |
 | `PROBE_IDLE`, `IDLE_AFTER`, `IDLE_MISSES` | 25 s, 5 s, 3 | idle cost: about 70 KB per bond per hour |
+| `PROBE_CHAN_DOWN` | 1 s | a client's idle lane while its channel is down (§17): about 1 MB per hour, on one lane, unmetered if there is one |
 | `ECHO_WINDOW`, `RTT_RING`, `ECHO_HISTORY`, `MAD_SAMPLES` | 2 s, 256, 8, 128 | §11 |
 | `EWMA_GAIN`, `DEV_WINDOW`, `MIN_WINDOW`, `RATE_WINDOW` | 1/8, 2 s, 10 s, 100 ms | §11.3 |
 | `SUSPECT_MIN`, `SUSPECT_DEV`, `LAG_FLOOR`, `LAG_JITTER` | 20 ms, 4, 10 ms, 3 | §11.4 |
@@ -728,6 +737,7 @@ Every role runs as a system service:
 - **Smoke test:** `<exe>.new version --json` must answer within `SMOKE_TIMEOUT` (10 s).
 - **Swap:** the new binary replaces the old atomically, after `UPDATE_IDLE` (10 min) without traffic.
 - **Healthy or rolled back:** the new version is good once it has been healthy for `UPDATE_HEALTHY` (60 s). Otherwise it is rolled back after `UPDATE_MAX_STARTS` (3) failed starts.
+- **Which version is newer:** a release is newer than an earlier release and than its own pre-releases. A pre-release (`v2.0.0-rc.2`) is newer only than an earlier pre-release, in semver's order: a device on a release candidate takes the next one, and a device on a release never takes one.
 - **Version skew:** a node whose peer runs a newer major version shows `peer_newer`.
 
 ### 22.4 Config

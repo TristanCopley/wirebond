@@ -1353,7 +1353,7 @@ fn log_args<'a>(ev: &Event<'a>) -> (u64, &'a [u8]) {
     match *ev {
         Event::Send { packet } => (0, packet),
         Event::Packet { sock, data, .. } => (u64::from(sock), data),
-        Event::Links { .. } | Event::Wake | Event::Control(_) | Event::Tick => (0, &[]),
+        Event::Links { .. } | Event::Wake | Event::Control(_) | Event::Channel(_) | Event::Tick => (0, &[]),
     }
 }
 
@@ -1551,6 +1551,7 @@ mod tests {
                     Seen::Packet(sock, from)
                 }
                 Event::Wake => Seen::Wake,
+                Event::Channel(_) => return,
                 Event::Tick => {
                     self.next[self.role as usize].set(Mono::MAX);
                     Seen::Tick(now)

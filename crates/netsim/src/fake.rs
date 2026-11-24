@@ -379,6 +379,7 @@ impl Endpoint for Fake {
                 _ => {}
             },
             Event::Wake => self.wakes += 1,
+            Event::Channel(_) => {}
             Event::Send { packet } => {
                 if let Some(i) = outer(packet) {
                     self.app(i.flow, i.data, out);

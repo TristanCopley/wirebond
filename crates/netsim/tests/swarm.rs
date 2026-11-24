@@ -3,8 +3,9 @@
 //! event) and liveness mode (faults heal at two thirds of the run, then video must play), each
 //! twice: the two event-log hashes must match. 30 simulated seconds per run (notes/netsim.md 13);
 //! 5 minutes with WIREBOND_LONG; WIREBOND_SEED=N for one seed. Go's failure on seed 4 was the
-//! checker's probe key, fixed in check.rs; seed 8's liveness gap at full length is open (NOTES.md,
-//! Open 4). Owner: N4.
+//! checker's probe key, fixed in check.rs; seed 8's liveness gap at full length (1,000.8 ms
+//! against 1,000 ms) went with the pacer's cap at twice the offered rate (NOTES.md, Closed).
+//! Owner: N4.
 
 use wirebond_core::MODE_BANDWIDTH;
 use wirebond_netsim::env::{Env, START, WARM, defaults, hole, long, maker, ms, par_runs, repro, seeds, show_hash};
