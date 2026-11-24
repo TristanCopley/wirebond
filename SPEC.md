@@ -439,7 +439,7 @@ The mode belongs to the bond. The client sets it, and it applies in both directi
 
 ### 14.1 Performance (default)
 
-- **The spread:** one lane per bottleneck group that is up, validated, not suspect and not barred. In each group, the lane with the lowest base OWD. The mesh lane is in the spread only for a group with no usable direct lane: a direct lane is usable while it is validated and up or suspect, barred or not. While blind, and while no lane qualifies though echoes still arrive, the spread is the blind pair (§11.4).
+- **The spread:** one lane per bottleneck group that is validated, not barred, and up or suspect. In each group, an up lane before a suspect one, then the lane with the lowest base OWD. A suspect lane still answers, so it stays in the race: its copies lose while it stalls and win again from the first packet after. Taken out of the spread, it returned only a probe's round trip after it recovered, and the stream rode the slower lane alone until then; with hotel spikes of 10–50 ms every 2–5 s, more frames were late for that than for the spikes themselves (A1). A lane leaves the spread when it goes down (§11.4). The mesh lane is in the spread only for a group with no usable direct lane: a direct lane is usable while it is validated and up or suspect, barred or not. While blind, and while no lane qualifies though echoes still arrive, the spread is the blind pair (§11.4).
 - **Sending:** every packet of every flow goes on every lane of the spread.
   - Each lane's controller is offered the whole stream and drops its excess at its own pacer, so a lane too slow for the stream never holds the others back.
   - A lane that leaves the spread drops its queue.

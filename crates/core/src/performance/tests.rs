@@ -1,5 +1,6 @@
-//! Tests of performance.rs on hand-built sessions: the spread has no skew limit, every lane of it
-//! gets every bulk packet, and a lane that leaves drops its queue, unrewound. The pair tests
+//! Tests of performance.rs on hand-built sessions: the spread has no skew limit and keeps a
+//! suspect lane, every lane of it gets every bulk packet, and a lane that leaves drops its queue,
+//! unrewound. The pair tests
 //! (tests/pair.rs) drive whole sessions in performance.
 
 use std::net::SocketAddr;
@@ -62,8 +63,41 @@ fn every_packet_on_every_lane() {
     }
 }
 
-/// A lane that falls silent while another answers leaves the spread and drops its queue: the
-/// lane that stays carries the same packets, so nothing is rewound or moved onto it.
+/// A lane that turns suspect still answers, so it stays in the race with its queue: its copies
+/// lose while it stalls and win again from the first packet after, where a lane taken out came
+/// back only a probe's round trip later, the stream on the slower lane alone meanwhile (A1).
+/// Bandwidth, which gives each packet to one lane, takes it out and rewinds it. An up lane of its
+/// group races in its place; of two suspect ones, the lower base OWD.
+#[test]
+fn a_suspect_lane_stays_in_the_race() {
+    let now = 30 * SEC;
+    let lanes = [(0x0101, 0, 32), (0x0102, 0, 34), (0x0201, 1, 45)];
+    let (wifi, wifi6) = (LaneIx::at(0), LaneIx::at(1));
+    let mut out = Acts::default();
+    for (mode, want, rewinds) in [(Mode::Performance, vec![0, 2], 0), (Mode::Bandwidth, vec![2], 1)] {
+        let mut s = session(mode, now, &lanes);
+        s.lanes[wifi6].validated = false;
+        s.schedule(&mut out, now);
+        assert_eq!(ixs(&s), [0, 2], "{mode:?}");
+        let b = s.pool.get().unwrap();
+        let w = &mut s.lanes[wifi];
+        w.q.push_back(Pkt { c: 100, at: now - MS, buf: Some(b), n: 1435 });
+        (w.q_bytes, w.state, w.last_echo) = (1435, State::Suspect, now - 150 * MS);
+        s.schedule(&mut out, now);
+        assert_eq!((ixs(&s), s.rewinds), (want, rewinds), "{mode:?}");
+        assert_eq!(s.lanes[wifi].q.len(), usize::from(mode == Mode::Performance), "{mode:?}");
+    }
+    let mut s = session(Mode::Performance, now, &lanes);
+    s.lanes[wifi].state = State::Suspect;
+    s.schedule(&mut out, now);
+    assert_eq!(ixs(&s), [1, 2]);
+    s.lanes[wifi6].state = State::Suspect;
+    s.schedule(&mut out, now);
+    assert_eq!(ixs(&s), [0, 2]);
+}
+
+/// A lane that goes down while another answers leaves the spread and drops its queue: the lane
+/// that stays carries the same packets, so nothing is rewound or moved onto it.
 #[test]
 fn a_leaving_lane_drops_its_queue() {
     let now = 30 * SEC;
@@ -78,7 +112,7 @@ fn a_leaving_lane_drops_its_queue() {
         x.q_bytes += 1435;
     }
     let w = &mut s.lanes[wifi];
-    (w.state, w.last_echo) = (State::Suspect, now - 150 * MS);
+    (w.state, w.last_echo) = (State::Down, now - 2 * SEC);
     s.schedule(&mut out, now);
     assert_eq!((ixs(&s), s.rewinds), (vec![1], 0));
     assert!(s.lanes[wifi].q.is_empty() && s.lanes[phone].q.is_empty() && out.0.is_empty());

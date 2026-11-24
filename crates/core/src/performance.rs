@@ -7,9 +7,10 @@
 //! (QUEUE_AGE) and never holds the others back. The receiver keeps the first copy (the replay
 //! window drops the rest), and its reorder buffer does not wait for a lagging lane's copy
 //! (`flow::release`, DUP_GRACE). No failover, rewind, trial or return: a lane that stalls simply
-//! loses the race, and one that leaves the spread drops its queue, whose packets the other lanes
-//! carry. Throughput is the best single lane's; latency and steadiness the best of the lanes per
-//! packet. The prototype: research_notes jitter_simulation.md, netsim's tests/jitter.rs.
+//! loses the race, suspect or not, until it goes down; and one that leaves the spread drops its
+//! queue, whose packets the other lanes carry. Throughput is the best single lane's; latency and
+//! steadiness the best of the lanes per packet. The prototype: research_notes
+//! jitter_simulation.md, netsim's tests/jitter.rs.
 
 use crate::lane::{Lane, LaneIx, State};
 use crate::session::Mode;
