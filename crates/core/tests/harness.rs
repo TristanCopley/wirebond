@@ -60,6 +60,7 @@ impl Engine for Fake {
                 self.wants.retain(|&w| w > now);
             }
             Event::Wake => self.seen.push(Seen::Wake { at: now }),
+            Event::Channel(_) => {}
         }
     }
 

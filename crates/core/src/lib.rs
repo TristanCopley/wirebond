@@ -131,6 +131,10 @@ pub enum Event<'a> {
     Wake,
     /// One control message: the peer's hello, key, links or mode, or the client's own mode.
     Control(&'a Msg),
+    /// The control channel to the peer came up (true) or went down (§17). Without it only echoes
+    /// tell a client that its anchor is still there, so while it is down its idle lane is probed
+    /// every [`PROBE_CHAN_DOWN`].
+    Channel(bool),
     /// [`Session::next`] was reached.
     Tick,
 }
@@ -422,6 +426,7 @@ impl Session {
             }
             Event::Wake => self.wake(now),
             Event::Control(m) => self.control(out, now, m),
+            Event::Channel(up) => self.channel(now, up),
             Event::Tick => {}
         }
         if now >= self.next {

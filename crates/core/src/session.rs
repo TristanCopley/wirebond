@@ -97,6 +97,8 @@ pub struct Session {
     pub(crate) last_echo: Mono,
     /// The client's idle-probe lane.
     pub(crate) idle: Option<LaneIx>,
+    /// The control channel is down (`Event::Channel`).
+    pub(crate) chan_down: bool,
     pub(crate) punch_at: Mono,
     pub(crate) punch_until: Mono,
     pub(crate) next_punch: Mono,
@@ -181,6 +183,7 @@ impl Session {
             woke: Mono::MIN,
             last_echo: 0,
             idle: None,
+            chan_down: false,
             punch_at: Mono::MIN / 2,
             punch_until: 0,
             next_punch: 0,

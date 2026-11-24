@@ -23,8 +23,9 @@ use crate::session::NEVER;
 use crate::wire::{Echo, Probe, Window, after, probe_len, seq_newer};
 use crate::{
     DOWN_AFTER, ECHO_HISTORY, ECHO_WINDOW, HEADER_LEN, IDLE_MISSES, LAG_FLOOR, LAG_JITTER, MAX_ECHOES, MAX_LINKS, MIN,
-    MIN_WINDOW, Mono, Out, PROBE_ACTIVE, PROBE_ANSWER, PROBE_COPY, PROBE_IDLE, PROBE_PUNCH, PROBE_REWIND, PUNCH_FOR,
-    PUNCH_GAP, RATE_WINDOW, RTT_RING, Role, Session, SockId, TAG_LEN, TYPE_PROBE, VALIDATE_AMP,
+    MIN_WINDOW, Mono, Out, PROBE_ACTIVE, PROBE_ANSWER, PROBE_CHAN_DOWN, PROBE_COPY, PROBE_IDLE, PROBE_PUNCH,
+    PROBE_REWIND, PUNCH_FOR, PUNCH_GAP, RATE_WINDOW, RTT_RING, Role, Session, SockId, TAG_LEN, TYPE_PROBE,
+    VALIDATE_AMP,
 };
 
 /// Small-flow first arrivals kept with pending copy deadlines, oldest dropped first.
@@ -793,7 +794,7 @@ impl Session {
         let every = match self.role {
             _ if self.active => Some(PROBE_ACTIVE),
             _ if now < self.punch_until => Some(PROBE_PUNCH),
-            Role::Client if self.idle == Some(l) => Some(PROBE_IDLE),
+            Role::Client if self.idle == Some(l) => Some(self.idle_every()),
             _ => None,
         };
         let x = &mut self.lanes[l];
@@ -971,6 +972,7 @@ impl Session {
     /// Chooses the client's idle-probe lane: direct, unmetered first, lowest RTT, the first of
     /// equals.
     pub(crate) fn pick_idle(&mut self, now: Mono) {
+        let every = self.idle_every();
         let direct = self.lanes.iter().enumerate().filter(|(_, x)| !x.mesh && x.validated && x.state != State::Down);
         self.idle = match self.role {
             Role::Client => direct.min_by_key(|(_, x)| (x.metered, x.rtt)).map(|(i, _)| LaneIx::at(i)),
@@ -978,7 +980,23 @@ impl Session {
         };
         if let Some(i) = self.idle {
             let x = &mut self.lanes[i];
-            (x.state, x.misses, x.next_probe) = (State::Up, 0, now.saturating_add(PROBE_IDLE));
+            (x.state, x.misses, x.next_probe) = (State::Up, 0, now.saturating_add(every));
+        }
+    }
+
+    /// How often a client probes its idle lane (§11.1): while its channel is down, often enough to
+    /// know within FAIL_OPEN_AFTER whether the anchor is still there (§17).
+    fn idle_every(&self) -> Mono {
+        if self.chan_down { PROBE_CHAN_DOWN } else { PROBE_IDLE }
+    }
+
+    /// The control channel came up or went down (`Event::Channel`): the idle lane's pace follows,
+    /// from a probe at once when it went down.
+    pub(crate) fn channel(&mut self, now: Mono, up: bool) {
+        self.chan_down = !up;
+        if let Some(l) = self.idle.filter(|_| !up) {
+            self.lanes[l].next_probe = now;
+            self.wake_at(now);
         }
     }
 

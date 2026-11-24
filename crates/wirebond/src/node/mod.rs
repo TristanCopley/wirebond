@@ -44,8 +44,8 @@ use std::{fs, thread};
 
 use wirebond_core::{
     self as core, ALL_LANES_DOWN, FAIL_OPEN_AFTER, IDLE_AFTER, LANES_BLOCKED_AFTER, LINK_SCAN, LOG_LINES, MAX_CANDS,
-    MAX_LINKS, MAX_MSG, MESH_ONLY_AFTER, MS, Mode, Mono, PICK_SECONDS, PORT, PROTOCOL, PUNCH_FOR, REDIAL_MAX,
-    REDIAL_MIN, RidTable, SEC, STATUS_EVENTS, STUN_EVERY, Session, SockId, TUN_MTU,
+    MAX_LINKS, MAX_MSG, MESH_ONLY_AFTER, MS, Mode, Mono, PICK_SECONDS, PORT, PROBE_CHAN_DOWN, PROTOCOL, PUNCH_FOR,
+    REDIAL_MAX, REDIAL_MIN, RidTable, SEC, STATUS_EVENTS, STUN_EVERY, Session, SockId, TUN_MTU,
 };
 
 use crate::api::{self, LinkKind, Reply, Request, Role, Status, problem};
@@ -62,6 +62,9 @@ const LIFE_EVERY: Mono = 20 * MS;
 const RESOLVE_EVERY: Mono = 30 * SEC;
 /// How often a host call that failed is tried again: an anchor's TUN device, a client's capture.
 const HOST_RETRY: Mono = 5 * SEC;
+/// A client without its channel and without an echo for this long has every lane probed (§17):
+/// two of its session's probes went unanswered, and FAIL_OPEN_AFTER is not yet up.
+const UNHEARD: Mono = 3 * PROBE_CHAN_DOWN;
 /// ICMPv6 unreachables a client writes a second at most (§5.5).
 const ICMP6_RATE: u32 = 100;
 /// Packets read from one source per loop turn at most, so no source starves the others.
@@ -1216,9 +1219,13 @@ impl Daemon {
             return self.pick_fail("the channel closed".into());
         }
         let mut client = false;
-        for b in self.bonds.iter_mut().filter(|b| b.chan == Some(id)) {
-            (b.chan, b.chan_down) = (None, Some(now));
-            client = self.cfg.role == Role::Client;
+        for bi in 0..self.bonds.len() {
+            if self.bonds[bi].chan == Some(id) {
+                (self.bonds[bi].chan, self.bonds[bi].chan_down) = (None, Some(now));
+                client = self.cfg.role == Role::Client;
+                // From here only echoes tell a client its anchor is there: its session probes for them.
+                self.handle_bond(bi, core::Event::Channel(false));
+            }
         }
         if client || matches!(p.purpose, Some(Purpose::Bond)) {
             if self.bonds.is_empty() {
@@ -1531,6 +1538,7 @@ impl Daemon {
         }
         let Some(mode) = self.bond_ref(bi).map(|b| b.mode) else { return };
         let hello = core::Msg { t: "hello".into(), mode: mode.as_str().into(), ..core::Msg::default() };
+        self.handle_bond(bi, core::Event::Channel(true));
         self.handle_bond(bi, core::Event::Control(&hello));
         let offer = self.offer();
         self.send_bond(bi, &Msg::Links(offer));
@@ -2052,8 +2060,8 @@ impl Daemon {
             let snap = s.snapshot();
             let up = snap.lanes.iter().any(|l| l.validated && l.state == "up");
             let direct = snap.lanes.iter().any(|l| l.validated && l.state == "up" && l.id != 0);
-            // §17: every lane down, as the engine reports it (suspect is not down), for the redial.
-            let down = snap.lanes.iter().all(bond::lane_down);
+            // §17: every lane down (`bond::lane_down`; suspect is not down), for the redial.
+            let down = snap.lanes.iter().all(|l| bond::lane_down(l, now));
             let heard = bond::heard(&snap, client);
             let b = &mut self.bonds[bi];
             b.heard = heard;
@@ -2077,9 +2085,10 @@ impl Daemon {
             } else {
                 b.lanes_down = None;
             }
-            // §17: the bond is lost once the channel is down and the peer unheard, each for
-            // FAIL_OPEN_AFTER: what the daemon observes, whatever state the lanes are in.
-            let gone = bond::lost(b.chan_down, heard, now);
+            // §17: the bond is lost once the channel is down for FAIL_OPEN_AFTER and the peer
+            // unheard for as long as it can be silent (`bond::lost`): what the daemon observes,
+            // whatever state the lanes are in.
+            let gone = bond::lost(b.chan_down, heard, client, now);
             if !client {
                 // An anchor frees a lost bond (§17), and pick's temporary bond with its channel
                 // (§18). An idle bond whose channel alone is down stays: the client's probes
@@ -2107,13 +2116,14 @@ impl Daemon {
             } else if b.state == BondState::Up
                 && b.chan.is_none()
                 && now >= b.probe_at
-                && heard.is_none_or(|t| now - t >= SEC)
+                && heard.is_none_or(|t| now - t >= UNHEARD)
             {
-                // The channel is down and the lanes are quiet (an idle bond has one probe every
-                // PROBE_IDLE): a punch round has every lane probed for PUNCH_FOR, so echoes say
-                // within FAIL_OPEN_AFTER whether the anchor is still there, and round after round
-                // keep saying so, and keep the anchor hearing this client, until the channel is
-                // back. While data flows the lanes are probed anyway.
+                // The channel is down, and the lane the session probes meanwhile (every
+                // PROBE_CHAN_DOWN while idle; every lane while data flows) has not answered for
+                // UNHEARD: a punch round has every lane probed for PUNCH_FOR, so any lane that
+                // still works says within FAIL_OPEN_AFTER that the anchor is there. One round per
+                // silence: while echoes come no round starts, where round after round cost every
+                // lane, the phone's too, megabytes an hour for as long as the mesh was down.
                 b.probe_at = now + PUNCH_FOR;
                 self.feed_links(bi);
             } else if down && b.validated && b.chan.is_some() && b.lanes_down.is_some_and(|t| now - t >= ALL_LANES_DOWN)

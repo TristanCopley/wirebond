@@ -326,7 +326,7 @@ Overhead is 11 + 6 + 16 = **33 bytes**, plus 28 (IPv4/UDP) or 48 (IPv6/UDP) for 
 | --- | --- |
 | Data flowed within `IDLE_AFTER` (5 s) | every lane, every `PROBE_ACTIVE` (20 ms) |
 | Punching | every candidate pair, every 200 ms, for 5 s; round after round while data flows and a direct lane is not up |
-| A client's channel down, no data flowing | as punching, round after round, until the channel is back or the bond is lost (§17) |
+| A client's channel down, no data flowing | one probe every `PROBE_CHAN_DOWN` (1 s) on the idle lane, from a probe at once, until the channel is back; a punch round once no echo came for 3 s (§17) |
 | Idle | one probe every `PROBE_IDLE` (25 s) on one direct lane; down after `IDLE_MISSES` (3) misses |
 
 ### 11.2 Probe and echo
@@ -507,7 +507,7 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 | Event | Behaviour |
 | --- | --- |
 | Anchor unreachable at start | No capture; traffic goes direct. Problem `anchor_unreachable`. Redial with backoff from `REDIAL_MIN` (1 s) to `REDIAL_MAX` (30 s). |
-| Bond lost | The channel down and no echo on any lane, each for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. The lanes' states do not decide it: an idle bond's lanes are dormant, never down. While its channel is down a client keeps its lanes probed (§11.1), so an idle bond is judged as a busy one is. An anchor frees a bond whose channel is down and from which no packet came, each for `FAIL_OPEN_AFTER`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
+| Bond lost | The channel down and no echo on any lane, each for `FAIL_OPEN_AFTER` (5 s): capture is removed and traffic goes direct (fail open). Problem `bond_down`. The lanes' states do not decide it: an idle bond's lanes are dormant, never down. While its channel is down a client probes its idle lane every second (§11.1), so an idle bond is judged as a busy one is; when that lane has not answered for 3 s, a punch round probes every lane, so that one dead lane does not cost the bond. An anchor frees a bond whose channel has been down for `FAIL_OPEN_AFTER` and from which no packet came for `IDLE_MISSES` × `PROBE_IDLE` (75 s): it can see the channel go before the client does, and until then an idle client sends one probe per `PROBE_IDLE`. Capture returns when a lane validates again; direct connections opened meanwhile break then. An anchor's `bond close` ends the bond at once: the client removes capture and redials. |
 | Captive portal | On link up, and at every link scan while the link is marked captive, the node fetches `http://captive.apple.com/hotspot-detect.html` over that link. Anything but `Success` marks the link captive, and it carries no lane. If the bond is up through another link, the login page would go through the anchor, so status shows `captive_portal <link>`: run `wirebond client off`, log in, then `wirebond client <anchor>`. |
 | Sleep and wake | Wake detection (§11.4): re-punch, fresh estimates, keys kept. |
 | A link appears or vanishes | Rescan within 2 s, re-punch, recompute groups. |
@@ -673,6 +673,7 @@ Durations are monotonic. All constants live in `crates/core/src/consts.rs`.
 | `MAX_FLOWS`, `REORDER_SLOTS`, `FLOW_IDLE` | 4096, 2048, 60 s | per bond, per flow |
 | `PROBE_ACTIVE`, `PROBE_PUNCH`, `PUNCH_FOR`, `PUNCH_GAP` | 20 ms, 200 ms, 5 s, 5 s | §9, §11 |
 | `PROBE_IDLE`, `IDLE_AFTER`, `IDLE_MISSES` | 25 s, 5 s, 3 | idle cost: about 70 KB per bond per hour |
+| `PROBE_CHAN_DOWN` | 1 s | a client's idle lane while its channel is down (§17): about 1 MB per hour, on one lane, unmetered if there is one |
 | `ECHO_WINDOW`, `RTT_RING`, `ECHO_HISTORY`, `MAD_SAMPLES` | 2 s, 256, 8, 128 | §11 |
 | `EWMA_GAIN`, `DEV_WINDOW`, `MIN_WINDOW`, `RATE_WINDOW` | 1/8, 2 s, 10 s, 100 ms | §11.3 |
 | `SUSPECT_MIN`, `SUSPECT_DEV`, `LAG_FLOOR`, `LAG_JITTER` | 20 ms, 4, 10 ms, 3 | §11.4 |

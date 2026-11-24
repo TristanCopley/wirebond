@@ -51,6 +51,7 @@ pub const PROBE_PUNCH: Mono = 200 * MS; // every candidate pair, for PUNCH_FOR
 pub const PUNCH_FOR: Mono = 5 * SEC; // after a link or candidate change, a wake or a new channel
 pub const PUNCH_GAP: Mono = 5 * SEC; // at most one punch round per peer per PUNCH_GAP
 pub const PROBE_IDLE: Mono = 25 * SEC; // one probe on one direct lane while idle
+pub const PROBE_CHAN_DOWN: Mono = SEC; // and at this pace while a client's channel is down (§17)
 pub const IDLE_AFTER: Mono = 5 * SEC; // no data for this long: idle
 pub const IDLE_MISSES: u32 = 3; // idle probes in a row without an answer: down
 pub const ECHO_WINDOW: Mono = 2 * SEC; // a probe echoes every lane received on within this

@@ -926,6 +926,7 @@ pub(crate) fn event_code(ev: &Event<'_>) -> u8 {
         Event::Wake => 4,
         Event::Control(_) => 5,
         Event::Tick => 7,
+        Event::Channel(_) => 8, // 6 was Go's FlowEnd
     }
 }
 

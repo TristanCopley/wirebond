@@ -461,9 +461,11 @@ fn a_bond_lost_while_idle_fails_open_too() {
 
 /// §17, "mesh down, lanes up": the channel alone goes down while the bond idles, for longer than
 /// FAIL_OPEN_AFTER. The lanes still work, so the client keeps capture and the anchor keeps the
-/// bond: the client has its lanes probed while the channel is down, which gives it echoes and the
-/// anchor a client it still hears. An anchor that judged an idle bond by its lanes' states freed
-/// it 5 s into any such hiccup, and the client's next packets went nowhere.
+/// bond: while the channel is down the client's session probes its idle lane every
+/// PROBE_CHAN_DOWN, which gives it echoes and the anchor a client it still hears. An anchor that
+/// judged an idle bond by its lanes' states freed it 5 s into any such hiccup, and the client's
+/// next packets went nowhere. No punch round starts while those echoes come: round after round,
+/// every lane was probed five times a second for as long as the mesh stayed down.
 #[test]
 fn an_idle_bond_outlives_its_channel() {
     let (mut a, mut c, ctun, ccalls) = idle_bond(49);
@@ -477,9 +479,13 @@ fn an_idle_bond_outlives_its_channel() {
         c.redial_at = Mono::MAX; // the mesh stays down
         c.step(&mut pc, Duration::from_millis(2)).unwrap();
         a.step(&mut pa, Duration::from_millis(2)).unwrap();
+        let lanes = c.bonds[0].session.as_ref().unwrap().snapshot().lanes;
+        assert!(lanes.iter().all(|l| matches!(l.state, "dormant" | "up")), "a punch round: {lanes:#?}");
     }
     let since = c.now() - c.bonds[0].chan_down.expect("the client's channel is down");
     assert!(since > FAIL_OPEN_AFTER + SEC && a.bonds.first().is_some_and(|b| b.chan.is_none()), "{since}");
+    let heard = c.now() - c.bonds[0].heard.expect("echoes");
+    assert!(heard < 3 * SEC, "the idle lane's echoes, the last {} ms ago", heard / MS);
     assert_eq!(
         (a.bonds[0].owner, a.bonds[0].state),
         (owner, BondState::Up),
@@ -494,6 +500,51 @@ fn an_idle_bond_outlives_its_channel() {
     c.redial_at = 0;
     run(&mut a, &mut c, "the channel returns", |a, c| a.bonds[0].chan.is_some() && c.bonds[0].chan.is_some());
     assert_eq!((a.bonds[0].owner, c.bonds[0].owner), (owner, session), "the same sessions");
+}
+
+/// §17: the anchor alone sees the channel go (its own Tailscale restarting), while the idle
+/// client, which does not know yet, still sends one probe per PROBE_IDLE. An anchor that gave such
+/// a bond FAIL_OPEN_AFTER freed it, and what the client then sent went nowhere until its own
+/// channel timed out; it waits IDLE_MISSES of the client's idle probes (`bond::lost`).
+#[test]
+fn an_anchor_that_alone_lost_the_channel_keeps_an_idle_clients_bond() {
+    let (mut a, mut c, ctun, _) = idle_bond(65);
+    let (owner, down) = (a.bonds[0].owner, a.now());
+    (a.bonds[0].chan, a.bonds[0].chan_down) = (None, Some(down));
+    let (mut pa, mut pc) = (host::Poll::default(), host::Poll::default());
+    while a.now() - down < FAIL_OPEN_AFTER + 2 * SEC {
+        c.step(&mut pc, Duration::from_millis(2)).unwrap();
+        a.step(&mut pa, Duration::from_millis(2)).unwrap();
+    }
+    assert_eq!(a.bonds.first().map(|b| (b.owner, b.state)), Some((owner, BondState::Up)), "the anchor kept it");
+    assert!(c.bonds[0].state == BondState::Up && c.bonds[0].chan.is_some() && c.capture.is_some());
+    ctun.inject(udp([10, 77, 0, 2], [1, 1, 1, 1], b"still carried"));
+    run(&mut a, &mut c, "carried by the bond the anchor kept", |a, _| a.bonds[0].egressed > 0);
+}
+
+/// §17: the anchor stops answering while the bond idles, and the channel still looks alive: here
+/// the anchor is frozen and its kernel still acknowledges; in the field, a connection with
+/// unacknowledged data, which keepalive does not probe. Traffic that returns has the dormant lanes
+/// punched, and they stay punching. Counted as not down, they kept the client from redialing: the
+/// channel stayed, and capture with it, over a dead bond.
+#[test]
+fn a_dead_anchor_behind_a_live_channel_is_redialed_when_traffic_returns() {
+    let (_frozen, mut c, ctun, ccalls) = idle_bond(66);
+    let (mut p, t) = (host::Poll::default(), Instant::now());
+    // What the anchor last sent is read while the bond still idles, so no late echo meets the
+    // punching lanes.
+    while t.elapsed() < Duration::from_millis(300) {
+        c.step(&mut p, Duration::from_millis(5)).unwrap();
+    }
+    let t = Instant::now();
+    while c.bonds.first().is_some_and(|b| b.state == BondState::Up) {
+        assert!(t.elapsed() < Duration::from_secs(20), "no fail open: {:#?}", c.status(false));
+        ctun.inject(udp([10, 77, 0, 2], [1, 1, 1, 1], b"to an anchor that is gone"));
+        c.step(&mut p, Duration::from_millis(5)).unwrap();
+    }
+    assert!(c.logs.iter().any(|l| l.contains("every lane down: redialing")), "{:?}", c.logs);
+    assert_eq!(ccalls.lock().unwrap().last().map(String::as_str), Some("capture off"));
+    assert!(c.capture.is_none() && c.status(false).problems.iter().any(|p| p.code == problem::BOND_DOWN));
 }
 
 /// §17: a bond whose lanes go through one of the client's links is noted in status once that has
