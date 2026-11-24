@@ -582,8 +582,8 @@ pub struct HookArgs<'a> {
     pub dev: DevId,
     pub link: Option<LinkId>,
     pub data: &'a [u8],
-    /// For `Sent`: the event whose actions the device is carrying out (Go's Device.Event, which
-    /// A1b's input metric reads). None for the other kinds.
+    /// For `Sent`: the event whose actions the device is carrying out (Go's Device.Event). None
+    /// for the other kinds.
     pub event: Option<Event<'a>>,
 }
 
@@ -660,14 +660,11 @@ pub struct World {
     /// Tailscale-lane packets are dropped (Go MeshDown).
     pub mesh_down: bool,
     /// The baseline of SPEC §1 (P1) and §23.3 (A11): the client's node offers no link, so the
-    /// bond has the mesh lane alone, riding the client's default link (or [`World::mesh_link`]).
+    /// bond has the mesh lane alone, riding the client's default link.
     /// Set before the world starts.
     pub mesh_only: bool,
     /// Links pulled out ([`World::pull`]).
     pub pulled: Vec<LinkId>,
-    /// The Tailscale lane's own path ([`World::mesh_path`]); None: it rides the client's default
-    /// link (§17.2).
-    pub mesh_link: Option<LinkId>,
     /// The on-path adversary, if a scenario made one (Go Adv).
     pub adv: Option<Adversary>,
     /// The traffic models' state: index with [`crate::MoonId`], [`crate::BulkId`].
@@ -732,7 +729,6 @@ impl World {
             mesh_down: false,
             mesh_only: false,
             pulled: Vec::new(),
-            mesh_link: None,
             adv: None,
             apps: Apps::default(),
             rec: None,

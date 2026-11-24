@@ -27,10 +27,10 @@ use wirebond_core::{
 
 use crate::check::{Adv, PathKey};
 use crate::link::{
-    Dir, IP_UDP, Link, LinkId, LinkSpec, Profile, SPIKE_PEAK, Side, TS_OVER, Then, awdl_train, frags, short_train,
-    spike_train, starlink_train,
+    Dir, IP_UDP, Link, LinkId, LinkSpec, SPIKE_PEAK, Side, TS_OVER, Then, awdl_train, frags, short_train, spike_train,
+    starlink_train,
 };
-use crate::nat::{Nat, NatKind};
+use crate::nat::Nat;
 use crate::sim::{
     Action, Actions, Dur, Endpoint, HOUR, HookArgs, HookKind, MS, Rng, SEC, Task, World, event_code, fmt_dur,
     key_reader,
@@ -1071,18 +1071,13 @@ impl World {
 
     /// Sends data from d's socket sock to `to` through the link and NAT models (Go route): the
     /// Tailscale lane rides the client's default link (Up from the client, Down from the server)
-    /// with TS_OVER more bytes per packet and MESH_MTU, or its own path when a scenario gave it one
-    /// ([`World::mesh_path`]), with no Tailscale overhead.
+    /// with TS_OVER more bytes per packet and MESH_MTU.
     pub(crate) fn route(&mut self, d: DevId, sock: SockId, to: SocketAddr, data: Vec<u8>, stun: bool) {
         let p = Pkt { data, stun, from: Some(d), sock, to: Some(to), t0: self.now, ..Pkt::default() };
         if sock == MESH_SOCK {
             let peer = d.peer();
-            let (l, over) = match self.mesh_link {
-                Some(l) => (l, 0),
-                None => match self.default_link(DevId::Client) {
-                    Some(l) => (l, TS_OVER),
-                    None => return,
-                },
+            let Some(l) = self.default_link(DevId::Client) else {
+                return;
             };
             if to != self[peer].mesh || self.mesh_down {
                 return;
@@ -1105,7 +1100,7 @@ impl World {
             let (k, n) = frags(p.data.len() + IP_UDP, MESH_MTU);
             let src = self[d].mesh;
             let then = Then::Recv { dev: peer, link: None, src };
-            self.dir_send(l.dir(side), p, n + k * over, k, then);
+            self.dir_send(l.dir(side), p, n + k * TS_OVER, k, then);
             return;
         }
         let Some(l) = self.link_of(d, sock) else {
@@ -1216,48 +1211,14 @@ impl World {
         });
     }
 
-    /// The mesh's one-way delay: the client's default link's propagation delay + 1 ms, or the
-    /// delay of the Tailscale lane's own path when it has one; dir 0 is client → server (Go
-    /// delay). 30 ms without a default link.
+    /// The mesh's one-way delay: the client's default link's propagation delay + 1 ms; dir 0 is
+    /// client → server (Go delay). 30 ms without a default link.
     pub(crate) fn ctl_delay(&self, dir: usize) -> Dur {
         let side = if dir == 0 { Side::Up } else { Side::Down };
-        if let Some(l) = self.mesh_link {
-            return self[l.dir(side)].p.delay;
-        }
         let Some(l) = self.default_link(DevId::Client) else {
             return 30 * MS;
         };
         self[l.dir(side)].p.delay + MS
-    }
-
-    /// Gives the Tailscale lane a path of its own, profile p each way, instead of the client's
-    /// default link: the system harness's tailscale0, a veth of its own with netem's delay
-    /// (tests/system/run.sh). Its packets carry no Tailscale overhead there, as the harness's do
-    /// not, and the control channel takes its delay. The path belongs to no device: core never
-    /// sees it as a link. Call before the world starts.
-    pub fn mesh_path(&mut self, p: Profile) -> LinkId {
-        let mesh = self[DevId::Client].mesh;
-        let nat = Nat::new(NatKind::OneToOne, mesh.ip(), Ipv4Addr::UNSPECIFIED, self.sub());
-        let up = Dir::new(p.clone(), self.sub());
-        let down = Dir::new(p.clone(), self.sub());
-        let l = LinkId(self.links.len());
-        let spec = LinkSpec { label: "Tailscale", up: p.clone(), down: p, ..LinkSpec::default() };
-        self.links.push(Link {
-            id: 0,
-            dev: DevId::Client,
-            sock: MESH_SOCK,
-            local: mesh,
-            mapped: None,
-            nat,
-            up,
-            down,
-            bumps: Vec::new(),
-            used: -HOUR,
-            stun_at: None,
-            spec,
-        });
-        self.mesh_link = Some(l);
-        l
     }
 
     /// Carries m to the peer as node does: one JSON line of at most MAX_MSG bytes, its newline
@@ -1372,6 +1333,8 @@ mod tests {
 
     use super::*;
     use crate::env::{ADDR_CELL, ADDR_HOME, ADDR_HOTEL, PUB_CELL, PUB_HOME, PUB_HOTEL};
+    use crate::link::Profile;
+    use crate::nat::NatKind;
     use crate::sim::{Maker, SEC};
     use crate::trace::TracePos;
 
@@ -2308,36 +2271,6 @@ mod tests {
         assert_eq!(w[cell.down()].pkts, cell_pkts, "the iPhone's NAT never sent to xanth");
         let want = [(Received, s, Some(hotel), None), (Inbound, s, Some(hotel), None), (Received, c, Some(eth), None)];
         assert_eq!(*hooks.borrow(), want);
-    }
-
-    /// A scenario's own Tailscale path (`mesh_path`, the system harness's tailscale0) carries the
-    /// lane packets both ways without Tailscale's overhead, the default link none of them, and
-    /// the control channel takes its delay. It is no device's link, so core never sees it.
-    #[test]
-    fn mesh_path_carries_the_tailscale_lane() {
-        let (mut w, _, _, [hotel, _, _]) = topology();
-        let m = w.mesh_path(delay(31 * MS));
-        assert_eq!(w.mesh_link, Some(m));
-        assert_eq!((w.ctl_delay(0), w.ctl_delay(1)), (31 * MS, 31 * MS));
-        assert!(DevId::BOTH.iter().all(|&d| !w[d].links.contains(&m)));
-        w.start();
-        w.run(500 * MS).unwrap();
-        let a = w.stream("a", 9000, false, None);
-        send(&mut w, a, 1); // the first after idle also runs STUN, on the hotel
-        w.run(SEC).unwrap();
-        let (hotel_up, mesh_up) = (w[hotel.up()].bytes, w[m.up()].bytes);
-        send(&mut w, a, 1);
-        w.run(2 * SEC).unwrap();
-        assert_eq!(w[hotel.up()].bytes, hotel_up, "nothing on the hotel");
-        let n = 95 + crate::sim::inner_hdr(9000); // 15 + the inner packet + 16
-        assert_eq!(w[m.up()].bytes - mesh_up, (n + IP_UDP) as i64);
-        let r = w.datagram(a, 1, 0, 64, w.now());
-        let (hotel_down, mesh_down) = (w[hotel.down()].bytes, w[m.down()].bytes);
-        w.send_on(DevId::Server, FlowId::new(9000, 1), r);
-        w.run(3 * SEC).unwrap();
-        assert_eq!(w[a].received, 3);
-        assert_eq!(w[hotel.down()].bytes, hotel_down, "nothing on the hotel");
-        assert_eq!(w[m.down()].bytes - mesh_down, (n + IP_UDP) as i64, "xanth's ride its Down");
     }
 
     /// With the channel down, a Session ends once SESSION_LINGER has passed since it went down

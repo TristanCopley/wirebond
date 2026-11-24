@@ -16,10 +16,8 @@
 //!
 //! Default: the PR set, seeds 1–3, 60 simulated seconds per scenario (§17.3).
 
-use std::cell::RefCell;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 
@@ -28,10 +26,10 @@ use wirebond_core::{LaneStatus, MODE_PERFORMANCE, SessionStatus, TYPE_DATA};
 use crate::apps::Moonlight;
 use crate::fake::{Evil, fake_maker};
 use crate::link::{LinkId, LinkSpec, Profile};
-use crate::metrics::{Recorder, pct, record};
+use crate::metrics::{Recorder, record};
 use crate::nat::NatKind;
 use crate::node::DevId;
-use crate::sim::{Dur, HookKind, MIN, MS, Maker, SEC, World, core_maker};
+use crate::sim::{Dur, MIN, MS, Maker, SEC, World, core_maker};
 
 /// Every stream starts at 1 s (Go start).
 pub const START: Dur = SEC;
@@ -139,41 +137,6 @@ pub fn cell() -> Profile {
         loss: 0.005,
         ..Profile::default()
     }
-}
-
-/// The system harness's netem scenario (tests/system/run.sh, `shaped` with 30 ms), as tc builds
-/// it: the hotel and the cell each have their qdiscs on the client's interface and on the
-/// router's side of it, so both directions; the mesh's netem is on each device's tailscale0, so
-/// both directions too; the server's link and the router have none, and no NAT.
-///
-/// The hotel (run.sh's `shape_link`): `tbf rate 38mbit burst 64kb latency 180ms`, `netem delay
-/// 30ms` its child, and under that a bfifo of the size tbf gives its own queue, 38 Mbit/s × 180
-/// ms plus the burst (920,536 bytes): a packet waits out the 30 ms, then waits in the bfifo for
-/// tbf's tokens, and one that would overflow it is dropped. That is netsim's shaper with tbf's
-/// 180 ms buffer and the 30 ms in front: netsim delays a packet after its shaper, and a constant
-/// delay ahead of a FIFO shaper delays its output and its drops by as much. No jitter.
-pub fn hotel_netem() -> Profile {
-    Profile { rate: 38e6, burst: 64 << 10, buffer: 180 * MS, delay: 30 * MS, ..Profile::default() }
-}
-
-/// The netem scenario's cell: `netem delay 45ms rate 80mbit loss 0.5%`. Netem's rate is a plain
-/// rate, so the bucket is netsim's least (two packets); its 1,000-packet limit counts the packets
-/// still in their 45 ms, 306 of 1,471 bytes at 80 Mbit/s, which leaves about 100 ms of queue. No
-/// jitter, and no cold radio (the scenario clears the link's `cold`).
-pub fn cell_netem() -> Profile {
-    Profile { rate: 80e6, buffer: 100 * MS, delay: 45 * MS, loss: 0.005, ..Profile::default() }
-}
-
-/// The netem scenario's Tailscale lane: `netem delay 31ms` on its own interface, no rate
-/// ([`World::mesh_path`]).
-pub fn mesh_netem() -> Profile {
-    Profile { delay: 31 * MS, ..Profile::default() }
-}
-
-/// The netem scenario's options: [`hotel_netem`], [`cell_netem`], no NAT, `performance`. The scenario
-/// also gives the Tailscale lane [`mesh_netem`] and clears the cell's cold radio.
-pub fn netem() -> Opts {
-    Opts { hotel: hotel_netem(), cell: cell_netem(), client_nat: NatKind::OneToOne, ..defaults() }
 }
 
 /// SPEC §23.3's hotel Wi-Fi: 38 Mbit/s with a 64 KB burst and a 180 ms buffer, 30 ms one way.
@@ -606,85 +569,6 @@ pub fn hole(w: &mut World, l: LinkId, at: Dur, dur: Dur, up: bool, down: bool) {
     });
 }
 
-/// Stall detection (A1b): for each time the hotel's down direction stalls (its OWD rises 50 ms
-/// above its delay) while it carries bulk, how long until bulk enters another lane. Installs a
-/// hook and a 10 ms sampler from WARM; the returned function reports the median and the maximum
-/// (Go stalls).
-pub fn stalls(e: &mut Env) -> Box<dyn Fn() -> String> {
-    let st = Rc::new(RefCell::new(Stalls::default()));
-    let hotel = e.hotel;
-    let s = Rc::clone(&st);
-    e.w.hook(move |w, a| {
-        if a.kind == HookKind::Inbound && is_bulk(a.data) {
-            s.borrow_mut().bulk(w.now(), a.link == Some(hotel));
-        }
-    });
-    let s = Rc::clone(&st);
-    e.w.every(WARM, STALL_SAMPLE, move |w| {
-        let d = hotel.down();
-        let excess = w.owd(d) - w[d].p.delay;
-        s.borrow_mut().sample(w.now(), excess);
-        true
-    });
-    Box::new(move || st.borrow().report())
-}
-
-/// The hotel's down OWD this far above its propagation delay is a stall (Go's 50 ms).
-const STALL_RISE: Dur = 50 * MS;
-/// A rise is a stall of bulk only if bulk entered the hotel this recently.
-const STALL_RECENT: Dur = 20 * MS;
-/// How often stall detection samples the hotel's OWD.
-const STALL_SAMPLE: Dur = 10 * MS;
-
-/// Stall detection's state (Go stalls' locals): the onset of the stall in progress, when bulk
-/// last entered the hotel, whether the last sample was high, and each stall's time until bulk
-/// entered another lane.
-#[derive(Debug, Default)]
-struct Stalls {
-    onset: Option<Dur>,
-    last_hotel: Option<Dur>,
-    high: bool,
-    times: Vec<Dur>,
-}
-
-impl Stalls {
-    /// Bulk entered a client lane at now, the hotel's or another (the Tailscale lane included).
-    fn bulk(&mut self, now: Dur, on_hotel: bool) {
-        if on_hotel {
-            self.last_hotel = Some(now);
-        } else if let Some(t) = self.onset.take() {
-            self.times.push(now - t);
-        }
-    }
-
-    /// The hotel's down OWD was excess above its delay at now: a rise above STALL_RISE while it
-    /// carried bulk starts a stall.
-    fn sample(&mut self, now: Dur, excess: Dur) {
-        let high = excess > STALL_RISE;
-        if high && !self.high && self.onset.is_none() && self.last_hotel.is_some_and(|t| now - t < STALL_RECENT) {
-            self.onset = Some(now);
-        }
-        self.high = high;
-    }
-
-    fn report(&self) -> String {
-        if self.times.is_empty() {
-            return "no stall moved bulk".into();
-        }
-        format!(
-            "{} stalls moved bulk after a median {}, at most {}",
-            self.times.len(),
-            ms(pct(&self.times, 0.5)),
-            ms(pct(&self.times, 1.0))
-        )
-    }
-}
-
-/// The Recorder's index of client link l (Go laneIdx).
-pub fn lane_idx(w: &World, l: LinkId) -> i8 {
-    w[l].id as i8 - 1
-}
-
 /// Checks that some frame sent in [from, to) became decodable, so no frame criterion passes on a
 /// stream that never ran (Go decoded).
 pub fn decoded(c: &mut Check, m: &Moonlight, from: Dur, to: Dur) {
@@ -696,19 +580,6 @@ pub fn decoded(c: &mut Check, m: &Moonlight, from: Dur, to: Dur) {
 /// Whether a Snapshot has an up direct lane on client link id (Go laneUp).
 pub fn lane_up(s: &SessionStatus, id: u8) -> bool {
     s.lanes.iter().any(|l: &LaneStatus| l.id != 0 && (l.id >> 8) as u8 == id && l.state == "up")
-}
-
-/// The times in sorted ts before t (Go prefix).
-pub fn prefix(ts: &[Dur], t: Dur) -> &[Dur] {
-    &ts[..ts.partition_point(|&x| x < t)]
-}
-
-/// t − base, or "never" (Go after, which took −1 for never).
-pub fn after(t: Option<Dur>, base: Dur) -> String {
-    match t {
-        Some(t) => ms(t - base),
-        None => "never".into(),
-    }
 }
 
 /// A duration in milliseconds, "+Inf" for the empty-sample marker (≥ 2^62) (Go ms).
@@ -767,16 +638,11 @@ mod tests {
     }
 
     #[test]
-    fn formats_and_prefix() {
+    fn formats_and_repro() {
         assert_eq!(ms(12_345_678), "12.3 ms");
         assert_eq!(ms(-2 * MS), "-2.0 ms");
         assert_eq!(ms(Dur::MAX), "+Inf");
         assert_eq!(ms(1 << 62), "+Inf");
-        assert_eq!(after(None, SEC), "never");
-        assert_eq!(after(Some(1500 * MS), SEC), "500.0 ms");
-        assert_eq!(prefix(&[1, 2, 2, 5], 2), &[1]);
-        assert_eq!(prefix(&[1, 2, 2, 5], 6), &[1, 2, 2, 5]);
-        assert!(prefix(&[], 6).is_empty());
         assert!(
             repro("accept", "a9_paused", 3)
                 .ends_with("WIREBOND_SEED=3 cargo test -p wirebond-netsim --test accept -- --exact a9_paused")
@@ -797,36 +663,6 @@ mod tests {
         assert!(!lane_up(&s, 1), "the Tailscale lane and a punching lane are not up");
         assert!(lane_up(&s, 2));
         assert!(!lane_up(&s, 3));
-    }
-
-    #[test]
-    fn stall_detection_times_each_stall_of_bulk() {
-        let mut s = Stalls::default();
-        s.sample(10 * MS, 60 * MS);
-        assert_eq!(s.onset, None, "a rise while the hotel carried no bulk is no stall");
-        s.sample(20 * MS, 0);
-        s.bulk(25 * MS, true);
-        s.sample(30 * MS, 60 * MS);
-        assert_eq!(s.onset, Some(30 * MS), "a rise within 20 ms of bulk on the hotel");
-        s.sample(40 * MS, 70 * MS);
-        s.bulk(45 * MS, true);
-        assert_eq!(s.onset, Some(30 * MS), "bulk on the hotel does not end it");
-        s.bulk(80 * MS, false);
-        assert_eq!(s.times, [50 * MS], "bulk entered another lane 50 ms after the onset");
-        s.bulk(85 * MS, true);
-        s.sample(90 * MS, 70 * MS);
-        assert_eq!(s.onset, None, "still high: a new stall needs a new rise");
-        s.sample(100 * MS, 0);
-        s.bulk(105 * MS, true);
-        s.sample(130 * MS, 55 * MS);
-        assert_eq!(s.onset, None, "bulk last entered the hotel 25 ms before the rise");
-        s.sample(140 * MS, 0);
-        s.bulk(145 * MS, true);
-        s.sample(150 * MS, 51 * MS);
-        s.bulk(340 * MS, false);
-        s.bulk(350 * MS, false);
-        assert_eq!(s.times, [50 * MS, 190 * MS]);
-        assert_eq!(Stalls::default().report(), "no stall moved bulk");
     }
 
     fn passed(seed: u64, hash: Option<&str>) -> Outcome {
