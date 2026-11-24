@@ -247,7 +247,7 @@ A link offers at most `MAX_CANDS` (4) candidates: its local addresses and its ST
 
 ### 9.4 Punching and validation
 
-- **Punching:** both sides probe every candidate pair every `PROBE_PUNCH` (200 ms) for `PUNCH_FOR` (5 s) after any link or candidate change, a wake, or a new control channel. At most one round per peer per `PUNCH_GAP` (5 s).
+- **Punching:** both sides probe every candidate pair every `PROBE_PUNCH` (200 ms) for `PUNCH_FOR` (5 s) after any link or candidate change, a wake, or a new control channel. At most one round per peer per `PUNCH_GAP` (5 s). While data flows and a direct lane is not up, a new round begins when one ends: a pair that never validated has no return address, so only a round probes it, and a path that opens late is found this way.
 - **Validation:** a lane carries data only once validated. An echo must return the challenge of a probe sent to that address (§11.2). Until then, an address gets at most `VALIDATE_AMP` (3×) the bytes received from it.
 
 ## 10. Security
@@ -323,7 +323,7 @@ Overhead is 11 + 6 + 16 = **33 bytes**, plus 28 (IPv4/UDP) or 48 (IPv6/UDP) for 
 | When | Probe |
 | --- | --- |
 | Data flowed within `IDLE_AFTER` (5 s) | every lane, every `PROBE_ACTIVE` (20 ms) |
-| Punching | every candidate pair, every 200 ms, for 5 s |
+| Punching | every candidate pair, every 200 ms, for 5 s; round after round while data flows and a direct lane is not up |
 | Idle | one probe every `PROBE_IDLE` (25 s) on one direct lane; down after `IDLE_MISSES` (3) misses |
 
 ### 11.2 Probe and echo
@@ -398,7 +398,8 @@ Each lane has its own delay-based controller and token-bucket pacer.
 | --- | --- |
 | Target queueing delay | max(`TARGET_FLOOR` 20 ms, `TARGET_DEV` 2 × dev, while app-limited) |
 | Overuse | loss ≥ `LOSS_OVERUSE` (2%) and ≥ `LOSS_MIN` (5) packets within `RATE_WINDOW`, or queueing above target |
-| On overuse | cut the rate, never below `BETA` (0.85) × the current rate |
+| On overuse | cut the rate to what the lane delivered, less the further its queue is past target, and at least to `BETA` (0.85) × the current rate |
+| Light loss (under 5%, no queueing above target) | cut no lower than twice the stream's rate: what the lane is offered in performance mode, what the spread's lanes are offered together in bandwidth mode |
 | Startup | × `STARTUP_GAIN` (1.25) per RTT while backlogged, until the first overuse |
 | Then | + `INCREASE_STEP` (1%) of rate per RTT |
 | Floor | `PACE_FLOOR` (5 Mbit/s) |
@@ -462,9 +463,9 @@ The mesh lane is eligible only for a group with no usable direct lane (validated
 
 **Small flows** are copied (§13).
 
-**Leaving the spread.** A lane in overuse at `PACE_FLOOR` for `BANDWIDTH_FLOOR_HOLD` (500 ms) is barred for `BAR` (60 s). The bar doubles, up to `BAR_MAX` (10 min), while the lane keeps failing.
+**Leaving the spread.** A lane in overuse at `PACE_FLOOR` for `BANDWIDTH_FLOOR_HOLD` (500 ms) is barred for `BAR` (60 s). The bar doubles, up to `BAR_MAX` (10 min), while the lane keeps failing. A lane that was barred before is on trial for twice `BANDWIDTH_FLOOR_HOLD` after it rejoins the spread: it carries a copy of every bulk packet and none alone, and its queue is dropped if it leaves, so what it loses while it is judged again is not lost.
 
-**Rewind.** When a lane turns suspect, its unacknowledged packets from the last `REWIND_WINDOW` (300 ms, or its suspect timeout plus RTT if longer) are re-sent on the other eligible lanes. A packet's echoed `last_counter` marks it acknowledged.
+**Rewind.** When a lane turns suspect, its unacknowledged packets from the last `REWIND_WINDOW` (300 ms, or its suspect timeout plus RTT if longer) are re-sent on the other eligible lanes. A packet's echoed `last_counter` marks it acknowledged. A lane still in startup that takes them adds the suspect lane's delivery rate to its own, so it paces for the stream at once.
 
 ## 15. Reorder and delivery
 
@@ -778,7 +779,7 @@ Scenarios run in netsim and, where marked, in the harness. They use 30 Mbit/s vi
 | A2 | Performance, the owner's recorded hotel jitter | as A1, and the worst frame at least 3× lower than the baseline's (mesh lane only) |
 | A3 | Performance, clean hotel | median within 1 ms of the hotel alone; no frame lost |
 | A4 | Bandwidth, both links clean, bulk TCP | throughput ≥ 0.9 × (hotel + phone) − overhead; reorder wait p99 ≤ base skew + 10 ms |
-| A5 | Either mode, hotel link pulled mid-stream | no gap over 130 ms; no flow ends |
+| A5 | Either mode, hotel link pulled mid-stream | no gap over 130 ms; no flow ends. In bandwidth mode the gap cannot be shorter than detecting the pulled lane takes: up to 127 ms on these links |
 | A6 | Either mode, the hotel drops full-size packets | traffic moves to the phone lane within 1 s; no flow ends |
 | A7 | Bond down for 10 s (harness) | fail open within `FAIL_OPEN_AFTER` + 1 s; capture back within 3 s of a lane validating |
 | A8 | Client → internet server through anchor NAT (harness) | TCP and UDP work, IPv4 and IPv6; a forged source from the client is dropped |
