@@ -153,14 +153,14 @@ ns_new() {
 	[ "$v6" = 0 ] || ip netns exec "$1" sysctl -qw net.ipv6.conf.all.accept_dad=0 net.ipv6.conf.default.accept_dad=0
 }
 
-# uplink NS N ADDR4 ADDR6 ROUTER4 ROUTER6 ROUTER_DEV: a host's eth0 to the router, its default route.
+# uplink NS ADDR4 ADDR6 ROUTER4 ROUTER6 ROUTER_DEV: a host's eth0 to the router, its default route.
 uplink() {
 	ns_new "$1"
-	veth "$1" eth0 "$I" "$7" 1500
-	addr "$1" eth0 "$3/24" "$4/64"
-	addr "$I" "$7" "$5/24" "$6/64"
-	ip -n "$1" route add default via "$5"
-	route6 "$1" default via "$6"
+	veth "$1" eth0 "$I" "$6" 1500
+	addr "$1" eth0 "$2/24" "$3/64"
+	addr "$I" "$6" "$4/24" "$5/64"
+	ip -n "$1" route add default via "$4"
+	route6 "$1" default via "$5"
 }
 
 # mesh_port NS PORT N: the host's tailscale0 on the mesh bridge, 100.64.0.N and fd7a:115c:a1e0::N.
@@ -190,11 +190,11 @@ network() {
 	route6 "$C" default via 2001:db8:1::1 dev hotel metric 100
 	route6 "$C" default via 2001:db8:2::1 dev cell metric 200
 	mesh_port "$C" mc 1
-	uplink "$A" 2 "$ANCHOR4" "$ANCHOR6" 203.0.113.1 2001:db8:a::1 a0
+	uplink "$A" "$ANCHOR4" "$ANCHOR6" 203.0.113.1 2001:db8:a::1 a0
 	mesh_port "$A" ma 2
-	uplink "$B" 3 198.18.0.2 2001:db8:b::2 198.18.0.1 2001:db8:b::1 b0
+	uplink "$B" 198.18.0.2 2001:db8:b::2 198.18.0.1 2001:db8:b::1 b0
 	mesh_port "$B" mb 3
-	uplink "$S" 5 "$SERVER4" "$SERVER6" 198.51.100.1 2001:db8:5::1 s0
+	uplink "$S" "$SERVER4" "$SERVER6" 198.51.100.1 2001:db8:5::1 s0
 	echo_on "$S" server -udp 47998,47999,53 -tcp 47989
 	echo_on "$A" anchor -udp 48000 -tcp 48010
 	echo_on "$B" anchor2 -udp 48000 -tcp 48010
@@ -468,8 +468,6 @@ lanes_blocked() {
 		ip netns exec "$2" nft delete table inet "$t"
 	fi
 }
-
-direct_blocked() { lanes_blocked "$1" "$2" eth0; }
 
 # captured: whether the client's capture is installed (SPEC §5.3: the rule to table 7849).
 captured() { ip -n "$C" rule show | grep -q 'lookup 7849'; }
@@ -775,7 +773,7 @@ perf() {
 	# What the stream gets with no bond at all: the anchor's mesh address is never captured.
 	measure "$C" video --to "$MESH_A:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" \
 		--label "$name: video straight over the mesh, no bond (informative)" || true
-	direct_blocked on "$A"
+	lanes_blocked on "$A" eth0
 	lanes_until "$name" 15 "the baseline: the mesh lane alone" -eq 1 || true
 	measure "$C" video --to "$BOND_A4:48000" --mbps 30 --fps 120 --size "$FIT4" --duration "$secs" --pids "$p" \
 		--label "$name: baseline video (mesh lane)" || true
