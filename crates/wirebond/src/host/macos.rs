@@ -137,11 +137,11 @@ pub(super) fn unregister(s: Scope, exe: &Path) -> io::Result<(bool, String)> {
 pub use v2::*;
 
 mod v2 {
-    use std::io::{self, Write};
+    use std::io;
     use std::mem;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     use std::sync::Mutex;
     use std::{fs, path::PathBuf};
 
@@ -287,10 +287,7 @@ mod v2 {
 
     /// Runs scutil with `commands` on its standard input.
     fn scutil(commands: &str) -> io::Result<()> {
-        let mut c = Command::new("scutil");
-        let mut child = c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
-        child.stdin.take().ok_or(io::ErrorKind::BrokenPipe)?.write_all(commands.as_bytes())?;
-        let out = child.wait_with_output()?;
+        let out = super::output(&mut Command::new("scutil"), Some(commands))?;
         let err = String::from_utf8_lossy(&out.stderr);
         if out.status.success() && err.trim().is_empty() {
             Ok(())
@@ -404,10 +401,7 @@ mod v2 {
     /// Runs pfctl with `input` on its standard input; returns its standard output and error together,
     /// where it prints the token.
     fn pfctl(args: &[&str], input: Option<&str>) -> io::Result<String> {
-        let mut c = Command::new("pfctl");
-        let mut child = c.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-        child.stdin.take().ok_or(io::ErrorKind::BrokenPipe)?.write_all(input.unwrap_or_default().as_bytes())?;
-        let out = child.wait_with_output()?;
+        let out = super::output(Command::new("pfctl").args(args), Some(input.unwrap_or_default()))?;
         let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
         if out.status.success() {
             Ok(text)

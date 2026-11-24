@@ -328,6 +328,19 @@ pub(super) fn remove<P: AsRef<Path>>(paths: impl IntoIterator<Item = P>) -> io::
     })
 }
 
+/// Runs `c` with `input` on its stdin, or none, and returns what it wrote to stdout and stderr,
+/// however it ended. Nothing reaches the terminal, where the CLI may be printing JSON.
+pub(super) fn output(c: &mut std::process::Command, input: Option<&str>) -> io::Result<std::process::Output> {
+    use std::{io::Write as _, process::Stdio};
+    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    c.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
+    let mut child = c.spawn()?;
+    if let (Some(i), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin.write_all(i.as_bytes())?;
+    }
+    child.wait_with_output()
+}
+
 /// Runs a command without input and returns its output, or an error with its stderr unless it
 /// exits 0. Nothing reaches the terminal, where the CLI may be printing JSON. (Linux's tests fake
 /// systemctl, its only caller there.)

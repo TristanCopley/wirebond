@@ -113,11 +113,11 @@ pub use v2::*;
 
 mod v2 {
     use std::fs;
-    use std::io::{self, Write as _};
+    use std::io;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::super::Scope;
@@ -645,14 +645,7 @@ mod v2 {
     /// reaches the terminal.
     pub(in crate::host) fn tool(name: &str, args: &[&str], input: Option<&str>) -> io::Result<String> {
         let path = find(name).ok_or_else(|| missing_tool_error(name))?;
-        let mut c = Command::new(path);
-        c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-        c.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
-        let mut child = c.spawn()?;
-        if let (Some(i), Some(mut stdin)) = (input, child.stdin.take()) {
-            stdin.write_all(i.as_bytes())?;
-        }
-        let out = child.wait_with_output()?;
+        let out = super::output(Command::new(path).args(args), input)?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         match out.status.success() {
             true => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
