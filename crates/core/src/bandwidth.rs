@@ -24,7 +24,8 @@ impl Session {
     /// the lanes that join before any packet moves onto them (R2-04). The new spread is set first,
     /// so what a leaving lane hands on goes across it: in bandwidth a lane that turned suspect is
     /// rewound (§14.2), any other leaving lane's queue moves; in performance a leaving lane's queue
-    /// is dropped while another lane stays, as that lane carries the same packets.
+    /// is dropped while another lane stays, as that lane carries the same packets, and so is that
+    /// of a lane on trial, which holds copies.
     pub(crate) fn schedule(&mut self, out: &mut dyn Out, now: Mono) {
         if !self.active {
             return;
@@ -57,7 +58,7 @@ impl Session {
         self.nspread = n;
         let to = keep;
         for &l in old.iter().filter(|l| !keep.contains(l)) {
-            if self.mode == Mode::Performance && n > 0 {
+            if self.mode == Mode::Performance && n > 0 || self.lanes[l].on_trial(now) {
                 self.rewind(out, now, l, &[]);
             } else if !blind && self.lanes[l].state == State::Suspect {
                 self.rewinds += 1;
@@ -185,8 +186,12 @@ impl Session {
     /// the base OWD, since it carries the standing queue of the lane's path, which the base OWD
     /// does not see: by the base OWD alone, a lane whose path buffer holds 60 ms won packets that
     /// then arrived later than REORDER_MAX behind their gaps. 2 × dev covers the lane's jitter.
+    /// Never, for a lane on trial: it is the earliest only if every lane is on trial.
     fn arrival(&mut self, now: Mono, l: LaneIx, size: usize) -> Mono {
         let x = &mut self.lanes[l];
+        if x.on_trial(now) {
+            return Mono::MAX;
+        }
         let wait = ((x.q_bytes + size) as f64 * 8e9 / x.pace(now)) as Mono;
         x.owd_now.saturating_add(x.dev.saturating_mul(2)).saturating_add(wait)
     }
@@ -197,6 +202,15 @@ impl Lane {
     /// eligible lanes.
     pub(crate) fn eligible(&self, now: Mono) -> bool {
         self.state == State::Up && self.validated && now >= self.bar_until
+    }
+
+    /// Barred before and back in the spread for less than twice BANDWIDTH_FLOOR_HOLD, the time
+    /// the floor rule needs to bar it again (§14.2): it carries a copy of every bulk packet, as a
+    /// performance lane does, and none alone (`bulk_lanes`, `arrival`), so what it loses is not
+    /// lost. Given its share of the stream at once, a lane that drops full-size packets lost
+    /// frames each time its bar ended (A6).
+    pub(crate) fn on_trial(&self, now: Mono) -> bool {
+        self.bars > 0 && since(now, self.took_at) < 2 * BANDWIDTH_FLOOR_HOLD
     }
 }
 

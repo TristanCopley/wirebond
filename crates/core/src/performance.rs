@@ -44,12 +44,19 @@ impl Session {
     }
 
     /// Where a bulk packet of `size` bytes goes now (§11), the first lane taking the packet itself
-    /// and the others a copy: every lane of the spread in performance, the earliest arrival in
-    /// bandwidth; none means every lane (`send_unpaced`).
+    /// and the others a copy: every lane of the spread in performance; in bandwidth the earliest
+    /// arrival, and a copy on each other lane on trial (`Lane::on_trial`); none means every lane
+    /// (`send_unpaced`).
     pub(crate) fn bulk_lanes(&mut self, now: Mono, size: usize) -> impl Iterator<Item = LaneIx> + use<> {
         let (mut ls, mut n) = (self.spread, self.nspread);
         if self.mode == Mode::Bandwidth {
+            let (spread, all) = (ls, n);
             (ls[0], n) = self.earliest(now, size).map_or((LaneIx::default(), 0), |l| (l, 1));
+            for &l in &spread[..all] {
+                if n > 0 && l != ls[0] && self.lanes[l].on_trial(now) {
+                    (ls[n], n) = (l, n + 1);
+                }
+            }
         }
         ls.into_iter().take(n)
     }

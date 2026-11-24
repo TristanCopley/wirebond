@@ -198,6 +198,27 @@ fn adjust_cuts_only_a_lane_carrying_bulk_it_has_a_sample_of() {
     assert_eq!(echo(&mut s, T0 + 21 * MS, 30 * MS, 30e6, false), PACE_FLOOR);
 }
 
+/// Light loss keeps a bandwidth lane's room for the stream its spread shares, not for its own
+/// share of it: a lane that earliest arrival gives next to nothing stays where it is, in startup,
+/// so it can take the stream over (A5, A6).
+#[test]
+fn adjust_light_loss_keeps_room_for_the_shared_stream() {
+    // The rate after a lossy echo of A at 12 Mbit/s, in startup, offered nothing itself, while
+    // the other lane is offered `stream`.
+    let lossy = |stream: f64, loss: f64| {
+        let mut s = bulk(Mode::Bandwidth, 12e6);
+        share(&mut s);
+        (s.lanes[A].loss, s.lanes[A].delivery, s.lanes[A].startup) = (loss, 1e6, true);
+        s.lanes[LaneIx(1)].offered.add(T0, RATE_WINDOW, (stream * 0.1 / 8.0).round() as usize);
+        (echo(&mut s, T0, 0, 0.0, true), s.lanes[A].startup)
+    };
+    assert_eq!(lossy(30e6, 0.04), (12e6, true));
+    // A stream under half its rate: twice the stream's rate, as a performance lane.
+    assert_eq!(lossy(5e6, 0.04), (10e6, false));
+    // Heavy loss is the lane's own: cut to what it delivers, here under the floor.
+    assert_eq!(lossy(30e6, 0.10), (PACE_FLOOR, false));
+}
+
 #[test]
 fn adjust_loss_alone_keeps_the_lanes_room() {
     // (rate, loss, delivery) with 30 Mbit/s offered and no queue → the rate after a lossy echo.

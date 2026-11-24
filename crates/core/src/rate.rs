@@ -49,11 +49,17 @@ impl Session {
         // gone) leaves this one alone at once.
         let late = |x: &Lane| x.state == State::Suspect && now.saturating_sub(x.last_echo) <= x.rtt;
         let alone = bandwidth && self.spread() == [l] && !self.lanes.iter().any(|x| x.validated && !x.mesh && late(x));
+        // What the spread's lanes are offered together: in bandwidth, where they share it, the
+        // stream.
+        let shared: f64 = self.spread().iter().map(|&x| self.lanes[x].offered.peek(now, RATE_WINDOW)).sum();
         let ln = &mut self.lanes[l];
         let target = TARGET_FLOOR.max((TARGET_DEV * ln.dev_app as f64) as Mono);
         ln.over_n = if ln.qd > target { ln.over_n.saturating_add(1) } else { 0 };
         let rtt = if ln.rtt != 0 { ln.rtt } else { RATE_WINDOW };
         let o = ln.offered.rate(now, RATE_WINDOW);
+        // The stream's rate, which any lane may have to carry whole; a performance lane is offered
+        // it.
+        let stream = if bandwidth { shared } else { o };
         if ln.over_n >= 2 || lossy {
             (ln.last_over, ln.clean_at) = (now, NEVER);
             // Only a lane carrying bulk now, whose delivery sample covers that bulk, is cut: one
@@ -62,11 +68,15 @@ impl Session {
             // drains that queue in a few RTTs, so within 3 RTTs only a queue still growing is cut
             // again; bandwidth runs its lanes at bandwidth and keeps the spec's once per RTT. Light
             // loss without a queue is the link's own (a radio's random loss), which no lower rate
-            // cures: it keeps the lane's room, twice its offered rate. And a lane that delivers
-            // what it is offered is not cut below that: its queue came from a burst above it (a
-            // takeover, a rate raised past bandwidth), and a lower rate would only hold the stream
-            // in the pacer. Heavy loss, a policer's, and a lane too small for its stream deliver
-            // less, and are cut to delivery (notes/core.md 49, 52).
+            // cures: it keeps the lane's room, twice the stream's rate. By twice its own offered
+            // rate, a bandwidth lane that earliest arrival gave next to nothing fell to PACE_FLOOR
+            // and out of startup, and when the lane that carried the stream was pulled it climbed
+            // from there by STARTUP_GAIN per RTT while its pacer aged the stream out, a gap of
+            // 620 ms (A5, A6). And a lane that delivers what it is offered is not cut below that:
+            // its queue came from a burst above it (a takeover, a rate raised past bandwidth), and
+            // a lower rate would only hold the stream in the pacer. Heavy loss, a policer's, and a
+            // lane too small for its stream deliver less, and are cut to delivery (notes/core.md
+            // 49, 52).
             let due = now - ln.took_at >= rtt + RATE_WINDOW
                 && now - ln.last_cut >= rtt
                 && (bandwidth || now - ln.last_cut >= 3 * rtt || ln.qd > ln.cut_qd);
@@ -76,7 +86,7 @@ impl Session {
                 // Go's `loss <= 1 − TrialPass` against the exact constant 0.05: f64's 1 − 0.95 is
                 // 0.050000000000000044, and `<` gives Go's answer for every loss 1 − got/sent.
                 if ln.over_n < 2 && ln.loss < 1.0 - CARRIES {
-                    r = r.max(ln.rate.min(2.0 * o));
+                    r = r.max(ln.rate.min(2.0 * stream));
                 } else if ln.delivery >= CARRIES * o {
                     r = r.max(ln.rate.min(o));
                 }
