@@ -1,7 +1,8 @@
 # wirebond's checks (SPEC §23.1): format, clippy on every release target, core's purity, the
 # dependency allow-list, the tests on Linux (crates/load's among them), macOS and Windows, netsim's
-# PR seed set, the static Linux release build, and the installers end to end. Nightly, and when
-# release.yml calls it with long: true, it also runs netsim's full acceptance set.
+# PR seed set, and the installers end to end. Nightly, and when release.yml calls it with long:
+# true, it also runs netsim's full acceptance set. system.yml, which runs on the same events, builds
+# the static Linux release binary and checks it is static and stripped.
 name: ci
 
 on:
@@ -211,14 +212,6 @@ jobs:
             echo "::endgroup::"
           done
           [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
-      - name: Build the Linux x86_64 release binary
-        run: cargo build -p wirebond --release --locked --target x86_64-unknown-linux-musl
-      - name: Static and stripped (SPEC §22.5)
-        run: |
-          bin=target/x86_64-unknown-linux-musl/release/wirebond
-          echo "linux x86_64: $(stat -c %s "$bin") bytes"
-          kind=$(file -b "$bin") && echo "$kind"
-          grep -q 'static.*, stripped$' <<< "$kind" || { echo "not a static, stripped executable"; exit 1; }
 
   rust-os:
     name: rust ${{ matrix.os }}
