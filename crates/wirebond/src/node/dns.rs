@@ -286,6 +286,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use wirebond_core::MS;
+
     use super::*;
 
     #[test]
@@ -313,11 +315,11 @@ mod tests {
         resolver.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
         assert!(resolver.recv_from(&mut b).is_err(), "a stranger's query is not relayed");
         thread::sleep(Duration::from_millis(50));
-        r.pump(MS_TEST, &live);
+        r.pump(MS, &live);
         let (n, from) = client.recv_from(&mut b).unwrap();
         assert_eq!((&b[..n], from), (&answer[..], at));
         assert!(r.bonds[&"127.0.40.2".parse::<IpAddr>().unwrap()].inflight.is_empty());
-        r.pump(MS_TEST, &[]);
+        r.pump(MS, &[]);
         assert!(r.bonds.is_empty(), "a bond's state goes with it");
     }
 
@@ -384,6 +386,4 @@ mod tests {
         assert!(skipped.iter().all(|(a, _)| a.is_ipv6()), "{skipped:?}");
         assert!(Relay::new(&["2001:db8::1".parse().unwrap()], 0, "127.0.0.53:53".parse().unwrap()).is_err());
     }
-
-    const MS_TEST: Mono = 1_000_000;
 }

@@ -335,9 +335,10 @@ impl Daemon {
         (b.addr4, b.addr6, b.chan, b.measure) = (addr4, addr6, Some(id), true);
         b.set_state(BondState::Punching, now);
         b.meter = Some(Meter::new(now, p.seconds, None, p.mode == Mode::Bandwidth));
-        let start = Msg::Measure(proto::Measure::Start { seconds: p.seconds, bulk_bytes: PICK_BULK_BYTES });
+        let seconds = p.seconds;
+        let start = Msg::Measure(proto::Measure::Start { seconds, bulk_bytes: PICK_BULK_BYTES });
         p.bond = Some(b);
-        self.log(format!("pick: measuring {} for {} s", peer, Mono::from(self.pick.as_ref().map_or(0, |p| p.seconds))));
+        self.log(format!("pick: measuring {peer} for {seconds} s"));
         self.open_session(PICK, core::Role::Client, true);
         self.send_chan(id, &start);
     }

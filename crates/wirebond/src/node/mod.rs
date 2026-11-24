@@ -1621,7 +1621,7 @@ impl Daemon {
         let label = |o: &proto::LinkOffer| {
             let lead = l.links.iter().filter(|x| group(x) == group(o)).min_by_key(|x| x.id).unwrap_or(o);
             let name = lead.support.clone();
-            name.unwrap_or_else(|| format!("{}{}", format!("{:?}", lead.kind).to_lowercase(), lead.id))
+            name.unwrap_or_else(|| format!("{}{}", lead.kind.as_str(), lead.id))
         };
         let links = l
             .links
