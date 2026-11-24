@@ -1116,11 +1116,10 @@ impl Daemon {
     /// Relays the DNS queries of live bonds' client addresses (§7).
     fn dns_pump(&mut self) {
         let now = self.now();
+        let Some(r) = &mut self.dns_relay else { return };
         let live: Vec<IpAddr> =
             self.bonds.iter().flat_map(|b| [b.addr4.map(IpAddr::V4), b.addr6.map(IpAddr::V6)]).flatten().collect();
-        if let Some(r) = &mut self.dns_relay {
-            r.pump(now, &live);
-        }
+        r.pump(now, &live);
     }
 
     /// One event from the channel threads.
@@ -1843,23 +1842,23 @@ impl Daemon {
         let now = self.now();
         let role = self.cfg.role;
         // A client's bond to another anchor than the configured one, or no longer a client.
-        let target = (role == Role::Client).then(|| self.cfg.anchor.clone()).flatten();
-        if role != Role::Anchor
-            && (!self.bonds.is_empty() && target.as_deref() != self.bonds.first().map(|b| b.peer.as_str()))
-        {
+        let target = self.cfg.anchor.as_deref().filter(|_| role == Role::Client);
+        if role != Role::Anchor && (!self.bonds.is_empty() && target != self.bonds.first().map(|b| b.peer.as_str())) {
             self.client_close(true);
         }
         if role != Role::Client {
             self.close_dialed_bond();
             self.unreachable = None;
         }
-        if let Some(anchor) = target {
+        if role == Role::Client
+            && let Some(anchor) = &self.cfg.anchor
+        {
             let chan_up = self.chans.values().any(|p| matches!(p.purpose, Some(Purpose::Bond)));
             if !chan_up && self.dialing.is_none() && now >= self.redial_at {
                 let id = ctl::next_id();
                 self.dialing = Some(id);
                 self.redial_at = now + self.backoff;
-                ctl::dial(anchor, PORT, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
+                ctl::dial(anchor.clone(), PORT, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
             }
             if let Some(b) = self.bonds.first()
                 && b.mode != self.cfg.mode
