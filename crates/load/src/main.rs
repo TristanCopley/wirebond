@@ -86,7 +86,7 @@ fn ports(s: &str) -> Result<Vec<u16>, String> {
 }
 
 fn cmd_echo(rest: &[String]) -> Result<bool, String> {
-    let a = Args::parse(rest, &["udp", "tcp", "bind", "stats"], &[])?;
+    let a = Args::parse(rest, &["udp", "tcp", "bind", "stats"])?;
     let e = echo::Echo::start(ip(&a, "bind")?, &ports(&a.str_or("udp", "47998"))?, &ports(&a.str_or("tcp", "47989"))?)
         .map_err(|e| e.to_string())?;
     let bound: Vec<String> =
@@ -98,7 +98,7 @@ fn cmd_echo(rest: &[String]) -> Result<bool, String> {
 const MEASURE: [&str; 9] = ["to", "from", "mbps", "size", "duration", "pids", "fps", "fec", "bytes"];
 
 fn cmd_udp(rest: &[String]) -> Result<bool, String> {
-    let a = Args::parse(rest, &MEASURE[..6], &[])?;
+    let a = Args::parse(rest, &MEASURE[..6])?;
     let c = UdpConfig {
         to: addr(a.need("to")?)?,
         from: ip(&a, "from")?,
@@ -115,7 +115,7 @@ fn cmd_udp(rest: &[String]) -> Result<bool, String> {
 }
 
 fn cmd_video(rest: &[String]) -> Result<bool, String> {
-    let a = Args::parse(rest, &MEASURE[..8], &[])?;
+    let a = Args::parse(rest, &MEASURE[..8])?;
     let c = VideoConfig {
         to: addr(a.need("to")?)?,
         from: ip(&a, "from")?,
@@ -134,7 +134,7 @@ fn cmd_video(rest: &[String]) -> Result<bool, String> {
 }
 
 fn cmd_tcp(rest: &[String]) -> Result<bool, String> {
-    let a = Args::parse(rest, &["to", "bytes", "duration", "timeout", "pids"], &[])?;
+    let a = Args::parse(rest, &["to", "bytes", "duration", "timeout", "pids"])?;
     let c = TcpConfig {
         to: addr(a.need("to")?)?,
         bytes: a.num("bytes", 0)?,
@@ -149,7 +149,7 @@ fn cmd_tcp(rest: &[String]) -> Result<bool, String> {
 }
 
 fn cmd_sample(rest: &[String]) -> Result<bool, String> {
-    let a = Args::parse(rest, &["pids", "duration"], &[])?;
+    let a = Args::parse(rest, &["pids", "duration"])?;
     let procs = parse_pids(a.need("pids")?)?;
     let d = a.dur("duration", Duration::from_secs(10))?;
     let m = Meter::start(&procs);
@@ -159,7 +159,7 @@ fn cmd_sample(rest: &[String]) -> Result<bool, String> {
 }
 
 fn cmd_wait(rest: &[String]) -> Result<bool, String> {
-    let a = Args::parse(rest, &["file", "for", "timeout", "every"], &[])?;
+    let a = Args::parse(rest, &["file", "for", "timeout", "every"])?;
     let src = match (a.get("file"), a.rest.is_empty()) {
         (Some(f), true) => Source::File(PathBuf::from(f)),
         (None, false) => Source::Cmd(a.rest.clone()),
@@ -179,7 +179,7 @@ fn cmd_wait(rest: &[String]) -> Result<bool, String> {
 
 fn cmd_check(rest: &[String]) -> Result<bool, String> {
     let (file, rest) = rest.split_first().ok_or("usage: load check FILE --check COND...")?;
-    let a = Args::parse(rest, &[], &[])?;
+    let a = Args::parse(rest, &[])?;
     let doc = load::wait::read(&Source::File(PathBuf::from(file)))?;
     let r = obj([("file", file.as_str().into()), ("data", doc)]);
     let mut common = a.common();

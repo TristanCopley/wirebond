@@ -21,19 +21,28 @@ fn n(r: &Json, k: &str) -> f64 {
     r.get(k).and_then(Json::num).unwrap_or_else(|| panic!("{k} missing in {r}"))
 }
 
-#[test]
-fn udp_video_and_tcp_through_an_echo() {
-    let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
-    let e = echo_on(lo).expect("an echo on 127.0.0.1");
-    let me = vec![Proc { name: "self".into(), pid: std::process::id() }];
+/// An echo on 127.0.0.1, one per test, so each test's counters are its own.
+fn lo_echo() -> Echo {
+    echo_on(IpAddr::V4(Ipv4Addr::LOCALHOST)).expect("an echo on 127.0.0.1")
+}
 
+/// The echo's counter k of what ("udp" or "tcp") on port, from 127.0.0.1.
+fn counted(e: &Echo, what: &str, port: u16, k: &str) -> Option<f64> {
+    let s = e.stats();
+    s.get(&format!("{what}:{port}:127.0.0.1")).and_then(|c| c.get(k)).and_then(Json::num)
+}
+
+#[test]
+fn udp_through_an_echo() {
+    let e = lo_echo();
+    let me = vec![Proc { name: "self".into(), pid: std::process::id() }];
     let r = udp(&UdpConfig {
         to: e.udp[0],
         from: None,
         mbps: 20.0,
         size: 1200,
         duration: Duration::from_millis(1500),
-        procs: me.clone(),
+        procs: me,
     })
     .unwrap();
     assert!(n(&r, "sent") > 2000.0, "{r}");
@@ -43,7 +52,13 @@ fn udp_video_and_tcp_through_an_echo() {
     assert!(
         r.get("procs").and_then(|p| p.get("self")).and_then(|s| s.get("rss_mb")).and_then(Json::num).unwrap() > 0.0
     );
+    // The echo counted all of it by source: 127.0.0.1.
+    assert_eq!(counted(&e, "udp", e.udp[0].port(), "pkts"), Some(n(&r, "sent")), "{}", e.stats());
+}
 
+#[test]
+fn video_through_an_echo() {
+    let e = lo_echo();
     let v = video(&VideoConfig {
         to: e.udp[0],
         from: None,
@@ -59,7 +74,13 @@ fn udp_video_and_tcp_through_an_echo() {
     assert_eq!(n(&v, "decodable"), 120.0, "{v}");
     assert_eq!(n(&v, "unrecovered"), 0.0, "{v}");
     assert!(n(&v, "frame_p99_ms") < 100.0, "{v}");
+    assert_eq!(counted(&e, "udp", e.udp[0].port(), "pkts"), Some(n(&v, "sent")), "{}", e.stats());
+}
 
+#[test]
+fn tcp_through_an_echo() {
+    let e = lo_echo();
+    let me = vec![Proc { name: "self".into(), pid: std::process::id() }];
     let t = tcp(&TcpConfig {
         to: e.tcp[0],
         bytes: 20_000_000,
@@ -78,14 +99,7 @@ fn udp_video_and_tcp_through_an_echo() {
     });
     assert_eq!(timed.get("ok"), Some(&Json::Bool(true)), "{timed}");
     assert!(n(&timed, "bytes") > 0.0, "{timed}");
-
-    // The echo counted all of it by source: 127.0.0.1.
-    let s = e.stats();
-    let udp_key = format!("udp:{}:127.0.0.1", e.udp[0].port());
-    let tcp_key = format!("tcp:{}:127.0.0.1", e.tcp[0].port());
-    let pkts = s.get(&udp_key).and_then(|c| c.get("pkts")).and_then(Json::num).unwrap();
-    assert_eq!(pkts, n(&r, "sent") + n(&v, "sent"), "{s}");
-    assert_eq!(s.get(&tcp_key).and_then(|c| c.get("conns")).and_then(Json::num), Some(2.0), "{s}");
+    assert_eq!(counted(&e, "tcp", e.tcp[0].port(), "conns"), Some(2.0), "{}", e.stats());
 }
 
 #[test]

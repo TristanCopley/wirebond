@@ -18,8 +18,9 @@ pub const COMMON: [&str; 3] = ["out", "label", "check"];
 pub const COMMON_BOOLS: [&str; 1] = ["table"];
 
 impl Args {
-    /// Parses args, which may use only the options in `values` (each takes a value) and `bools`.
-    pub fn parse(args: &[String], values: &[&str], bools: &[&str]) -> Result<Args, String> {
+    /// Parses args, which may use only the options in `values` (each takes a value) and the common
+    /// ones.
+    pub fn parse(args: &[String], values: &[&str]) -> Result<Args, String> {
         let mut a = Args::default();
         let mut it = args.iter();
         while let Some(arg) = it.next() {
@@ -34,7 +35,7 @@ impl Args {
                 Some((n, v)) => (n, Some(v.to_string())),
                 None => (name, None),
             };
-            if bools.contains(&name) || COMMON_BOOLS.contains(&name) {
+            if COMMON_BOOLS.contains(&name) {
                 a.opts.push((name.into(), inline.unwrap_or_else(|| "true".into())));
             } else if values.contains(&name) || COMMON.contains(&name) {
                 let v = match inline {
