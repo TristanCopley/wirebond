@@ -332,10 +332,11 @@ pub struct Daemon {
     support: support::State,
     /// The update's schedule (§22.3).
     updater: crate::update::Schedule,
-    /// `anchor_nets`, and the role, egress and bond subnets it was computed from: the address
-    /// checks of every delivered packet read it (`refresh_nets`).
+    /// `anchor_nets`, which the address checks of every delivered packet read. It is computed
+    /// again where what it reads changes: the egress, only ever written by `anchor_on` and
+    /// `anchor_off`, which `reconcile` reaches as soon as the role changes. The bond subnets
+    /// change only with a restart.
     nets: (Vec<IpAddr>, Vec<(IpAddr, u8)>),
-    nets_from: Option<NetsFrom>,
     /// The lane pump's receive buffers: BATCH datagrams of DGRAM bytes.
     rx_bufs: Vec<[u8; plat::DGRAM]>,
     /// The lane sends of the current loop turn.
@@ -343,9 +344,6 @@ pub struct Daemon {
     /// When the DNS relay's state is next tidied without a query or answer to read.
     next_dns: Mono,
 }
-
-/// What `anchor_nets` reads: the role, the egress's IPv4 subnet and the configured bond subnets.
-type NetsFrom = (Role, Option<(Ipv4Addr, u8)>, String, String);
 
 /// What the loop's wait found readable. Without a poll (Windows' event loop) everything is read.
 #[derive(Clone, Copy)]
@@ -524,7 +522,7 @@ impl Daemon {
     pub fn new(version: &str, dir: Option<PathBuf>, cfg: Config, plat: Box<dyn Platform>) -> io::Result<Daemon> {
         let (ev_tx, ev_rx) = mpsc::channel();
         let name = plat.hostname();
-        Ok(Daemon {
+        let mut d = Daemon {
             version: version.into(),
             dir,
             cfg,
@@ -583,11 +581,12 @@ impl Daemon {
             support: support::State::default(),
             updater: crate::update::Schedule::new(0, getrandom::u64().unwrap_or(1)),
             nets: (Vec::new(), Vec::new()),
-            nets_from: None,
             rx_bufs: vec![[0; plat::DGRAM]; plat::BATCH],
             txq: TxQueue::default(),
             next_dns: 0,
-        })
+        };
+        d.nets = d.anchor_nets();
+        Ok(d)
     }
 
     /// Monotonic now, ns since the daemon started.
@@ -753,27 +752,10 @@ impl Daemon {
         (nets.iter().map(|&(n, _)| host_in(n, 1)).collect(), nets)
     }
 
-    /// `anchor_nets` again when the role, the egress or the bond subnets changed.
-    fn refresh_nets(&mut self) {
-        let egress4 = self.egress.as_ref().and_then(|(_, on)| on.as_ref()).map(|on| on.addr4);
-        let cfg = &self.cfg;
-        let same = self.nets_from.as_ref().is_some_and(|(role, e4, n4, n6)| {
-            (*role, *e4) == (cfg.role, egress4) && *n4 == cfg.bond_net4 && *n6 == cfg.bond_net6
-        });
-        if !same {
-            self.nets = self.anchor_nets();
-            let cfg = &self.cfg;
-            self.nets_from = Some((cfg.role, egress4, cfg.bond_net4.clone(), cfg.bond_net6.clone()));
-        }
-    }
-
     /// Hands `ev` to bond `bi`'s session and sends what it asks over the control channel.
     fn handle_bond(&mut self, bi: usize, ev: core::Event<'_>) {
         let now = self.now();
         let anchor = self.cfg.role == Role::Anchor;
-        if anchor {
-            self.refresh_nets();
-        }
         let b = if bi == PICK { self.pick.as_mut().and_then(|p| p.bond.as_mut()) } else { self.bonds.get_mut(bi) };
         let Some(b) = b else { return };
         // §10.5 rule 6 checks deliveries on a stand-in with the bond's addresses and counters, so
@@ -1427,7 +1409,7 @@ impl Daemon {
     /// The anchor's `bond ok` on channel `id` for bond `bi`, with the bond's addresses and egress
     /// (§3.2 step 3), and then its session in `mode`. `what` names the bond in the log.
     fn answer_open(&mut self, id: u64, bi: usize, mode: Mode, fresh: bool, what: &str) {
-        let dns = self.anchor_nets().0.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1)));
+        let dns = self.nets.0.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1)));
         let b = &self.bonds[bi];
         let ok = proto::Bond::Ok { addr4: b.addr4, addr6: b.addr6, mtu: TUN_MTU as u16, dns, egress: b.egress };
         let line = format!("{what} open from {} ({}), {}", b.peer, b.peer_addr, mode.as_str());
@@ -1464,8 +1446,7 @@ impl Daemon {
         let Some(n) = self.pool.assign(&device) else {
             return self.refuse(id, ErrorCode::TooManyBonds, "no bond address left");
         };
-        let (_, nets) = self.anchor_nets();
-        let addr = |v6: bool| nets.iter().find(|(a, _)| a.is_ipv6() == v6).map(|&(a, _)| host_in(a, n));
+        let addr = |v6: bool| self.nets.1.iter().find(|(a, _)| a.is_ipv6() == v6).map(|&(a, _)| host_in(a, n));
         let (addr4, addr6) = (
             addr(false).and_then(|a| if let IpAddr::V4(a) = a { Some(a) } else { None }),
             addr(true).and_then(|a| if let IpAddr::V6(a) = a { Some(a) } else { None }),
@@ -1910,6 +1891,7 @@ impl Daemon {
                 self.host_failed("TUN device", &err);
             }
             (self.anchor_fault, self.egress) = (fault, Some((e, None)));
+            self.nets = self.anchor_nets();
             return;
         }
         let mut faults = Vec::new();
@@ -1929,11 +1911,11 @@ impl Daemon {
         let what = if first { "anchor on" } else { "anchor on again" };
         self.log(format!("{what}: egress {:?}", on.as_ref().map(|o| (o.v4, o.v6, &o.uplink))));
         self.egress = Some((e, on));
+        self.nets = self.anchor_nets();
         // The relay listens where there is egress, and asks the uplink's resolver: anew each time.
         self.dns_relay = None;
-        let (own, _) = self.anchor_nets();
         let on = self.egress.as_ref().and_then(|(_, on)| on.as_ref()).map_or((false, false), |on| (on.v4, on.v6));
-        let own: Vec<IpAddr> = own.into_iter().filter(|a| if a.is_ipv4() { on.0 } else { on.1 }).collect();
+        let own: Vec<IpAddr> = self.nets.0.iter().copied().filter(|a| if a.is_ipv4() { on.0 } else { on.1 }).collect();
         // No egress, no relay: the clients keep their own resolvers (§5.2).
         if !own.is_empty() {
             match self.plat.upstream_resolver().and_then(|up| dns::Relay::new(&own, 53, up)) {
@@ -1961,6 +1943,7 @@ impl Daemon {
         {
             self.log(format!("egress off: {err}"));
         }
+        self.nets = self.anchor_nets();
         (self.dns_relay, self.tun, self.anchor_fault) = (None, None, None);
         self.log("anchor off".into());
     }
