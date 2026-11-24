@@ -8,7 +8,7 @@ use socket2::{Domain, Socket, Type};
 use std::ffi::CStr;
 use std::fs::{self, Permissions};
 use std::mem::MaybeUninit;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::prelude::*;
 use std::path::Path;
@@ -91,6 +91,22 @@ pub(super) fn setopt(s: &Socket, level: c_int, opt: c_int, v: &[u8]) -> io::Resu
     let len = v.len() as libc::socklen_t;
     // SAFETY: v is valid for reads of len bytes during the call.
     cvt(unsafe { libc::setsockopt(s.as_raw_fd(), level, opt, v.as_ptr().cast(), len) }).map(|_| ())
+}
+
+/// `a` with all but its first `bits` bits cleared: an IPv4 network, or with BROADCAST its netmask.
+pub(super) fn mask4(a: Ipv4Addr, bits: u8) -> Ipv4Addr {
+    Ipv4Addr::from_bits(a.to_bits() & u32::MAX.checked_shl(32 - u32::from(bits.min(32))).unwrap_or(0))
+}
+
+/// The network `a`/`bits` is in: `a` with its host bits cleared.
+pub(super) fn network(a: IpAddr, bits: u8) -> IpAddr {
+    match a {
+        IpAddr::V4(a) => IpAddr::V4(mask4(a, bits)),
+        IpAddr::V6(a) => {
+            let m = u128::MAX.checked_shl(128 - u32::from(bits.min(128))).unwrap_or(0);
+            IpAddr::V6(Ipv6Addr::from_bits(a.to_bits() & m))
+        }
+    }
 }
 
 /// A libc call's result: -1 is errno's error.

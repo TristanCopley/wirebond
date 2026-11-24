@@ -124,7 +124,7 @@ mod v2 {
     use super::super::net::{
         Capture, Egress, EgressOn, LANE_MARK, Routes, Share, TABLE, TUN_NAME, TunConfig, missing_tool_error,
     };
-    use super::rooted;
+    use super::{mask4, network, rooted};
 
     /// The rules' priorities (§5.3): every route more specific than a default wins at 5299; at
     /// 5300 whatever is not a lane packet takes TABLE. Tailscale's own sit at 5210–5270.
@@ -491,17 +491,7 @@ mod v2 {
 
     /// `a/p` with the host bits cleared, as `ip` and `nft` want a network.
     fn net(a: IpAddr, p: u8) -> String {
-        match a {
-            IpAddr::V4(a) => format!("{}/{p}", mask4(a, p)),
-            IpAddr::V6(a) => {
-                let m = u128::MAX.checked_shl(128 - u32::from(p.min(128))).unwrap_or(0);
-                format!("{}/{p}", Ipv6Addr::from_bits(a.to_bits() & m))
-            }
-        }
-    }
-
-    fn mask4(a: Ipv4Addr, p: u8) -> Ipv4Addr {
-        Ipv4Addr::from_bits(a.to_bits() & u32::MAX.checked_shl(32 - u32::from(p.min(32))).unwrap_or(0))
+        format!("{}/{p}", network(a, p))
     }
 
     /// Writes `value` to the sysctl file `key`, first saving its old value in `file` unless saved

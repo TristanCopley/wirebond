@@ -139,7 +139,7 @@ pub use v2::*;
 mod v2 {
     use std::io;
     use std::mem;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::process::Command;
     use std::sync::Mutex;
@@ -147,7 +147,7 @@ mod v2 {
 
     use super::super::Scope;
     use super::super::net::{Capture, Egress, EgressOn, Routes, Share, TunConfig};
-    use super::cvt;
+    use super::{cvt, mask4, network};
 
     /// The dynamic-store key of the client's DNS service (§7).
     const DNS_KEY: &str = "State:/Network/Service/com.wirebond/DNS";
@@ -207,13 +207,13 @@ mod v2 {
             let t = tun.name.as_str();
             super::run("ifconfig", &[t, "mtu", &c.mtu.to_string(), "up"])?;
             if let Some((ip, bits)) = c.addr4 {
-                let (a, mask) = (ip.to_string(), Ipv4Addr::from(mask4(bits)).to_string());
+                let (a, mask) = (ip.to_string(), mask4(Ipv4Addr::BROADCAST, bits).to_string());
                 super::run("ifconfig", &[t, "inet", &a, &a, "netmask", &mask, "alias"])?;
-                route(true, net(IpAddr::V4(ip), bits), t)?;
+                route(true, (network(IpAddr::V4(ip), bits), bits), t)?;
             }
             if let Some((a, bits)) = c.addr6 {
                 super::run("ifconfig", &[t, "inet6", &format!("{a}/{bits}"), "alias"])?;
-                route(true, net(IpAddr::V6(a), bits), t)?;
+                route(true, (network(IpAddr::V6(a), bits), bits), t)?;
             }
             Ok(tun)
         }
@@ -254,22 +254,6 @@ mod v2 {
     impl AsRawFd for Tun {
         fn as_raw_fd(&self) -> RawFd {
             self.fd.as_raw_fd()
-        }
-    }
-
-    /// An IPv4 netmask of `bits` ones.
-    fn mask4(bits: u8) -> u32 {
-        u32::MAX.checked_shl(32 - u32::from(bits.min(32))).unwrap_or(0)
-    }
-
-    /// The network `addr`/`bits` is in.
-    fn net(addr: IpAddr, bits: u8) -> (IpAddr, u8) {
-        match addr {
-            IpAddr::V4(a) => (IpAddr::V4(Ipv4Addr::from(a.to_bits() & mask4(bits))), bits),
-            IpAddr::V6(a) => {
-                let m = u128::MAX.checked_shl(128 - u32::from(bits.min(128))).unwrap_or(0);
-                (IpAddr::V6(Ipv6Addr::from(a.to_bits() & m)), bits)
-            }
         }
     }
 
@@ -354,11 +338,11 @@ mod v2 {
                 state.push_str(&format!("sysctl {key}\n"));
             }
         }
-        let (n4, b4) = net(IpAddr::V4(e.net4.0), e.net4.1);
+        let (n4, b4) = (mask4(e.net4.0, e.net4.1), e.net4.1);
         let mut rules = format!("nat on {uplink} inet from {n4}/{b4} to any -> ({uplink})\n");
         if let (Some(up), Some((a, bits))) = (&uplink6, e.net6) {
-            let (n6, b6) = net(IpAddr::V6(a), bits);
-            rules.push_str(&format!("nat on {up} inet6 from {n6}/{b6} to any -> ({up})\n"));
+            let n6 = network(IpAddr::V6(a), bits);
+            rules.push_str(&format!("nat on {up} inet6 from {n6}/{bits} to any -> ({up})\n"));
         }
         pfctl(&["-a", ANCHOR, "-f", "-"], Some(&rules))?;
         if !state.contains("token ") {
@@ -367,15 +351,8 @@ mod v2 {
             state.push_str(&format!("token {token}\n"));
         }
         fs::write(egress_file(), &state)?;
-        let first = Ipv4Addr::from((n4_bits(n4)) + 1);
+        let first = Ipv4Addr::from_bits(n4.to_bits() + 1);
         Ok(EgressOn { v4: true, v6: up6, addr4: (first, e.net4.1), uplink: Some(uplink), why: None })
-    }
-
-    fn n4_bits(a: IpAddr) -> u32 {
-        match a {
-            IpAddr::V4(a) => a.to_bits(),
-            IpAddr::V6(_) => 0,
-        }
     }
 
     /// Flushes the anchor, releases pf's reference and turns forwarding back off where egress_enable
