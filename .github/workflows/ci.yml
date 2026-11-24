@@ -105,32 +105,84 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Fetch netsim's Mahimahi traces (SPEC §23.1 tier 2)
         if: hashFiles('crates/netsim/traces.sum') != ''
-        run: |
-          # traces.sum: sha256sum lines ("<sha256>  <file>", the file named by itself or by a path
-          # or URL ending in it) and the pinned ravinet/mahimahi commit as a 40-hex word. The traces
-          # go to crates/netsim/testdata/traces/ (git-ignored).
-          sums=crates/netsim/traces.sum dir=crates/netsim/testdata/traces
-          commit=$(grep -oE '\b[0-9a-f]{40}\b' "$sums" | head -1 || true)
-          [ -n "$commit" ] || { echo "$sums names no mahimahi commit"; exit 1; }
-          entries=$(grep -E '^[0-9a-f]{64} ' "$sums") || { echo "$sums lists no traces"; exit 1; }
-          mkdir -p "$dir"
-          while read -r sum file; do
-            file=${file#\*}; file=${file##*/}
-            curl -fsSL --retry 3 -o "$dir/$file" \
-              "https://raw.githubusercontent.com/ravinet/mahimahi/$commit/traces/$file"
-            echo "$sum  $dir/$file" | sha256sum -c -
-          done <<< "$entries"
+        run: .github/scripts/traces.sh
       - name: cargo test, with crates/load's loopback tests of the echo, UDP, video and TCP
         run: cargo test --workspace --exclude wirebond-netsim --locked
       - name: cargo test netsim's PR seed set, optimized (the sim profile) since it is heavy
         run: cargo test -p wirebond-netsim --profile sim --locked
-      - name: netsim's full acceptance set (SPEC §23.3)
-        if: github.event_name == 'schedule' || inputs.long
+
+  # netsim's full acceptance set (SPEC §23.3), nightly and when release.yml calls this workflow with
+  # long: true. It is by far CI's longest work, so it runs in shards side by side: each one named in
+  # SHARDS runs the tests its line lists, and rest runs every test of the crate that no line names,
+  # so a new test runs there without a change here. The first step fails the shard unless the
+  # shards' own filters list each test of the crate exactly once.
+  netsim-long:
+    name: netsim long ${{ matrix.shard }}
+    if: github.event_name == 'schedule' || inputs.long
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [a1-a5, a2-a6, a13, rest] # SHARDS' names in order, then rest
+    env:
+      WIREBOND_LONG: '1' # netsim's long set
+      # Balanced by the full set's runs: a1, a2 and a3 make 80 each, the a5 and a6 pairs 120 and the
+      # a13 three 180; rest is a3, swarm, fuzz and the short suites.
+      SHARDS: |
+        a1-a5 accept::a1 accept::a5_performance accept::a5_bandwidth
+        a2-a6 accept::a2 accept::a6_performance accept::a6_bandwidth
+        a13 accept::a13_sleep accept::a13_link_change accept::a13_mesh_down
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update && rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch netsim's Mahimahi traces (SPEC §23.1 tier 2)
+        if: hashFiles('crates/netsim/traces.sum') != ''
+        run: .github/scripts/traces.sh
+      - name: This shard's tests, and each test of the crate in exactly one shard
         env:
-          WIREBOND_LONG: '1' # netsim's long set
-        # Every suite reports: without --no-fail-fast cargo stops at the first that fails, and the
-        # ones after it (fuzz, swarm and the rest) never ran at full length.
-        run: cargo test -p wirebond-netsim --release --locked --no-fail-fast
+          SHARD: ${{ matrix.shard }}
+          INDEX: ${{ strategy.job-index }}
+          TOTAL: ${{ strategy.job-total }}
+        run: |
+          export LC_ALL=C
+          mapfile -t lines < <(grep . <<< "$SHARDS")
+          n=${#lines[@]}
+          names=$(for l in "${lines[@]}"; do echo "${l%% *}"; done; echo rest)
+          if [ "$TOTAL" != $((n + 1)) ] || [ "$(sed -n "$((INDEX + 1))p" <<< "$names")" != "$SHARD" ]; then
+            echo "the matrix is not SHARDS' names in order, then rest:" $names; exit 1
+          fi
+          # args I: shard I's arguments to cargo test, its filter after the --.
+          args() {
+            local l tests
+            if [ "$1" -lt "$n" ]; then
+              read -r _ tests <<< "${lines[$1]}" && echo "--test sim -- --exact $tests"
+            else
+              echo -n "-- --exact"
+              for l in "${lines[@]}"; do read -r _ tests <<< "$l" && printf ' --skip %s' $tests; done
+              echo
+            fi
+          }
+          # list ARGS: what cargo test lists with those arguments, a test per line, sorted.
+          list() { cargo test -p wirebond-netsim --release --locked $1 --list | sed -n 's/: test$//p' | sort; }
+          cargo test -p wirebond-netsim --release --locked --no-run
+          all=$(list --)
+          named=$(for l in "${lines[@]}"; do read -r _ tests <<< "$l" && printf '%s\n' $tests; done | sort -u)
+          gone=$(comm -23 <(echo "$named") <(echo "$all"))
+          [ -z "$gone" ] || { echo "SHARDS names tests the crate does not have:" $gone; exit 1; }
+          union=$(for ((i = 0; i <= n; i++)); do list "$(args "$i")"; done | sort)
+          if [ "$union" != "$all" ]; then
+            echo "the shards do not list each test once (<: in no shard, >: in two):"
+            diff <(echo "$all") <(echo "$union") || true
+            exit 1
+          fi
+          echo "$(wc -l <<< "$all") tests in $((n + 1)) shards; $SHARD runs:"
+          list "$(args "$INDEX")"
+          echo "ARGS=$(args "$INDEX")" >> "$GITHUB_ENV"
+      # --no-fail-fast: a failure in the lib's tests does not stop cargo before rest's sim binary.
+      - name: This shard of the full set
+        run: cargo test -p wirebond-netsim --release --locked --no-fail-fast $ARGS
 
   rust-targets:
     runs-on: ubuntu-latest
