@@ -155,10 +155,7 @@ mod v2 {
 
     impl Tun {
         pub fn open(c: &TunConfig) -> io::Result<Tun> {
-            let bad = c.name.is_empty() || c.name.len() >= libc::IFNAMSIZ || !iface_name(&c.name);
-            if bad {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad interface name {:?}", c.name)));
-            }
+            check_name(&c.name)?;
             // SAFETY: the path is a C string; open returns a new descriptor or -1.
             let fd = unsafe { libc::open(c"/dev/net/tun".as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) };
             if fd < 0 {
@@ -223,9 +220,7 @@ mod v2 {
     /// Without systemd-resolved DNS is left alone and [`dns_local`] says so.
     pub fn capture_install(c: &Capture) -> io::Result<()> {
         need("ip")?;
-        if !iface_name(&c.tun) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad interface name {:?}", c.tun)));
-        }
+        check_name(&c.tun)?;
         // Half a capture would send traffic nowhere: a failure removes what was installed.
         install(c).inspect_err(|_| drop(capture_remove(c)))
     }
@@ -285,9 +280,7 @@ mod v2 {
     /// loaded with `nft -f -`, then ip_forward and IPv6 forwarding saved and set (§6.2);
     /// `missing_tool nft` without nftables. The rules name no uplink, so they follow it.
     pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
-        if !iface_name(&e.tun) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad interface name {:?}", e.tun)));
-        }
+        check_name(&e.tun)?;
         let v6 = has_v6() && e.net6.is_some();
         tool("nft", &["-f", "-"], Some(&ruleset(e, v6)))?;
         let (up4, up6) = (default_dev("-4"), if v6 { default_dev("-6") } else { None });
@@ -432,6 +425,14 @@ mod v2 {
         !n.is_empty() && n.len() < libc::IFNAMSIZ && !matches!(n, "." | "..") && !n.contains(bad)
     }
 
+    /// InvalidInput unless [`iface_name`] accepts `n`.
+    fn check_name(n: &str) -> io::Result<()> {
+        if iface_name(n) {
+            return Ok(());
+        }
+        Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad interface name {n:?}")))
+    }
+
     /// The two rules (§5.3), as `ip rule add` and `del` take them.
     fn rules() -> [String; 2] {
         [
@@ -554,9 +555,7 @@ mod v2 {
     }
 
     fn share(s: &Share) -> io::Result<()> {
-        if !iface_name(&s.cable) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad interface name {:?}", s.cable)));
-        }
+        check_name(&s.cable)?;
         let out = tool("nmcli", &["-g", "GENERAL.CONNECTION", "device", "show", &s.cable], None)?;
         let con = match out.trim() {
             "" | "--" => {
