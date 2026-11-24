@@ -40,3 +40,9 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 debug = false
+
+# The daemon at opt-level 0: its tests wait on sockets and timers, not on the processor, and ran no
+# slower so (39 s either way), while a rebuild after an edit in it took a third of the time
+# (1.5 s against 5 s incremental, 6 s against 19 s without, as CI builds).
+[profile.dev.package.wirebond]
+opt-level = 0
