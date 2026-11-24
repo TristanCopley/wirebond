@@ -21,8 +21,12 @@ permissions:
   contents: read
 
 concurrency:
-  # Literal: in a workflow_call github.workflow is the caller's name, and release.yml calls ci.yml and system.yml at once.
-  group: ci-${{ github.event_name }}-${{ github.ref }}
+  # The prefix is literal: in a workflow_call github.workflow is the caller's name, and release.yml
+  # calls ci.yml and system.yml at once. A run of this workflow itself supersedes the earlier one
+  # for its ref. A run release.yml calls has a group of its own (the caller's run id): it has
+  # release.yml's event and ref, so another run with those, a manual one of system.yml on main
+  # among them, cancelled the release's job, and nothing was published.
+  group: ci-${{ github.event_name }}-${{ github.workflow == 'ci' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 env:
