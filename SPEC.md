@@ -580,12 +580,14 @@ wirebond run                               the daemon (started by the service ma
 
 ### 20.1 Local API
 
-**Where it listens**
+**Where it listens:** two Unix-domain sockets in the daemon's state directory (§22.4), on every OS; Windows has them since Windows 10 1803.
 
-| OS | Endpoint | Access |
+| Socket | For | Who may connect |
 | --- | --- | --- |
-| Unix | `/var/run/wirebond.sock` | owner root, group `wirebond`, mode 0660. Install adds the installing user to the group. |
-| Windows | `\\.\pipe\wirebond` | Administrators: read and write; the interactive user: read |
+| `status.sock` | reads: the status and the views | anyone on the device |
+| `ctl.sock` | changes | the service's owner only: root, or an administrator on Windows |
+
+Reading needs no rights, and a change needs the rights that installed the service (§19), so there is no group to join.
 
 **Protocol:** one JSON request and one JSON reply per line, at most 64 KiB. The verbs are those of the CLI.
 
