@@ -7,9 +7,9 @@
 //! - `WIREBOND_LONG=1`: the nightly set, 20 seeds × 5 simulated minutes (Go -long);
 //! - `WIREBOND_SEED=N`: run only seed N (Go -seed=N);
 //! - `WIREBOND_FAKE=1`: drive the acceptance scenarios with the fake instead of core (Go -fake);
-//! - `WIREBOND_JOBS=N`: [`accept`] runs at most N scenario runs at once in one test process, and
-//!   [`par_runs`] (the swarm, the fuzzer) runs on N threads (default: the machine's available
-//!   parallelism; Go's -parallel bounded its parallel subtests);
+//! - `WIREBOND_JOBS=N`: [`accept`] and [`par_runs`] (the swarm, the fuzzer and the smaller suites)
+//!   run at most N scenario runs at once in one test process, between them (default: the
+//!   machine's available parallelism; Go's -parallel bounded its parallel subtests);
 //! - `WIREBOND_HASHES=1`: [`accept`] and the swarm print every run's event-log hash, passed or
 //!   failed, as a `hash <run>: <hash>` line ([`show_hash`]), to compare two builds run by run (with
 //!   `--nocapture`: the harness shows a passing test's output only then).
@@ -89,10 +89,11 @@ pub fn sim_time() -> Dur {
     if long() { 5 * MIN } else { 60 * SEC }
 }
 
-/// The one command that reproduces a failure of `test` in tests/`target`.rs on seed (Go repro).
-pub fn repro(target: &str, test: &str, seed: u64) -> String {
+/// The one command that reproduces a failure of `test` in the sim test binary's module `module`
+/// (tests/sim/`module`.rs) on seed (Go repro).
+pub fn repro(module: &str, test: &str, seed: u64) -> String {
     let long = if long() { "WIREBOND_LONG=1 " } else { "" };
-    format!("{long}WIREBOND_SEED={seed} cargo test -p wirebond-netsim --test {target} -- --exact {test}")
+    format!("{long}WIREBOND_SEED={seed} cargo test -p wirebond-netsim --release --test sim -- --exact {module}::{test}")
 }
 
 /// Real core Sessions, or the fake in direct mode with WIREBOND_FAKE (Go maker).
@@ -322,9 +323,9 @@ pub type Eval = Box<dyn FnOnce(&mut Env, &mut Check)>;
 /// until, eval).
 ///
 /// At most WIREBOND_JOBS runs (default: the available parallelism) run at once in the whole test
-/// process, whatever number of tests the harness runs at a time; a run builds its World when it
-/// gets its turn, so its wall-clock limit (`World::wall`) times the run, not the wait. A panic in
-/// a run fails that seed only.
+/// process, whatever number of tests the harness runs at a time, [`par_runs`]' runs included; a
+/// run builds its World when it gets its turn, so its wall-clock limit (`World::wall`) times the
+/// run, not the wait. A panic in a run fails that seed only.
 pub fn accept<F>(test: &str, sc: F)
 where
     F: Fn(u64, Dur) -> (Env, Dur, Eval) + Sync,
@@ -460,7 +461,7 @@ struct Pool {
     freed: Condvar,
 }
 
-/// The pool every accept call shares.
+/// The pool every accept and par_runs call shares.
 static POOL: Pool = Pool::new();
 
 impl Pool {
@@ -520,19 +521,25 @@ fn par_map<T: Sync, R: Send>(
 }
 
 /// f over items on WIREBOND_JOBS scoped threads (default: one per CPU), each with a seed thread's
-/// stack, in items' order: the swarm's and the fuzzer's runner. A World is not Send: each is
-/// built, run and dropped inside f. A panic in f is passed on once every thread has finished.
+/// stack, in items' order: the swarm's and the fuzzer's runner. Each item takes its turn in the
+/// pool accept uses, so the tests the harness runs at once share one limit, and f, which builds
+/// its World, runs once it has the turn (the fuzzer's wall-clock limit times the run, not the
+/// wait). A World is not Send: each is built, run and dropped inside f. A panic in f is passed on
+/// once every thread has finished.
 pub fn par_runs<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let next = AtomicUsize::new(0);
     let out: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
     let (f, next, slots) = (&f, &next, &out);
+    let cap = jobs_flag();
     std::thread::scope(|s| {
-        for k in 0..jobs_flag().min(items.len()) {
+        for k in 0..cap.min(items.len()) {
             let work = move || {
                 loop {
+                    let turn = POOL.take(cap);
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(x) = items.get(i) else { break };
                     let r = f(x);
+                    drop(turn);
                     *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
                 }
             };
@@ -676,10 +683,9 @@ mod tests {
         assert_eq!(ms(-2 * MS), "-2.0 ms");
         assert_eq!(ms(Dur::MAX), "+Inf");
         assert_eq!(ms(1 << 62), "+Inf");
-        assert!(
-            repro("accept", "a9_paused", 3)
-                .ends_with("WIREBOND_SEED=3 cargo test -p wirebond-netsim --test accept -- --exact a9_paused")
-        );
+        assert!(repro("accept", "a9_paused", 3).ends_with(
+            "WIREBOND_SEED=3 cargo test -p wirebond-netsim --release --test sim -- --exact accept::a9_paused"
+        ));
         assert!(is_bulk(&[TYPE_DATA, 0]) && !is_bulk(&[TYPE_DATA | 0x80]) && !is_bulk(&[]));
     }
 

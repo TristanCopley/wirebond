@@ -39,7 +39,7 @@ fn fake(direct: bool) -> Maker {
 
 /// The command that reproduces a failure of test (§17.4).
 fn repro(test: &str) -> String {
-    format!("cargo test -p wirebond-netsim --test selftest -- --exact {test}")
+    format!("cargo test -p wirebond-netsim --release --test sim -- --exact selftest::{test}")
 }
 
 /// Fails test at once on a safety failure (Go's t.Fatalf("safety: …")).

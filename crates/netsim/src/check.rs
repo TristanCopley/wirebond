@@ -2,7 +2,7 @@
 //! registry in apps.rs checks deliveries), checked after every handle call, and the on-path
 //! adversary (A6, A14, the swarm, the fuzzer). What core keeps sealed (probe sequence numbers,
 //! echoes) is approximated from what netsim can see; each check says how (notes/netsim.md 5–8).
-//! Owner: N4 (with tests/swarm.rs and tests/fuzz.rs).
+//! Owner: N4 (with tests/sim/swarm.rs and tests/sim/fuzz.rs).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

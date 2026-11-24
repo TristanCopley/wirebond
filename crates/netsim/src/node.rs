@@ -1321,7 +1321,7 @@ fn log_args<'a>(ev: &Event<'a>) -> (u64, &'a [u8]) {
 
 #[cfg(test)]
 mod tests {
-    //! The stand-in's own tests (Go had none for node.go; the self-tests in tests/selftest.rs
+    //! The stand-in's own tests (Go had none for node.go; the self-tests in tests/sim/selftest.rs
     //! covered it). The first group runs on its own: pure functions, and fixtures that build
     //! links without the link model. The second group runs the stand-in end to end with a
     //! scripted endpoint in place of core, over the real engine, links, NAT and registry.
