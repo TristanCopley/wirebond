@@ -412,7 +412,7 @@ struct Io<'a> {
     /// Within a loop turn, lane sends queue here (`TxQueue`).
     txq: &'a mut TxQueue,
     tun: Option<&'a dyn TunDev>,
-    bond: &'a mut Bond,
+    check: bond::Check,
     /// On an anchor: its own bond addresses and the bond subnets.
     anchor: Option<Nets<'a>>,
     ctl: Vec<core::Msg>,
@@ -442,14 +442,14 @@ impl core::Out for Io<'_> {
 
     fn deliver(&mut self, p: &[u8]) {
         let ok = match self.anchor {
-            None => self.bond.client_accepts(p),
-            Some((own, nets)) => match self.bond.anchor_accepts(p, own, nets) {
+            None => self.check.client_accepts(p),
+            Some((own, nets)) => match self.check.anchor_accepts(p, own, nets) {
                 Some(true) => {
-                    self.bond.local += p.len() as u64;
+                    self.check.local += p.len() as u64;
                     true
                 }
                 Some(false) => {
-                    self.bond.egressed += p.len() as u64;
+                    self.check.egressed += p.len() as u64;
                     true
                 }
                 None => false,
@@ -460,7 +460,7 @@ impl core::Out for Io<'_> {
                 let _ = t.write(p);
                 self.delivered += 1;
             }
-            _ => self.bond.dropped += 1,
+            _ => self.check.dropped += 1,
         }
     }
 
@@ -758,24 +758,20 @@ impl Daemon {
         let anchor = self.cfg.role == Role::Anchor;
         let b = if bi == PICK { self.pick.as_mut().and_then(|p| p.bond.as_mut()) } else { self.bonds.get_mut(bi) };
         let Some(b) = b else { return };
-        // §10.5 rule 6 checks deliveries on a stand-in with the bond's addresses and counters, so
-        // the engine works on the session in place: taking it out of the bond and putting it back
-        // copied all of it twice a packet.
-        let mut check = Bond::new(String::new(), b.peer_addr, b.inst, b.mode, now);
-        (check.addr4, check.addr6) = (b.addr4, b.addr6);
+        let check = b.check();
         let Some(s) = b.session.as_mut() else { return };
         let mut io = Io {
             socks: &self.socks,
             txq: &mut self.txq,
             tun: self.tun.as_deref(),
-            bond: &mut check,
+            check,
             anchor: anchor.then_some((&self.nets.0[..], &self.nets.1[..])),
             ctl: Vec::new(),
             tx: 0,
             delivered: 0,
         };
         s.handle(now, ev, &mut self.rids, &mut io);
-        let (ctl, tx, delivered, chan) = (io.ctl, io.tx, io.delivered, b.chan);
+        let (ctl, tx, delivered, chan, check) = (io.ctl, io.tx, io.delivered, b.chan, io.check);
         b.local += check.local;
         b.egressed += check.egressed;
         b.dropped += check.dropped;
@@ -859,7 +855,7 @@ impl Daemon {
             }
             let bi = if self.cfg.role == Role::Anchor {
                 let dst = bond::addrs(p).map(|(_, d)| d);
-                self.bonds.iter().position(|b| dst.is_some_and(|d| b.is_addr(d)))
+                self.bonds.iter().position(|b| dst.is_some_and(|d| b.check().is_addr(d)))
             } else {
                 (!self.bonds.is_empty()).then_some(0)
             };
