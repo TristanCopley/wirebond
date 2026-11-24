@@ -1,10 +1,8 @@
-//! Tests of rate.rs. Owner: C4. Ports from core/rate_test.go: TestCut (TestReorder is flow.rs's).
-//! New: take and restart (R2-04's rate half), the controller as notes/core.md 36 and 46–53 leave
-//! it, the pacer's token bucket, and the rewind ring's bounds.
+//! Tests of rate.rs: the cut after an overuse, take and restart (R2-04's rate half), the
+//! controller, the pacer's token bucket, and the rewind ring's bounds.
 //!
-//! The controller asks `carries`: the tests set the primary and the spread as it reads them. They
-//! keep the pacer from sending (no credit, or no validated address) and put no buffers in queues
-//! or rings.
+//! The controller asks `carries`: the tests set the spread as it reads it. They keep the pacer
+//! from sending (no credit, or no validated address) and put no buffers in queues or rings.
 
 use super::*;
 use crate::estimate::Meter;
@@ -16,7 +14,7 @@ const T0: Mono = 100 * SEC;
 const RTT: Mono = 40 * MS;
 
 /// A session in `mode` at T0 with one lane, validated and up, with an RTT of 40 ms, that carries
-/// bulk (the primary, or the spread) and took it long ago; its rate is `rate`, out of startup.
+/// bulk (the whole spread) and took it long ago; its rate is `rate`, out of startup.
 fn bulk(mode: Mode, rate: f64) -> Session {
     let mut s = Session::new(Role::Client, 1, DetRand::rand(1));
     (s.mode, s.now) = (mode, T0);
@@ -64,8 +62,8 @@ fn near(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 * b.abs().max(1.0)
 }
 
-/// TestCut: the rate after an overuse is never NaN and never below PACE_FLOOR, for a policer's
-/// loss with qd = 0, a full stall's delivery of 0 and an unlimited rate (§9).
+/// The rate after an overuse is never NaN and never below PACE_FLOOR, for a policer's loss with
+/// qd = 0, a full stall's delivery of 0 and an unlimited rate (§12).
 #[test]
 fn cut_is_never_nan_nor_under_the_floor() {
     for (rate, delivery, qd, target, want) in [
@@ -82,7 +80,7 @@ fn cut_is_never_nan_nor_under_the_floor() {
             "cut({rate}, qd {qd}, delivery {delivery}) = {got}, want {want}"
         );
     }
-    // Rust's min and max drop a NaN where Go's would return it: still never NaN.
+    // Rust's min and max drop a NaN rather than return it: still never NaN.
     for (rate, delivery) in [(f64::NAN, 30e6), (INF, f64::NAN), (f64::NAN, f64::NAN)] {
         let got = cut(rate, 30 * MS, TARGET_FLOOR, delivery);
         assert!(!got.is_nan() && got >= PACE_FLOOR, "cut({rate}, delivery {delivery}) = {got}");
@@ -183,7 +181,7 @@ fn adjust_cuts_on_two_queued_echoes_at_most_once_per_rtt() {
     assert!(!ln.startup && near(ln.regain, BETA * 25e6));
     let t = T0 + 20 * MS;
     assert_eq!((ln.last_cut, ln.cut_qd, ln.last_over, ln.clean_at), (t, 30 * MS, t, NEVER));
-    // Within an RTT, no second cut; in stable within 3 RTTs only a queue still growing.
+    // Within an RTT, no second cut; in performance within 3 RTTs only a queue still growing.
     assert_eq!(echo(&mut s, t + RTT / 2, 30 * MS, 30e6, false), r);
     assert_eq!(echo(&mut s, t + 2 * RTT, 30 * MS, 30e6, false), r);
     let r2 = echo(&mut s, t + 2 * RTT + 1, 40 * MS, 30e6, false);
@@ -251,7 +249,7 @@ fn adjust_loss_alone_keeps_the_lanes_room() {
     assert_eq!(lossy(80e6, 0.10, 29e6), 30e6);
     // A policer, delivering less: cut to delivery.
     assert_eq!(lossy(80e6, 0.10, 20e6), 20e6);
-    // Exactly 5% is heavy, as Go's constant 1 − TrialPass makes it.
+    // Exactly 5%, computed as 1 − 95/100, is heavy: in f64 it is just above 0.05.
     assert_eq!(lossy(80e6, 1.0 - 95.0 / 100.0, 10e6), 10e6);
     assert_eq!(lossy(80e6, 1.0 - 96.0 / 100.0, 10e6), 60e6);
     // Light loss with a queue counts as a queue: no lower than the offered rate it delivers.
@@ -297,7 +295,7 @@ fn adjust_combine_climbs_back_to_regain_after_startup() {
     assert_eq!(s.lanes[A].rate, PACE_FLOOR);
     assert_eq!(echo(&mut s, T0, 0, PACE_FLOOR, false), PACE_FLOOR * STARTUP_GAIN);
     // Startup overshot to 72.8 Mbit/s on a 37 Mbit/s lane: the cut, sized by a 100 ms queue,
-    // leaves it far below what it delivered (notes/core.md 50a).
+    // leaves it far below what it delivered.
     s.lanes[A].rate = 72.8e6;
     s.lanes[A].delivery = 37e6;
     echo(&mut s, T0 + RTT, 100 * MS, 72.8e6, false);
@@ -321,13 +319,12 @@ fn adjust_combine_climbs_back_to_regain_after_startup() {
     assert_eq!(echo(&mut s, T0, 0, 15e6, false), 20e6);
 }
 
-/// A bandwidth spread of one lane carries the whole stream, as stable's primary does: earliest
+/// A bandwidth spread of one lane carries the whole stream, as a performance lane does: earliest
 /// arrival has no other lane to hand bulk to, so its offered rate is the stream's, not one its own
-/// pace draws. It starts as stable's primary, unlimited from its first binding increase until its
-/// first overuse, and once a cut has drained it climbs back by STARTUP_GAIN per RTT while it
-/// binds, that is while the stream's offered rate reaches it; a lane that shares the spread keeps
-/// bandwidth's startup and INCREASE_STEP (swarm seeds 13, 35, 79, 82, 98, 104 and 107;
-/// notes/rust.md, harden: integration).
+/// pace draws. It starts as a performance lane does, unlimited from its first binding increase
+/// until its first overuse, and once a cut has drained it climbs back by STARTUP_GAIN per RTT while
+/// it binds, that is while the stream's offered rate reaches it; a lane that shares the spread
+/// keeps bandwidth's startup and INCREASE_STEP (swarm seeds 13, 35, 79, 82, 98, 104 and 107).
 #[test]
 fn adjust_combine_lane_alone_starts_and_climbs_as_stable() {
     // Restarted alone (the Tailscale lane under a hard NAT, back up after a stall), offered the
@@ -345,7 +342,7 @@ fn adjust_combine_lane_alone_starts_and_climbs_as_stable() {
     share(&mut s);
     s.restart(A);
     assert_eq!(echo(&mut s, T0, 0, 21e6, false), PACE_FLOOR * STARTUP_GAIN);
-    // Alone at a startup rate above the offered one (the cell once A17 bars the hotel): it does
+    // Alone at a startup rate above the offered one (the cell once the hotel is barred): it does
     // not bind, so nothing changes.
     let mut s = bulk(Mode::Bandwidth, 37.25e6);
     s.lanes[A].startup = true;
@@ -405,7 +402,7 @@ fn drain_ticks_at_the_first_millisecond_after_the_head_is_due() {
     let mut out = Acts::default();
     s.drain(&mut out, T0, A);
     assert_eq!((s.next, s.lanes[A].q.len(), out.0.len()), (T0 + 3 * MS, 1, 0));
-    // Due on a millisecond: the tick comes after it, never at now again (notes/core.md 22).
+    // Due on a millisecond: the tick comes after it, never at now again.
     (s.lanes[A].tokens, s.next) = (221.0, NEVER); // 1,250 bytes short: 2 ms
     s.drain(&mut out, T0, A);
     assert_eq!((s.next, s.lanes[A].q.len(), out.0.len()), (T0 + 3 * MS, 1, 0));

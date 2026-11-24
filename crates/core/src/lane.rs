@@ -1,17 +1,13 @@
 //! Lanes: building them from links, probes and echoes on the send side, path validation, lane
-//! states, punching, idle and wake, and the receiver's copy deadlines (§6.1, §6.3, §7.6 rule 2,
-//! §8.1, §8.2, §8.4; Go: core/lane.go).
-//!
-//! Owner: C3.
+//! states, punching, idle and wake, and the receiver's copy deadlines (§9.1, §9.4, §10.5 rule 2,
+//! §11.1, §11.2, §11.4).
 //!
 //! Lanes live in [`Lanes`], sorted by id, and everything else names one by [`LaneIx`], its index
-//! there. Go held `*lane` pointers everywhere (the primary, the spread, the idle lane, each flow's
-//! recent lanes, each pending copy); Rust holds indices, which stay valid until the next
-//! `set_links`, the only place lanes are added or removed. `set_links` remaps every stored index
-//! (`map_lanes`) and keeps the lanes that go away in `Lanes::gone` while `retire` rewinds their
-//! bulk, then clears what still names them (`drop_gone`). Go kept reading a retired lane through
-//! a flow's or a pending copy's stale pointer; Rust forgets those references instead
-//! (notes/rust.md).
+//! there: the spread, the idle lane, each flow's recent lanes and each pending copy hold indices,
+//! which stay valid until the next `set_links`, the only place lanes are added or removed.
+//! `set_links` remaps every stored index (`map_lanes`) and keeps the lanes that go away in
+//! `Lanes::gone` while `retire` rewinds their bulk, then clears what still names them
+//! (`drop_gone`), so no flow or pending copy reads a retired lane through a stale reference.
 
 use std::net::SocketAddr;
 use std::ops::{Index, IndexMut};
@@ -31,7 +27,7 @@ use crate::{
 /// Small-flow first arrivals kept with pending copy deadlines, oldest dropped first.
 pub(crate) const PENDING_COPIES: usize = 4096;
 
-/// Echo flags bit 0: the echoed lane lags (§8.4).
+/// Echo flags bit 0: the echoed lane lags (§11.4).
 const LAGGING: u8 = 1;
 
 /// The largest inbound OWD taken from a probe, in µs either way (about 35 years). An
@@ -57,8 +53,8 @@ fn reuse(old: &mut [Option<Lane>], id: u16, keeps: impl Fn(&Lane) -> bool) -> Op
     Some((old[i].take()?, Some(i)))
 }
 
-/// Lane states (§8.4), kept by each sender for its own direction. The order matters: `two`
-/// prefers a lower state. Go: the `punching`… iota constants.
+/// Lane states (§11.4), kept by each sender for its own direction. The order matters: `two`
+/// prefers a lower state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum State {
     #[default]
@@ -70,14 +66,14 @@ pub(crate) enum State {
 }
 
 impl State {
-    /// How status names it. Go: `stateNames`.
+    /// How status names it.
     pub(crate) const fn name(self) -> &'static str {
         ["punching", "up", "suspect", "down", "dormant"][self as usize]
     }
 }
 
-/// One probe I sent, kept for RTT, loss and validation (§8.3). Go: `sentProbe`. Its challenge is
-/// recomputed from (lane, agen, seq) by `Session::chal`, so it is not stored.
+/// One probe I sent, kept for RTT, loss and validation (§11.3). Its challenge is recomputed from
+/// (lane, agen, seq) by `Session::chal`, so it is not stored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SentProbe {
     pub(crate) seq: u32,
@@ -103,8 +99,8 @@ impl LaneIx {
 }
 
 /// The session's lanes: `live`, sorted by id so iteration is deterministic, and, only while
-/// `set_links` retires them, `gone` (index `live.len() + i`). Iteration covers live lanes only,
-/// as Go's `s.lanes` did after a rebuild; indexing reaches both.
+/// `set_links` retires them, `gone` (index `live.len() + i`). Iteration covers live lanes only;
+/// indexing reaches both.
 #[derive(Default)]
 pub(crate) struct Lanes {
     pub(crate) live: Vec<Lane>,
@@ -148,9 +144,8 @@ impl IndexMut<LaneIx> for Lanes {
     }
 }
 
-/// A UDP path between one of my sockets and one of the peer's (§6.1). Go: `lane`; `time.Duration`
-/// fields are [`Mono`] nanoseconds, `netip.AddrPort` fields `Option<SocketAddr>` (None for Go's
-/// invalid zero value).
+/// A UDP path between one of my sockets and one of the peer's (§9.1). Durations are [`Mono`]
+/// nanoseconds, and an address not known is None.
 #[derive(Default)]
 pub(crate) struct Lane {
     /// Client link id << 8 | server link id; 0 is the Tailscale lane.
@@ -158,7 +153,7 @@ pub(crate) struct Lane {
     pub(crate) sock: SockId,
     /// My link's address; None for the Tailscale lane.
     pub(crate) addr: Option<SocketAddr>,
-    /// The return address (§7.6 rule 2); None until known.
+    /// The return address (§10.5 rule 2); None until known.
     pub(crate) peer: Option<SocketAddr>,
     /// A newer probe's address, validating while `peer` carries on.
     pub(crate) cand: Option<SocketAddr>,
@@ -172,7 +167,7 @@ pub(crate) struct Lane {
     pub(crate) remote: String,
     pub(crate) metered: bool,
     pub(crate) mesh: bool,
-    /// The client link's bottleneck group; -1 shares every group (§6.1).
+    /// The client link's bottleneck group; -1 shares every group.
     pub(crate) group: i32,
 
     pub(crate) state: State,
@@ -183,13 +178,13 @@ pub(crate) struct Lane {
     pub(crate) cvalid: bool,
     /// The peer's SentAt from which its lagging marks count, µs.
     pub(crate) lag_from: i64,
-    /// In my copy set (§8.4).
+    /// In my copy set (§11.2).
     pub(crate) in_copy: bool,
     /// The peer's newest view: this lane lags.
     pub(crate) peer_lag: bool,
-    /// The peer's newest LastCounter for this lane (§10.2).
+    /// The peer's newest LastCounter for this lane (§14.2).
     pub(crate) acked: u64,
-    /// Bytes from and to an unvalidated address (§7.6 rule 2).
+    /// Bytes from and to an unvalidated address (§9.4).
     pub(crate) amp_in: usize,
     pub(crate) amp_out: usize,
     pub(crate) suspect_at: Mono,
@@ -208,13 +203,13 @@ pub(crate) struct Lane {
     pub(crate) sent_bytes: u64,
     pub(crate) copy_bytes: u64,
 
-    // Estimates of my direction (§8.3).
+    // Estimates of my direction (§11.3).
     pub(crate) rtt: Mono,
     pub(crate) last_rtt: Mono,
     pub(crate) rttdev: Mono,
     pub(crate) owd: Mono,
     pub(crate) dev: Mono,
-    /// The newest sample, for earliest arrival (§11.2).
+    /// The newest sample, for earliest arrival (§14.2).
     pub(crate) owd_now: Mono,
     pub(crate) qd: Mono,
     pub(crate) min_rtt: Winmin,
@@ -229,7 +224,7 @@ pub(crate) struct Lane {
     /// Bits per second.
     pub(crate) delivery: f64,
 
-    // Rate, pacer and rewind (§9, §10.2).
+    // Rate, pacer and rewind (§12, §14.2).
     /// Bits per second, INF while unlimited.
     pub(crate) rate: f64,
     /// Bytes.
@@ -254,13 +249,13 @@ pub(crate) struct Lane {
     pub(crate) offered: Meter,
     pub(crate) send_rate: Meter,
 
-    // performance and bandwidth (§11).
-    /// When it last queued bulk, to tell a stale rate (§9).
+    // performance and bandwidth (§14).
+    /// When it last queued bulk, to tell a stale rate (§11.4).
     pub(crate) bulk_at: Mono,
     /// When it began to carry bulk.
     pub(crate) took_at: Mono,
     pub(crate) bar_until: Mono,
-    /// In overuse at PACE_FLOOR since (§11.2 rule 4); NEVER if not.
+    /// In overuse at PACE_FLOOR since (§14.2); NEVER if not.
     pub(crate) floor_at: Mono,
     pub(crate) bars: u32,
     /// Barred since it last joined the spread: its next join after the bar begins a trial.
@@ -268,7 +263,7 @@ pub(crate) struct Lane {
     /// On trial until then (§14.2, `Lane::on_trial`).
     pub(crate) trial_until: Mono,
 
-    // The peer's direction, as I receive it (§7.5, §8.4).
+    // The peer's direction, as I receive it (§10.4, §11.4).
     pub(crate) win: Window,
     pub(crate) rx_seq: u32,
     pub(crate) rx_pkts: u32,
@@ -278,8 +273,7 @@ pub(crate) struct Lane {
     pub(crate) rx_at: Mono,
     /// µs, of the newest probe.
     pub(crate) rx_owd: i64,
-    /// The challenge of the newest probe received, returned in this lane's echo (R2-03). Replaces
-    /// Go's `rxFrom`, which only fed the Observed field.
+    /// The challenge of the newest probe received, returned in this lane's echo (R2-03).
     pub(crate) rx_tok: u64,
     /// Counter of the newest data packet.
     pub(crate) rx_last: u64,
@@ -292,7 +286,7 @@ pub(crate) struct Lane {
     pub(crate) lagging: bool,
     /// Copies in a row past their deadlines, up to 2.
     pub(crate) overdue: u8,
-    /// The oldest copy it may still owe (§8.4).
+    /// The oldest copy it may still owe (§11.4).
     pub(crate) expect: u64,
     /// The newest counter on it.
     pub(crate) last_small: u64,
@@ -301,7 +295,7 @@ pub(crate) struct Lane {
 }
 
 impl Lane {
-    /// A fresh lane: Go's `newLane`, which names the fields that do not start at zero.
+    /// A fresh lane, naming the fields that do not start at zero.
     /// `set_links` then starts `tx_seq` at the session's `seq_top` (R2-10).
     pub(crate) fn new(id: u16, sock: SockId) -> Lane {
         let mut l = Lane { id, sock, pgen: 1, rate: INF, bulk_at: Mono::MIN / 2, ..Lane::default() };
@@ -311,14 +305,14 @@ impl Lane {
         l
     }
 
-    /// What I received on this lane, for a probe of mine (§8.2): its `token` is `rx_tok`; `chal`
+    /// What I received on this lane, for a probe of mine (§11.2): its `token` is `rx_tok`; `chal`
     /// is 0 (send_probe sets it on the probe's own lane).
     pub(crate) fn echo(&self, now: Mono) -> Echo {
         Echo {
             lane: self.id,
             flags: if self.lagging { LAGGING } else { 0 },
             seq: self.rx_seq,
-            held: (now.saturating_sub(self.rx_at) / 1_000) as u32, // wraps, as Go's uint32() does
+            held: (now.saturating_sub(self.rx_at) / 1_000) as u32, // wraps
             owd: self.rx_owd,
             pkts: self.snap_pkts,
             bytes: self.snap_bytes,
@@ -342,7 +336,7 @@ impl Lane {
 }
 
 /// The first arrival of a small-bit packet, which the other lanes in the peer's copy set then owe
-/// (§8.4). Go: `arrival`. `l` is None for an empty slot or a lane that has since gone.
+/// (§11.4). `l` is None for an empty slot or a lane that has since gone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Arrival {
     pub(crate) c: u64,
@@ -351,7 +345,7 @@ pub(crate) struct Arrival {
 }
 
 impl Session {
-    /// Rebuilds the lanes from my links and the peer's (§6.1): the Tailscale lane and one per
+    /// Rebuilds the lanes from my links and the peer's (§9.1): the Tailscale lane and one per
     /// same-family pair of links, sorted by id. A lane keeps its state while its socket, my
     /// link's address and one of the peer link's candidates stay; a rebuilt lane keeps only its
     /// return address, generation and (if the candidates overlap) validation. New and rebuilt
@@ -363,9 +357,9 @@ impl Session {
             self.retire(out, now, LaneIx::at(i));
         }
         self.drop_gone();
-        // Bottleneck groups (§6.1, notes/core.md 6): the client's links by label; the Tailscale
-        // lane joins the default link's group, or shares every group (-1) when no link is default.
-        // A label's group is its index among the distinct labels in link order. Go: `appendGroup`.
+        // Bottleneck groups: the client's links by label; the Tailscale lane joins the default
+        // link's group, or shares every group (-1) when no link is default. A label's group is its
+        // index among the distinct labels in link order.
         let client = self.role == Role::Client;
         let links: Vec<(&str, bool)> = match client {
             true => self.links.iter().take(MAX_LINKS).map(|l| (l.label.as_str(), l.default)).collect(),
@@ -395,11 +389,10 @@ impl Session {
         self.lanes.gone.clear();
     }
 
-    /// Rewrites every stored lane index through `f`: `idle`,
-    /// `spread[..nspread]`, each flow's `lanes[].l` and each `arr[].l`. A field that comes to hold
-    /// a LaneIx must be added here (through the integrator). An index `f` maps to None is
-    /// forgotten: it leaves the spread, and a flow's entry for it becomes the empty one, the
-    /// oldest for the next lane to take.
+    /// Rewrites every stored lane index through `f`: `idle`, `spread[..nspread]`, each flow's
+    /// `lanes[].l` and each `arr[].l`. A field that comes to hold a LaneIx must be added here. An
+    /// index `f` maps to None is forgotten: it leaves the spread, and a flow's entry for it becomes
+    /// the empty one, the oldest for the next lane to take.
     fn map_lanes(&mut self, f: impl Fn(LaneIx) -> Option<LaneIx>) {
         let g = |l: Option<LaneIx>| l.and_then(&f);
         self.idle = g(self.idle);
@@ -420,8 +413,7 @@ impl Session {
     /// `lanes.gone` in their old order, and remaps every stored index.
     ///
     /// A lane id names the lane on the wire, so it is unique: a second pair of links that makes
-    /// an id already built (a peer offering one link id twice) is skipped. Go built both lanes
-    /// when the id was new and merged them into one otherwise.
+    /// an id already built (a peer offering one link id twice) is skipped.
     fn rebuild(&mut self) {
         let mut old: Vec<Option<Lane>> = std::mem::take(&mut self.lanes.live).into_iter().map(Some).collect();
         // A lane built here is fresh, with every Seq it counts starting at `seq_top`, so the peer,
@@ -436,7 +428,7 @@ impl Session {
             let make = || (Lane { peer: Some(m.peer), mesh: true, validated: true, ..fresh(0, m.sock) }, None);
             next.push(reuse(&mut old, 0, |l| l.sock == m.sock && l.peer == Some(m.peer)).unwrap_or_else(make));
         }
-        let is4 = |a: SocketAddr| a.ip().to_canonical().is_ipv4(); // Go: Addr().Unmap().Is4()
+        let is4 = |a: SocketAddr| a.ip().to_canonical().is_ipv4();
         for my in self.links.iter().take(MAX_LINKS) {
             for pl in self.peer.iter().take(MAX_LINKS) {
                 // Client link id << 8 | server link id.
@@ -453,7 +445,7 @@ impl Session {
                     let mut l = fresh(id, my.sock);
                     if let Some(o) = old.iter().flatten().find(|o| o.id == id) {
                         // A new network: fresh estimates, but the return address moves only on a
-                        // probe (§7.6 rule 2). If the peer's link moved, its old address may be
+                        // probe (§10.5 rule 2). If the peer's link moved, its old address may be
                         // someone else's.
                         (l.peer, l.pgen, l.validated) = (o.peer, o.pgen, o.validated && same(o));
                     }
@@ -480,18 +472,18 @@ impl Session {
         self.map_lanes(|l| map.get(l.get()).copied());
     }
 
-    /// The live lane with `id`. Go: `laneByID`.
+    /// The live lane with `id`.
     pub(crate) fn lane_by_id(&self, id: u16) -> Option<LaneIx> {
         self.lanes.iter().position(|l| l.id == id).map(LaneIx::at)
     }
 
-    /// The lane a data packet arrived on: its socket and return address. Go: `laneAt`.
+    /// The lane a data packet arrived on: its socket and return address.
     pub(crate) fn lane_at(&self, sock: SockId, from: SocketAddr) -> Option<LaneIx> {
         self.lanes.iter().position(|l| l.sock == sock && l.peer == Some(from)).map(LaneIx::at)
     }
 
     /// Sends the packet in pool buffer `buf` (`n` bytes) on every lane with a validated address:
-    /// the first datagrams after idle, until a lane is confirmed (§8.1).
+    /// the first datagrams after idle, until a lane is confirmed.
     pub(crate) fn send_all(&mut self, out: &mut dyn Out, buf: BufIx, n: usize) {
         for l in self.lanes.ixs() {
             if let (true, Some(to)) = (self.lanes[l].validated, self.lanes[l].peer) {
@@ -502,11 +494,11 @@ impl Session {
 
     /// Sends the packet in pool buffer `buf` (`n` bytes) from l's socket to `to`, counting it on
     /// the lane (tx_pkts when to is l's peer, sent_bytes, send_rate) and in `metered_bytes`.
-    /// Uses `self.now`. Go: `send`, which appended an ActSend.
+    /// Uses `self.now`.
     pub(crate) fn send(&mut self, out: &mut dyn Out, l: LaneIx, to: SocketAddr, buf: BufIx, n: usize) {
         let x = &mut self.lanes[l];
         if x.peer == Some(to) {
-            x.tx_pkts = x.tx_pkts.wrapping_add(1); // as the peer counts arrivals on the lane (§8.3 loss)
+            x.tx_pkts = x.tx_pkts.wrapping_add(1); // as the peer counts arrivals on the lane (§11.3 loss)
         }
         x.sent_bytes = x.sent_bytes.wrapping_add(n as u64);
         x.send_rate.add(self.now, RATE_WINDOW, n);
@@ -516,7 +508,7 @@ impl Session {
         out.send(x.sock, to, &self.pool.buf(buf)[..n]);
     }
 
-    /// Sends a probe on `l` to `to` with at most `max` echoes (§8.2): its own lane's echo first,
+    /// Sends a probe on `l` to `to` with at most `max` echoes (§11.2): its own lane's echo first,
     /// then lanes heard within ECHO_WINDOW or lagging (built in `self.eout`). An address being
     /// validated gets at most VALIDATE_AMP × the bytes received from it, PROBE_ANSWER, and a
     /// challenge: `self.chal.token(l, agen, seq)` in the own-lane echo's `chal`, which such a probe
@@ -570,8 +562,7 @@ impl Session {
     }
 
     /// The address generation a probe on `l` to `to` goes to, and whether `to` is being validated
-    /// (§7.6 rule 2): the return address's while unvalidated, or a claim's. 0 for a punching
-    /// candidate.
+    /// (§9.4): the return address's while unvalidated, or a claim's. 0 for a punching candidate.
     fn target(&self, l: LaneIx, to: SocketAddr) -> (u32, bool) {
         match &self.lanes[l] {
             x if x.peer == Some(to) => (x.pgen, !x.validated),
@@ -580,9 +571,9 @@ impl Session {
         }
     }
 
-    /// Builds a probe's echoes in `eout` and returns how many, at most `max` (§8.2): l's own
+    /// Builds a probe's echoes in `eout` and returns how many, at most `max` (§11.2): l's own
     /// echo first, even when older than ECHO_WINDOW, so the answer to an idle probe can echo it
-    /// without being larger (§7.6 rule 3), and always when `validating`, since it carries the
+    /// without being larger (§10.5 rule 3), and always when `validating`, since it carries the
     /// challenge (R2-03; Seq 0 if nothing was received on l yet); then the lanes heard within
     /// ECHO_WINDOW or lagging.
     fn fill_echoes(&mut self, now: Mono, l: LaneIx, max: usize, validating: bool) -> usize {
@@ -606,8 +597,8 @@ impl Session {
 
     /// Acts on the authenticated probe in `self.pin`/`self.ein` that arrived on lane `l` (None if
     /// it names none on this socket) from `from`, `size` bytes: inbound OWD and copy set, the
-    /// challenge to return (`rx_tok`), the return address (§7.6 rule 2), the peer's lagging view,
-    /// each echo (`Session::echo`), and at most one probe in answer (§7.6 rule 3, §8.1).
+    /// challenge to return (`rx_tok`), the return address (§10.5 rule 2), the peer's lagging view,
+    /// each echo (`Session::echo`), and at most one probe in answer (§10.5 rule 3).
     pub(crate) fn on_probe(&mut self, out: &mut dyn Out, now: Mono, l: Option<LaneIx>, from: SocketAddr, size: usize) {
         let p = self.pin;
         let n = p.n.min(MAX_ECHOES);
@@ -618,7 +609,7 @@ impl Session {
             self.echo(now, l, p.sent_at, self.ein[i]);
         }
         if let Some(l) = newer.filter(|&l| self.lanes[l].cvalid && self.lanes[l].cand == Some(from)) {
-            // The claim answered our challenge: the lane moves on its next probe (§7.6 rule 2).
+            // The claim answered our challenge: the lane moves on its next probe (§10.5 rule 2).
             // The peer marks this lane lagging for the copies the old address lost, until copies
             // sent here reach it; those marks are stale.
             let x = &mut self.lanes[l];
@@ -627,11 +618,10 @@ impl Session {
             self.moved(l, self.lanes[l].cgen);
         }
         // One probe at once to a new address, an answer to a peer validating my address, and the
-        // server's answer to an idle probe; none larger than the probe that caused it (§7.6 rule
-        // 3, §8.1). An idle server's answers ask for none in turn: it answers every probe, so a
-        // peer that answers every ask while its address never validates here (Go's: R2-03) would
-        // trade probes with it as fast as the path carries them for as long as the session stayed
-        // idle (notes/rust.md, system: integration).
+        // server's answer to an idle probe; none larger than the probe that caused it (§10.5 rule
+        // 3). An idle server's answers ask for none in turn: it answers every probe, so a peer that
+        // answers every ask while its address never validates here (R2-03) would trade probes with
+        // it as fast as the path carries them for as long as the session stayed idle.
         let Some(l) = l else { return };
         let idle = self.role == Role::Anchor && !self.active && now >= self.punch_until;
         let answer = idle || newer.is_some() && p.flags & PROBE_ANSWER != 0;
@@ -644,7 +634,7 @@ impl Session {
 
     /// Takes a newer probe on `l` (`self.pin`) from `from`, `size` bytes: what the lane's echo
     /// returns (Seq, arrival, OWD, the packet snapshot, the challenge it carried in its own echo),
-    /// the inbound OWD estimates (§8.3), whether the peer copies on it (§8.4), and the return
+    /// the inbound OWD estimates (§11.3), whether the peer copies on it (§11.2), and the return
     /// address (`move_peer`, whose new address it returns).
     fn rx_probe(&mut self, now: Mono, l: LaneIx, from: SocketAddr, size: usize) -> Option<SocketAddr> {
         let p = self.pin;
@@ -667,7 +657,7 @@ impl Session {
         self.move_peer(l, from, size)
     }
 
-    /// §7.6 rule 2 for a newer probe on `l` from `from`, `size` bytes, on the lane's own socket.
+    /// §10.5 rule 2 for a newer probe on `l` from `from`, `size` bytes, on the lane's own socket.
     /// The Tailscale lane, and a probe from the return address, end any claim. A lane not yet
     /// validated moves at once and carries only probes until an echo validates it. A validated
     /// one carries on at its address while a new one validates, as a claim, so a probe relayed
@@ -689,10 +679,10 @@ impl Session {
         None
     }
 
-    /// The peer's newest view of which of my lanes lag (§8.4), from its probe with the newest
-    /// SentAt only, so a probe late on a slow lane cannot flag a lane that already recovered
-    /// (notes/core.md 8b). Marks of a claimed lane, and those sent before copies to its new
-    /// address could arrive, report what the old address lost and are ignored (note 32).
+    /// The peer's newest view of which of my lanes lag (§11.4), from its probe with the newest
+    /// SentAt only, so a probe late on a slow lane cannot flag a lane that already recovered. Marks
+    /// of a claimed lane, and those sent before copies to its new address could arrive, report what
+    /// the old address lost and are ignored.
     fn lag_view(&mut self, now: Mono) {
         let p = self.pin;
         if p.sent_at <= self.lag_as_of {
@@ -748,7 +738,7 @@ impl Session {
         self.wake_at(now); // the scheduler reacts at once, a failover above all
     }
 
-    /// Starts a punch round (§6.3, §8.1), at most one per PUNCH_GAP; a request inside the gap
+    /// Starts a punch round (§9.4, §11.1), at most one per PUNCH_GAP; a request inside the gap
     /// starts one when it ends.
     pub(crate) fn punch(&mut self, now: Mono) {
         self.punch_pending = now.saturating_sub(self.punch_at) < PUNCH_GAP;
@@ -760,7 +750,7 @@ impl Session {
         self.wake_lanes(now);
     }
 
-    /// Probes every lane at once; dormant ones must be confirmed again (§8.4).
+    /// Probes every lane at once; dormant ones must be confirmed again.
     pub(crate) fn wake_lanes(&mut self, now: Mono) {
         self.dozing = false;
         self.lanes.iter_mut().filter(|x| x.state == State::Dormant).for_each(|x| x.state = State::Punching);
@@ -768,11 +758,11 @@ impl Session {
         self.wake_at(now);
     }
 
-    /// Runs l's timers: my direction's liveness and probes, and the peer's copies (§8.1, §8.4).
+    /// Runs l's timers: my direction's liveness and probes, and the peer's copies (§11.1, §11.4).
     pub(crate) fn lane_tick(&mut self, out: &mut dyn Out, now: Mono, l: LaneIx) {
-        // My direction's liveness while active (§8.4, notes/core.md 10, 34, 40b): suspect once two
-        // probes in a row are unechoed past the suspect timeout, since one alone may have been
-        // lost, or its echo, which the next probe shows; down once the oldest is DOWN_AFTER old.
+        // My direction's liveness while active (§11.4): suspect once two probes in a row are
+        // unechoed past the suspect timeout, since one alone may have been lost, or its echo,
+        // which the next probe shows; down once the oldest is DOWN_AFTER old.
         // Blind or not (§11.4): a lane with no echo for DOWN_AFTER is down, so the daemon sees
         // the bond fail at DOWN_AFTER, not only once the probe ring has wrapped.
         let x = &self.lanes[l];
@@ -805,7 +795,7 @@ impl Session {
                 if !self.active && now >= self.punch_until && x.wait_seq != 0 {
                     x.misses = x.misses.saturating_add(1);
                     if u32::from(x.misses) >= IDLE_MISSES {
-                        // Three idle probes unanswered (§8.1).
+                        // Three idle probes unanswered (§11.1).
                         self.set_state(now, l, State::Down);
                         self.pick_idle(now);
                         return;
@@ -819,15 +809,15 @@ impl Session {
             }
             self.wake_at(self.lanes[l].next_probe);
         }
-        // The peer's copies on l (§8.4, notes/core.md 8c, 33a): two copies in a row missing past
-        // their deadlines mark l lagging, and a probe on my fastest other lane says so at once.
-        // One alone was more likely lost, which the next copy shows within the copy interval, than
-        // stalled. Each missed deadline is consumed, so the probe goes once per episode.
+        // The peer's copies on l (§11.4): two copies in a row missing past their deadlines mark l
+        // lagging, and a probe on my fastest other lane says so at once. One alone was more likely
+        // lost, which the next copy shows within the copy interval, than stalled. Each missed
+        // deadline is consumed, so the probe goes once per episode.
         //
         // A mark with no copy left to judge, while no small packet first arrived on any lane for
-        // ECHO_WINDOW, is cleared: only copies clear a mark, so in a session with no small flow
-        // the peer kept the lane suspect for good (Rust only: notes/rust.md, core: integration).
-        // The evidence of two late copies stays (`overdue`), so one more late copy marks it again.
+        // ECHO_WINDOW, is cleared: only copies clear a mark, so in a session with no small flow the
+        // peer kept the lane suspect for good. The evidence of two late copies stays (`overdue`),
+        // so one more late copy marks it again.
         let mut a = self.expected(l);
         while self.lanes[l].copy_in
             && let Some(arr) = a
@@ -862,24 +852,23 @@ impl Session {
     }
 
     /// Probes every candidate of each lane not yet up, preferred candidates last, then its return
-    /// address (§6.3).
+    /// address (§9.4).
     ///
     /// While the return address is unvalidated and the peer offered it, it gets a candidate probe
-    /// too (Rust only: notes/rust.md, accept: integration). Its own probes are held to
-    /// VALIDATE_AMP × the bytes that came from it, which guards an address learned from a packet.
-    /// Go skipped it here, so once that budget was spent while nothing came back (the probes
-    /// lost, or a new NAT mapping of mine, which lets none of the peer's probes in until it has
-    /// sent to the peer), the lane punched only the peer's other candidates and stayed punching
-    /// for good. The candidate probe reopens the mapping, so the peer's probes come in again and
-    /// refill the budget. It carries no echo, so no challenge: it validates nothing.
+    /// too. Its own probes are held to VALIDATE_AMP × the bytes that came from it, which guards an
+    /// address learned from a packet. Without the candidate probe, once that budget was spent while
+    /// nothing came back (the probes lost, or a new NAT mapping of mine, which lets none of the
+    /// peer's probes in until it has sent to the peer), the lane punched only the peer's other
+    /// candidates and stayed punching for good. The candidate probe reopens the mapping, so the
+    /// peer's probes come in again and refill the budget. It carries no echo, so no challenge: it
+    /// validates nothing.
     pub(crate) fn punch_probes(&mut self, out: &mut dyn Out, now: Mono) {
         for l in self.lanes.ixs() {
             let x = &self.lanes[l];
             if x.mesh || matches!(x.state, State::Up | State::Suspect) {
                 continue;
             }
-            // Candidate probes carry no echoes: a peer listing other hosts gets nothing amplified
-            // (notes/core.md 7).
+            // Candidate probes carry no echoes: a peer listing other hosts gets nothing amplified.
             for i in (0..x.cands.len()).rev() {
                 let x = &self.lanes[l];
                 let c = x.cands[i];
@@ -890,8 +879,8 @@ impl Session {
                 }
             }
             // The return address last, so it carries the newest Seq: lane_tick probes it in this
-            // tick when its probe is due, as it is unless the two cadences fell out of step (Go
-            // probed it here as well, twice per round).
+            // tick when its probe is due, as it is unless the two cadences fell out of step
+            // (probing it here as well would probe it twice per round).
             if now < self.lanes[l].next_probe {
                 self.send_probe(out, now, l, self.lanes[l].peer, MAX_ECHOES);
             }
@@ -899,7 +888,7 @@ impl Session {
         self.next_punch = now.saturating_add(PROBE_PUNCH);
     }
 
-    /// Records a packet with counter `c` on lane `l` for the copy deadlines (§8.4).
+    /// Records a packet with counter `c` on lane `l` for the copy deadlines (§11.4).
     pub(crate) fn copied(&mut self, now: Mono, l: LaneIx, c: u64, small: bool, first: bool) {
         // A copy is sent when it is sealed and l is FIFO: any packet passes the copies sealed
         // before it that l still owes, which were lost, and a lost copy is not a stall.
@@ -920,7 +909,7 @@ impl Session {
     }
 
     /// The oldest copy `l` still owes, advancing `l.expect` past those it does not. Returned by
-    /// value (Go returned a pointer into `arr`). Skips arrivals whose lane has gone.
+    /// value. Skips arrivals whose lane has gone.
     pub(crate) fn expected(&mut self, l: LaneIx) -> Option<Arrival> {
         let x = &mut self.lanes[l];
         // Pending deadlines are kept for at most PENDING_COPIES counters, oldest dropped first.
@@ -936,17 +925,17 @@ impl Session {
         None
     }
 
-    /// When lane `l` owes the copy `a` (§8.4, notes/core.md 8). Uses `self.now`.
+    /// When lane `l` owes the copy `a` (§11.4). Uses `self.now`.
     ///
     /// max(LAG_FLOOR, LAG_JITTER × l's jitter) after l would have brought it even as late as it
     /// has lately (the most of its newest OWD, its largest over DEV_WINDOW and its average plus
     /// LAG_JITTER × its jitter), had a.l brought it as early as it can, at its base OWD; and not
-    /// before LAG_FLOOR (notes/core.md 33b). That is §8.4's max(10 ms, 3 × dev_A) + OWD_A − OWD_B
-    /// with A's latest OWD and B's base. The floor is added, not only a bound on the whole wait:
-    /// without it a lane slower than a.l by LAG_FLOOR or more and without jitter owed the copy at
-    /// the very time it came, and a full-size copy, slower at the lane's rate than the probes that
-    /// measured its OWD, came after (notes/rust.md, netem: A2). A lane that falls silent misses
-    /// it; a jittery lane and a queue that builds gradually do not.
+    /// before LAG_FLOOR. That is §11.4's max(10 ms, 3 × dev_A) + OWD_A − OWD_B with A's latest OWD
+    /// and B's base. The floor is added, not only a bound on the whole wait: without it a lane
+    /// slower than a.l by LAG_FLOOR or more and without jitter owed the copy at the very time it
+    /// came, and a full-size copy, slower at the lane's rate than the probes that measured its OWD,
+    /// came after. A lane that falls silent misses it; a jittery lane and a queue that builds
+    /// gradually do not.
     pub(crate) fn deadline(&self, l: LaneIx, a: &Arrival) -> Mono {
         let x = &self.lanes[l];
         let jitter = x.in_dev.saturating_mul(LAG_JITTER as Mono);
@@ -956,7 +945,7 @@ impl Session {
         a.at.saturating_add(LAG_FLOOR.max(late.saturating_sub(base).saturating_add(LAG_FLOOR.max(jitter))))
     }
 
-    /// Wakes an idle session on its first datagram (§8.1).
+    /// Wakes an idle session on its first datagram (§11.1).
     pub(crate) fn activate(&mut self, now: Mono) {
         (self.active, self.since, self.confirmed, self.last_echo) = (true, now, false, now);
         self.lanes.iter_mut().for_each(|x| x.wait_seq = 0);
@@ -964,7 +953,7 @@ impl Session {
         self.punch(now);
     }
 
-    /// Leaves the client one idle-probe lane; the others are dormant (§8.1).
+    /// Leaves the client one idle-probe lane; the others are dormant (§11.1).
     pub(crate) fn go_idle(&mut self, now: Mono) {
         self.dozing = true;
         self.lanes.iter_mut().filter(|x| x.state != State::Down).for_each(|x| x.state = State::Dormant);
@@ -1002,7 +991,7 @@ impl Session {
         }
     }
 
-    /// Handles a wake from sleep (§8.4): re-probe, reset the minima, nothing suspect or lagging
+    /// Handles a wake from sleep (§11.4): re-probe, reset the minima, nothing suspect or lagging
     /// on what was in flight.
     ///
     /// A paused clock stepped every OWD, so the OWD estimates start again, and only from probes

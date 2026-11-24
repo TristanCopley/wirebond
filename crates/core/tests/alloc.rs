@@ -1,8 +1,7 @@
 //! In steady state the engine allocates nothing: a datagram from a program through to the lane
 //! packets it sends (Event::App to Out::send), a lane packet through to the datagrams it delivers
-//! (Event::Packet to Out::deliver), and the timers between them (Event::Tick), in stable and in
-//! bandwidth (§4.2: "never allocates on the send path in steady state"). The Go reference allocates
-//! nothing for any of them either.
+//! (Event::Packet to Out::deliver), and the timers between them (Event::Tick), in performance and
+//! in bandwidth.
 //!
 //! A counting global allocator counts the allocations made on a thread while the harness has
 //! armed common::meter, which it does only inside Session::handle, and not inside the harness's
@@ -155,9 +154,9 @@ impl Out for Count {
     fn control(&mut self, _: Msg) {}
 }
 
-/// Go's TestSendAllocs: a keyed client whose peer never answers sends a 1,408-byte bulk datagram
-/// and a 200-byte small one every 100 µs, with the timers it asks for; after 2 s, 5,000 more such
-/// steps allocate nothing. One run of 5,000 steps, so that even one allocation in the batch shows.
+/// A keyed client whose peer never answers sends a 1,408-byte bulk datagram and a 200-byte small
+/// one every 100 µs, with the timers it asks for; after 2 s, 5,000 more such steps allocate
+/// nothing. One run of 5,000 steps, so that even one allocation in the batch shows.
 ///
 /// In 2.0 each is one inner packet of its own flow (§10.3, §13), built once: a new flow allocates
 /// its table entry in the first steps, and the steady state allocates nothing.

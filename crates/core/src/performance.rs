@@ -1,22 +1,21 @@
-//! The `performance` scheduler, and what both schedulers share (§11.1).
+//! The `performance` scheduler, and what both schedulers share (§14.1).
 //!
 //! Performance sends every packet of every flow on every lane of the spread: the lanes bandwidth's
-//! eligibility (§11.2 rules 2 and 4, bandwidth.rs) picks, one per bottleneck group, the Tailscale
-//! lane only for a group with no usable direct lane, with no skew limit. Each copy is paced on its
-//! own lane at that lane's rate (§9): a lane that cannot keep up drops its excess at its own pacer
-//! (QUEUE_AGE) and never holds the others back. The receiver keeps the first copy (the replay
-//! window drops the rest), and its reorder buffer does not wait for a lagging lane's copy
-//! (`flow::release`, DUP_GRACE). No failover, rewind, trial or return: a lane that stalls simply
-//! loses the race, suspect or not, until it goes down; and one that leaves the spread drops its
-//! queue, whose packets the other lanes carry. Throughput is the best single lane's; latency and
-//! steadiness the best of the lanes per packet. The prototype: research_notes
-//! jitter_simulation.md, netsim's tests/jitter.rs.
+//! eligibility (§14.2, bandwidth.rs) picks, one per bottleneck group, the Tailscale lane only for a
+//! group with no usable direct lane, with no skew limit. Each copy is paced on its own lane at that
+//! lane's rate (§12): a lane that cannot keep up drops its excess at its own pacer (QUEUE_AGE) and
+//! never holds the others back. The receiver keeps the first copy (the replay window drops the
+//! rest), and its reorder buffer does not wait for a lagging lane's copy (`flow::release`,
+//! DUP_GRACE). No failover, rewind, trial or return: a lane that stalls simply loses the race,
+//! suspect or not, until it goes down; and one that leaves the spread drops its queue, whose
+//! packets the other lanes carry. Throughput is the best single lane's; latency and steadiness the
+//! best of the lanes per packet.
 
 use crate::lane::{Lane, LaneIx, State};
 use crate::session::Mode;
 use crate::{BANDWIDTH_SKEW_MAX, BAR, BAR_MAX, BLIND_AFTER, Mono, Session};
 
-/// Whether two lanes are in different bottleneck groups (§6.1). Never a lane and itself.
+/// Whether two lanes are in different bottleneck groups (§8). Never a lane and itself.
 pub(crate) fn apart(a: &Lane, b: &Lane) -> bool {
     a.group >= 0 && b.group >= 0 && a.group != b.group
 }
@@ -34,12 +33,12 @@ impl Session {
         self.spread().contains(&l)
     }
 
-    /// No echo on any lane for BLIND_AFTER (§8.4): the blind sender of both modes.
+    /// No echo on any lane for BLIND_AFTER (§11.4): the blind sender of both modes.
     pub(crate) fn blind(&self, now: Mono) -> bool {
         now.saturating_sub(self.last_echo) > BLIND_AFTER
     }
 
-    /// Where a bulk packet of `size` bytes goes now (§11), the first lane taking the packet itself
+    /// Where a bulk packet of `size` bytes goes now (§14), the first lane taking the packet itself
     /// and the others a copy: every lane of the spread in performance; in bandwidth the earliest
     /// arrival, and a copy on each other lane on trial (`Lane::on_trial`); none means every lane
     /// (`send_unpaced`).
@@ -65,8 +64,7 @@ impl Session {
     }
 
     /// The two lowest-OWD lanes in different groups that still answer: the blind sender's spread
-    /// (§8.4). Those not suspect first, and direct lanes before the Tailscale lane (notes/core.md
-    /// 40c).
+    /// (§11.4). Those not suspect first, and direct lanes before the Tailscale lane.
     pub(crate) fn two(&self) -> (Option<LaneIx>, Option<LaneIx>) {
         self.two_of(Lane::usable)
     }
@@ -80,7 +78,7 @@ impl Session {
         (a, a.and_then(|a| self.best(|l| ok(l) && apart(l, &self.lanes[a]), lower)))
     }
 
-    /// Keeps bulk off `l` for BAR, doubling while it keeps failing, up to BAR_MAX (§11.2 rule 4);
+    /// Keeps bulk off `l` for BAR, doubling while it keeps failing, up to BAR_MAX (§14.2);
     /// when it next joins the spread it is on trial (`take`).
     pub(crate) fn bar(&mut self, now: Mono, l: LaneIx) {
         let l = &mut self.lanes[l];
@@ -98,7 +96,7 @@ impl Session {
     }
 
     /// The skew a lane's base OWD may have over the fastest's to join the spread: unlimited in
-    /// performance, every usable lane racing; BANDWIDTH_SKEW_MAX in bandwidth (§11.2 rule 2).
+    /// performance, every usable lane racing; BANDWIDTH_SKEW_MAX in bandwidth (§14.2).
     pub(crate) fn skew(&self) -> Mono {
         match self.mode {
             Mode::Performance => Mono::MAX,

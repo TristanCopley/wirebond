@@ -1,7 +1,6 @@
-//! Given the same events, times and random bytes, a session calls Out identically (§17.4; netsim
-//! compares two runs of a seed), and reading its snapshot changes nothing: Go's TestDeterminism,
-//! in both modes, comparing every call either session makes and every next() it reports, from the
-//! first event on.
+//! Given the same events, times and random bytes, a session calls Out identically (§4.2; netsim
+//! compares two runs of a seed), and reading its snapshot changes nothing. Both modes are tested,
+//! comparing every call either session makes and every next() it reports, from the first event on.
 
 use crate::common::*;
 use wirebond_core::{MODE_BANDWIDTH, MODE_PERFORMANCE, MS, SessionStatus};

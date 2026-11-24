@@ -1,11 +1,11 @@
-//! Tests of keys.rs. Owner: C1. Ports from core/wire_test.go: TestSealOpen, TestRatchet,
-//! TestPeerNewKey, TestForgedCounter, FuzzPeer and FuzzOpen (both as seeded loops over DetRand
-//! inputs). New: Challenger tokens are deterministic per key, differ per (lane, gen, seq), and
-//! are never 0; RidTable alloc skips 0 and held ids, free only frees the owner's.
+//! Tests of keys.rs: `seal_open`, `ratchet`, `peer_new_key`, `forged_counter`, `fuzz_peer` and
+//! `fuzz_open` (both as seeded loops over DetRand inputs). Also: Challenger tokens are
+//! deterministic per key, differ per (lane, gen, seq), and are never 0; RidTable alloc skips 0 and
+//! held ids, free only frees the owner's.
 //!
-//! The ports drive whole Sessions. The tests before them check the same properties on Sender and
-//! Receiver alone, plus vectors from Go's crypto (interop), the counter floor (R2-09) and the
-//! absence of allocation.
+//! The Session-level tests drive whole Sessions. The tests before them check the same properties
+//! on Sender and Receiver alone, plus known-answer vectors from an independent implementation of
+//! the crypto, the counter floor (R2-09) and the absence of allocation.
 
 use crate::pair::*;
 
@@ -43,7 +43,7 @@ fn seal(s: &mut Sender, typ: u8, pt: &[u8]) -> (Vec<u8>, bool) {
     (b, fresh)
 }
 
-/// `b` received as §7.5 orders it, on the keys alone: open, the session window, then advance on a
+/// `b` received as §10.4 orders it, on the keys alone: open, the session window, then advance on a
 /// next-epoch packet. The plaintext and the slot that opened it.
 fn recv_keys(r: &mut Receiver, b: &[u8]) -> Option<(Vec<u8>, Slot)> {
     let mut dst = vec![0; MAX_PACKET];
@@ -63,8 +63,8 @@ fn state(r: &Receiver) -> RxState {
     RxState { keys: [k(&r.prev), k(&r.cur), k(&r.next)], win: r.win.clone(), floor: r.floor }
 }
 
-/// Byte-for-byte what Go's crypto/hmac, crypto/aes and crypto/cipher give for keys.go's ratchet
-/// and seal, so a Go peer and a Rust peer open each other's packets.
+/// Byte-for-byte what an independent implementation of HMAC-SHA256 and AES-256-GCM gives for the
+/// ratchet and seal, so another implementation of them opens these packets.
 #[test]
 fn go_vectors() {
     let k1 = EpochKey::new(0, k0()).ratchet();
@@ -92,7 +92,7 @@ fn go_vectors() {
 }
 
 /// Seal and open on the keys alone: any non-authentic bytes are dropped with no state change and
-/// `dst` untouched; the genuine packet opens once (§7.3, §7.5, §17.1).
+/// `dst` untouched; the genuine packet opens once (§10.3, §10.4).
 #[test]
 fn sender_receiver() {
     let (mut s, mut r) = keys(k0());
@@ -126,7 +126,7 @@ fn sender_receiver() {
 
 /// The ratchet across an epoch boundary: the sender ratchets once and reports it; the receiver
 /// follows on the first packet of the next epoch and still opens late packets of the previous one
-/// (§7.2, §17.1). TestRatchet on the keys alone.
+/// (§10.2). `ratchet` on the keys alone.
 #[test]
 fn ratchet_slots() {
     let (mut s, mut r) = keys(k0());
@@ -159,7 +159,7 @@ fn ratchet_slots() {
     assert!(r2.cur.e == 5 && !r2.prev.is_set() && r2.next.e == 6);
 }
 
-/// Every case of install (§7.2, notes/core.md 2 and 31).
+/// Every case of install (§10.2).
 #[test]
 fn install_cases() {
     let (_, mut r) = keys(k0());
@@ -167,7 +167,7 @@ fn install_cases() {
     assert!(r.cur.e == 0 && r.cur.k == k0() && r.next.e == 1 && r.next.k == k1.k && !r.prev.is_set());
     assert!(r.win.check(9));
     let held = state(&r);
-    // The same key again (a reconnect to the same process, A12): nothing changes.
+    // The same key again (a reconnect to the same process): nothing changes.
     assert!(!r.install_from(0, &k0(), 0) && state(&r) == held);
     // A key that is not 32 bytes: nothing changes.
     assert!(
@@ -186,7 +186,7 @@ fn install_cases() {
     let k9 = [9; 32];
     assert!(!r.install_from(4, &k9, 0));
     assert!(r.cur.e == 4 && r.cur.k == k9 && !r.prev.is_set() && r.next.e == 5 && r.win == held.win);
-    // A key from outside the chain: the peer's session is new while mine lives on (note 31).
+    // A key from outside the chain: the peer's session is new while mine lives on.
     assert!(r.install_from(4, &[8; 32], 0));
     assert!(r.cur.k == [8; 32] && !r.prev.is_set() && r.win == crate::wire::Window::default());
     assert!(r.install_from(2, &[7; 32], 0) && r.cur.e == 2, "an earlier epoch with another key is a new peer too");
@@ -211,8 +211,8 @@ fn forge_keys(c: u64, rid: u16) -> Vec<u8> {
 }
 
 /// A forged counter in any epoch, the next one included, opens nothing and costs no HMAC: the next
-/// epoch's key was derived when the current one arrived, and open only reads (§7.2, §17.1).
-/// TestForgedCounter on the keys alone.
+/// epoch's key was derived when the current one arrived, and open only reads (§10.2).
+/// `forged_counter` on the keys alone.
 #[test]
 fn forged_counter_keys() {
     let (_, r) = keys(k0());
@@ -227,7 +227,7 @@ fn forged_counter_keys() {
 }
 
 /// The peer's next session, between the same two processes, sends a new key whose counters start
-/// again: its packets open; the old session's do not (§7.2). TestPeerNewKey on the keys alone.
+/// again: its packets open; the old session's do not (§10.2). `peer_new_key` on the keys alone.
 #[test]
 fn peer_new_key_keys() {
     let (mut old, mut r) = keys(k0());
@@ -243,7 +243,7 @@ fn peer_new_key_keys() {
 
 /// R2-09: a session that installs a key its peer already used (the peer's session lived on, mine
 /// is new on a reused rid) drops every packet sealed before the key message, given the counter the
-/// message carried; a key message without one (Go's: `c` 0) does not.
+/// message carried; a key message without one (`c` 0) does not.
 #[test]
 fn counter_floor() {
     let mut old = Sender { key: EpochKey::new(0, k0()), ctr: 0, rid: 0x1234 };
@@ -296,7 +296,7 @@ fn challenger_tokens() {
 }
 
 /// Receive ids: 0 is never given, held ids are skipped, a full table gives 0, and only the owner
-/// frees an id (§7.2).
+/// frees an id (§10.2).
 #[test]
 fn rid_table() {
     let mut t = RidTable::new();
@@ -317,8 +317,7 @@ fn rid_table() {
     assert_eq!((t.alloc(11), t.alloc(12)), (40000, 0));
 }
 
-/// Seal and open allocate nothing, across an epoch boundary too (§4.2, the zero-allocation steady
-/// state).
+/// Seal and open allocate nothing, across an epoch boundary too.
 #[test]
 fn no_allocations() {
     let (mut s, mut r) = keys(k0());
@@ -338,8 +337,8 @@ fn no_allocations() {
 }
 
 /// Arbitrary bytes open nothing, but for the genuine packet; nothing panics and `dst` is untouched.
-/// FuzzOpen on the keys alone: random bytes, mutations of a genuine packet, and forged headers in
-/// every accepted epoch.
+/// `fuzz_open` on the keys alone: random bytes, mutations of a genuine packet, and forged headers
+/// in every accepted epoch.
 #[test]
 fn fuzz_open_keys() {
     let (mut s, r) = keys(k0());
@@ -380,10 +379,10 @@ fn fuzz_open_keys() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The Session-level ports.
+// The Session-level tests.
 
 /// Any non-authentic bytes are dropped with no reply and no state change; the genuine packet is
-/// delivered once (§17.1). Go: TestSealOpen.
+/// delivered once.
 #[test]
 fn seal_open() {
     let (_, mut s, pkt) = keyed();
@@ -411,8 +410,8 @@ fn seal_open() {
     assert!(recv(&mut s, &pkt).is_empty(), "replay delivered");
 }
 
-/// TestRatchet crosses an epoch boundary: the sender ratchets and sends key, the receiver follows
-/// on the first packet of the next epoch and still opens late packets of the previous one.
+/// The ratchet across an epoch boundary: the sender ratchets and sends key, the receiver follows on
+/// the first packet of the next epoch and still opens late packets of the previous one.
 #[test]
 fn ratchet() {
     let (mut c, mut s, _) = keyed();
@@ -445,9 +444,9 @@ fn ratchet() {
     assert!(s2.rx.cur.e == 5 && !s2.rx.prev.is_set(), "install of a later epoch");
 }
 
-/// TestPeerNewKey: the peer's session ended while mine lived on (its SESSION_LINGER ran out), and
-/// its next session, between the same two processes, sends a new key whose counters start again.
-/// They open and deliver; the old session's packets do not (§7.2).
+/// The peer's session ended while mine lived on (its SESSION_LINGER ran out), and its next session,
+/// between the same two processes, sends a new key whose counters start again. They open and
+/// deliver; the old session's packets do not (§10.2).
 #[test]
 fn peer_new_key() {
     let (_, mut s, old) = keyed();
@@ -475,7 +474,7 @@ fn peer_new_key() {
 /// R2-09: my session ended while the peer's lived on (SESSION_LINGER), and my next session got the
 /// old one's rid again and takes the peer's unchanged key. The peer's packets to the old session,
 /// replayed, change nothing in the new one; what the peer seals after its key message opens. A key
-/// message without a counter (a Go peer's) leaves the replays open, which is what the floor stops.
+/// message without a counter leaves the replays open, which is what the floor stops.
 #[test]
 fn new_session_on_an_old_rid() {
     let (mut c, _, first) = keyed();
@@ -516,7 +515,7 @@ fn new_session_on_an_old_rid() {
 }
 
 /// The next epoch's key was derived once, when the current one arrived; forged counters in any
-/// epoch, the next one included, cost no HMAC and change nothing. Go: TestForgedCounter.
+/// epoch, the next one included, cost no HMAC and change nothing.
 #[test]
 fn forged_counter() {
     let (_, mut s, _) = keyed();
@@ -528,7 +527,7 @@ fn forged_counter() {
     }
 }
 
-/// A random payload for FuzzPeer: a probe with random echoes, a data payload with a random port,
+/// A random payload for `fuzz_peer`: a probe with random echoes, a data payload with a random port,
 /// flow and seq, or random bytes, of random length.
 fn peer_payload(r: &mut DetRand) -> (u8, Vec<u8>, u16) {
     let gap = (r.next() % 2000) as u16;
@@ -575,9 +574,9 @@ fn peer_payload(r: &mut DetRand) -> (u8, Vec<u8>, u16) {
     }
 }
 
-/// FuzzPeer seals arbitrary payloads with the peer's real key, as a buggy or hostile peer could:
-/// probes with any echoes and lanes, data for any flow and seq. Nothing may panic or exceed the
-/// session's bounds. Go's seeds and its committed crash input, then a seeded loop.
+/// Seals arbitrary payloads with the peer's real key, as a buggy or hostile peer could: probes with
+/// any echoes and lanes, data for any flow and seq. Nothing may panic or exceed the session's
+/// bounds. Fixed seeds and a crash input found by fuzzing, then a seeded loop.
 #[test]
 fn fuzz_peer() {
     let mut b = vec![0; MAX_PACKET];
@@ -590,7 +589,7 @@ fn fuzz_peer() {
         (TYPE_PROBE, b[..n].to_vec(), 0),
         (TYPE_DATA, vec![0xbb, 0x7e, 0, 1, 0, 0, 0, 7, b'v'], 30),
         (TYPE_DATA | SMALL_BIT, vec![0xbb, 0x80, 0, 2, 0xff, 0xff, 0xff, 0xff], 1000),
-        (TYPE_DATA, b"00000000".to_vec(), 1000), // core/testdata/fuzz/FuzzPeer/29cd1c3e671b2d70
+        (TYPE_DATA, b"00000000".to_vec(), 1000), // the crash input found by fuzzing
     ];
     let mut r = DetRand(0xf022);
     cases.extend((0..300).map(|_| peer_payload(&mut r)));
@@ -620,9 +619,9 @@ fn fuzz_peer() {
     }
 }
 
-/// FuzzOpen feeds arbitrary bytes to a keyed session: nothing but the genuine packet may produce
-/// an action, and nothing may panic. Go's seeds, then a seeded loop of random bytes, mutations of
-/// the genuine packet and forged headers.
+/// Feeds arbitrary bytes to a keyed session: nothing but the genuine packet may produce an action,
+/// and nothing may panic. Fixed seeds, then a seeded loop of random bytes, mutations of the genuine
+/// packet and forged headers.
 #[test]
 fn fuzz_open() {
     let (_, s, pkt) = keyed();

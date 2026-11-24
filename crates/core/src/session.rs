@@ -1,10 +1,8 @@
 //! The session: its state, timers, control messages, the receive path and lane retirement
-//! (§7.2, §7.5, §8.1; Go: core/session.go). Of the public methods, `new` is here with the struct
-//! it fills and `snapshot` in status.rs; lib.rs has `handle`, `next` and `close`, as Go kept them
-//! in api.go.
+//! (§10.2, §10.4, §11.1). Of the public methods, `new` is here with the struct it fills and
+//! `snapshot` in status.rs; lib.rs has `handle`, `next` and `close`.
 //!
-//! Owner: C2. The `Session` struct is shared by every module: a new field goes through the
-//! integrator (SKELETON.md).
+//! The `Session` struct is shared by every module.
 
 use std::net::SocketAddr;
 
@@ -20,7 +18,7 @@ use crate::{
     SockId, TYPE_DATA, TYPE_PROBE, packet_rid,
 };
 
-/// No time: a timer that is not set, a run that has not started. Go: `never`.
+/// No time: a timer that is not set, a run that has not started.
 pub(crate) const NEVER: Mono = Mono::MAX;
 
 /// A bond's mode (§14): the client sets it, both directions use it, and a new bond runs
@@ -48,15 +46,16 @@ impl Mode {
     }
 }
 
-/// One pairing of two processes, named by their two inst values (§7.2): its keys, lanes, flows
-/// and scheduler. It never blocks, never allocates on the send path in steady state and never
-/// reads a clock. Given the same events, times and random bytes, it calls [`Out`] identically.
+/// One pairing of two processes, named by their two inst values (§10.5 rule 7): its keys, lanes,
+/// flows and scheduler. It never blocks, never allocates on the send path once its buffers and
+/// rings are warm, and never reads a clock. Given the same events, times and random bytes, it calls
+/// [`Out`] identically.
 pub struct Session {
     pub(crate) role: Role,
     /// node's key for this session in the RidTable.
     pub(crate) owner: u64,
     /// My receive id: the peer puts it on every packet it seals for me. 0 until the first
-    /// `handle` allocates it (Go allocated in NewSession, which had the table).
+    /// `handle` allocates it (`new` has no RidTable).
     pub(crate) rid: u16,
     pub(crate) tx: Sender,
     pub(crate) rx: Receiver,
@@ -82,7 +81,7 @@ pub struct Session {
     /// The highest probe Seq sent on any lane; new and rebuilt lanes start there (R2-10).
     pub(crate) seq_top: u32,
 
-    // Activity, cadence and punching (§8.1).
+    // Activity, cadence and punching (§11.1).
     pub(crate) active: bool,
     pub(crate) confirmed: bool,
     /// Idle, and the lanes other than the idle-probe lane are dormant.
@@ -91,7 +90,7 @@ pub struct Session {
     /// The last activation or wake.
     pub(crate) since: Mono,
     /// The last wake; Mono::MIN before any. Echoes of probes sent before it carry no OWD sample
-    /// (`echo`): a paused clock stepped every OWD (notes/rust.md, harden: integration).
+    /// (`echo`): a paused clock stepped every OWD.
     pub(crate) woke: Mono,
     /// The newest fresh echo on any lane.
     pub(crate) last_echo: Mono,
@@ -106,7 +105,7 @@ pub struct Session {
     /// SentAt of the peer probe whose lagging bits apply, µs.
     pub(crate) lag_as_of: i64,
 
-    /// Small-bit first arrivals that other lanes owe (§8.4): PENDING_COPIES slots, by
+    /// Small-bit first arrivals that other lanes owe (§11.4): PENDING_COPIES slots, by
     /// `arr_n % PENDING_COPIES`.
     pub(crate) arr: Box<[Arrival]>,
     pub(crate) arr_n: u64,
@@ -117,7 +116,7 @@ pub struct Session {
     /// and records which seq its lane brought (§15).
     pub(crate) opened: Box<[Opened]>,
 
-    /// Where my bulk goes (§11), `spread[..nspread]`, fastest (lowest base OWD) first.
+    /// Where my bulk goes (§14), `spread[..nspread]`, fastest (lowest base OWD) first.
     pub(crate) spread: [LaneIx; MAX_LINKS + 1],
     pub(crate) nspread: usize,
     /// Bits per second of my small flows.
@@ -151,8 +150,7 @@ pub struct Session {
 impl Session {
     /// Starts the session with one peer process. `owner` is node's key for this session in
     /// `rids`. Draws the session's send key, then its path-validation key (R2-03), 32 bytes each,
-    /// and never uses `rand` again (Go kept the reader and never read it again either); its own
-    /// copies of both are zeroed on return. Go: `newSession`.
+    /// and never uses `rand` again; its own copies of both are zeroed on return.
     pub fn new(role: Role, owner: u64, mut rand: Rand) -> Session {
         let (mut k, mut ck) = (zeroize::Zeroizing::new([0u8; 32]), zeroize::Zeroizing::new([0u8; 32]));
         rand(&mut *k);
@@ -271,7 +269,7 @@ impl Session {
         self.next = self.next.min(t);
     }
 
-    /// Consumes one control message (§7.1): hello (sends my key, then as links), links, key, mode.
+    /// Consumes one control message (§16): hello (sends my key, then as links), links, key, mode.
     /// The peer's links are cut to MAX_LINKS with MAX_CANDS each.
     pub(crate) fn control(&mut self, out: &mut dyn Out, now: Mono, m: &Msg) {
         match m.t.as_str() {
@@ -305,7 +303,7 @@ impl Session {
     }
 
     /// Forgets what the peer's previous session numbered: under its new key, counters, probe Seq
-    /// and flow seq start again (§7.2). Held datagrams are delivered first.
+    /// and flow seq start again. Held datagrams are delivered first.
     pub(crate) fn peer_new(&mut self, out: &mut dyn Out) {
         for l in self.lanes.iter_mut() {
             l.win = Window::default();
@@ -316,7 +314,7 @@ impl Session {
                 continue;
             }
             self.flush_held(out, f);
-            // The old session's gap given up teaches nothing about the new one's (R2-13, C5).
+            // The old session's gap given up teaches nothing about the new one's (R2-13).
             let fl = &mut self.flows[f];
             (fl.next, fl.fill, fl.gap_n, fl.lanes) = (1, 0, 0, Default::default());
         }
@@ -338,7 +336,7 @@ impl Session {
         }
     }
 
-    /// Sends my receive id and current send key, the only way a key leaves memory (§7.2), with my
+    /// Sends my receive id and current send key, the only way a key leaves memory (§10.2), with my
     /// next counter (R2-09).
     pub(crate) fn send_key(&mut self, out: &mut dyn Out) {
         let k = &self.tx.key;
@@ -346,7 +344,7 @@ impl Session {
     }
 
     /// Seals the payload in pool buffer `buf` (`n` bytes after the header) under the next counter
-    /// and returns the packet's length; entering a new epoch sends key (§7.2).
+    /// and returns the packet's length; entering a new epoch sends key (§16).
     pub(crate) fn seal(&mut self, out: &mut dyn Out, buf: BufIx, typ: u8, n: usize) -> usize {
         let (len, epoch) = self.tx.seal(self.pool.buf_mut(buf), typ, n);
         if epoch {
@@ -457,7 +455,7 @@ impl Session {
 
     /// Forgets a lane whose link went away (it is in `lanes.gone`); bulk it carried is rewound
     /// onto another lane of the spread, else the best that answers, taken first (R2-04), which
-    /// takes over at once (§10.2). In performance the bulk is dropped while another lane of the
+    /// takes over at once (§14.2). In performance the bulk is dropped while another lane of the
     /// spread is left: it carries the same packets.
     pub(crate) fn retire(&mut self, out: &mut dyn Out, now: Mono, l: LaneIx) {
         let (mut to, mut n) = (self.spread, 0);
@@ -478,7 +476,7 @@ impl Session {
         self.idle.take_if(|x| *x == l);
     }
 
-    /// Adds an event to the session's last STATUS_EVENTS (§14.2).
+    /// Adds an event to the session's last STATUS_EVENTS (§20.2).
     pub(crate) fn log(&mut self, now: Mono, msg: String) {
         self.events[self.nevents % STATUS_EVENTS] = LogEvent { at: now, msg };
         self.nevents += 1;

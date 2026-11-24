@@ -1,6 +1,4 @@
-//! The read-only view status prints and netsim checks (§14.2–§14.4; Go: core/status.go).
-//!
-//! Owner: C2.
+//! The read-only view status prints and netsim checks (§20.2).
 
 use crate::estimate::INF;
 use crate::flow::Flow;
@@ -11,8 +9,8 @@ use crate::{
 
 impl Session {
     /// The read-only view that status prints, with the session's last STATUS_EVENTS events,
-    /// oldest first, at the time of the last `handle` (Go: `Snapshot`). Reading it changes
-    /// nothing, so it never alters what the session does next: meters are read with `Meter::peek`.
+    /// oldest first, at the time of the last `handle`. Reading it changes nothing, so it never
+    /// alters what the session does next: meters are read with `Meter::peek`.
     pub fn snapshot(&self) -> SessionStatus {
         let now = self.now;
         // The base of owdRelMs: the lowest OWD of the lanes with a sample, a fresh echo since the
@@ -113,7 +111,7 @@ impl Session {
         }
     }
 
-    /// l's part in my sending (§14.3): spread only while this side sends bulk (every packet in
+    /// l's part in my sending: spread only while this side sends bulk (every packet in
     /// performance, a share in bandwidth), else copies or standby. A client sending only small
     /// input still has a spread chosen; calling it that told status the bulk went this way (R2-06).
     pub(crate) fn lane_role(&self, l: LaneIx) -> &'static str {

@@ -1,10 +1,10 @@
-//! Tests of bandwidth.rs. Owner: C6. New: the blind sender: with every return path blackholed for
-//! 2 s in bandwidth, bulk stays paced on two lanes in different groups (never `send_all`), and the
-//! spread resumes when echoes return. And the spread's rules on hand-built sessions. tests/pair.rs
-//! ports core/combine_test.go's TestCombine.
+//! Tests of bandwidth.rs. The blind sender: with every return path blackholed for 2 s in
+//! bandwidth, bulk stays paced on two lanes in different groups (never `send_all`), and the spread
+//! resumes when echoes return. And the spread's rules on hand-built sessions. tests/pair.rs spreads
+//! bulk over two lanes end to end (`combine_spreads_bulk_over_two_lanes_and_keeps_its_order`).
 //!
 //! The pair tests drive two whole sessions through the pair driver; the unit tests use bandwidth.rs
-//! and stable.rs alone.
+//! and performance.rs alone.
 
 use std::net::SocketAddr;
 
@@ -35,10 +35,10 @@ fn spread(p: &Pair) -> Vec<u16> {
 }
 
 /// The blind sender: every lane's return direction is blackholed for 2 s in bandwidth, so the
-/// sender sees no echo. The lanes turn suspect and leave (§14.2), and bulk stays paced on the
-/// blind pair, two lanes in different groups (§11.4): none goes to every lane (`send_all`, the only way bulk reaches the Tailscale lane while the
-/// hotel lane is up or suspect); the video sent from then on arrives whole and in order; and the
-/// spread resumes when echoes return (§8.4).
+/// sender sees no echo. The lanes turn suspect and leave (§14.2), and bulk stays paced on the blind
+/// pair, two lanes in different groups (§11.4): none goes to every lane (`send_all`, the only way
+/// bulk reaches the Tailscale lane while the hotel lane is up or suspect); the video sent from then
+/// on arrives whole and in order; and the spread resumes when echoes return (§11.4).
 #[test]
 fn blind_sender() {
     let mut p = hotel();
@@ -84,7 +84,7 @@ fn blind_sender() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The spread's rules on hand-built sessions: bandwidth.rs and stable.rs alone
+// The spread's rules on hand-built sessions: bandwidth.rs and performance.rs alone
 
 /// A server session in bandwidth, active, with hand-built lanes `(id, group, base OWD ms)`, each up
 /// and validated, its OWD (and newest OWD) the base OWD + 2 ms and its RTT twice that; id 0 is the

@@ -1,9 +1,9 @@
 //! A test-only driver for wirebond-core's public API: two Sessions back to back through an
 //! in-memory model of the network, plus node's part of the job (links, hello, the control
-//! channel). It ports Go's core/pair_test.go step for step and draw for draw: the same addresses,
-//! the same event order, the same loss draws and the same key bytes. Everything here uses only
-//! what src/lib.rs exports, and the network model and the run loop are tested on their own with a
-//! fake engine (tests/harness.rs).
+//! channel). It ports the 1.x driver step for step and draw for draw: the same addresses, the
+//! same event order, the same loss draws and the same key bytes. Everything here uses only what
+//! src/lib.rs exports, and the network model and the run loop are tested on their own with a fake
+//! engine (tests/harness.rs).
 //!
 //! The model, which is correct by construction:
 //! - A path is one direction between two socket addresses. A packet enters it when it is sent and
@@ -34,8 +34,8 @@ use wirebond_core::{
 // ---------------------------------------------------------------------------------------------
 // Deterministic randomness
 
-/// Go's `detRand`: a 64-bit LCG. Session keys and the network's loss draws come from it, so a run
-/// is a pure function of its script.
+/// A 64-bit LCG. Session keys and the network's loss draws come from it, so a run is a pure
+/// function of its script.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DetRand(pub u64);
 
@@ -50,7 +50,7 @@ impl DetRand {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// Fills `b` as Go's `detRand.Read` does: the top byte of each step.
+    /// Fills `b` with the top byte of each step.
     pub fn fill(&mut self, b: &mut [u8]) {
         for x in b {
             *x = (self.next_u64() >> 56) as u8;
@@ -65,7 +65,7 @@ pub fn rand(seed: u64) -> Rand {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The owner's setup (CONTEXT.md, SPEC §16): addresses, lanes, sockets
+// The owner's setup (CONTEXT.md, SPEC §23.1): addresses, lanes, sockets
 
 const fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
@@ -81,7 +81,7 @@ pub const S_ETH: SocketAddr = v4(198, 51, 100, 7, PORT);
 pub const C_WIFI_NAT: SocketAddr = v4(203, 0, 113, 9, 61022);
 pub const C_PHONE_NAT: SocketAddr = v4(192, 0, 2, 77, 40000);
 
-/// Lane ids: client link id << 8 | server link id; 0 is the Tailscale lane (§6.1).
+/// Lane ids: client link id << 8 | server link id; 0 is the Tailscale lane (§9.1).
 pub const MESH_LANE: u16 = 0;
 pub const WIFI: u16 = 0x0101;
 pub const PHONE: u16 = 0x0201;
@@ -538,7 +538,7 @@ pub struct Pair<E = Session> {
 }
 
 impl Pair {
-    /// A client and a server whose Tailscale lane has one-way delay `mesh_delay`, as Go's newPair.
+    /// A client and a server whose Tailscale lane has one-way delay `mesh_delay`.
     pub fn new(mesh_delay: Mono) -> Pair {
         Pair::with(
             Session::new(Role::Client, C_OWNER, rand(1)),
@@ -652,7 +652,7 @@ impl<E: Engine> Pair<E> {
         self.nat.get(&a).copied().unwrap_or(a)
     }
 
-    /// `side`'s links as node offers them: the local address, then the public mapping (§6.3).
+    /// `side`'s links as node offers them: the local address, then the public mapping (§9.3).
     pub fn infos(&self, side: Side) -> Vec<LinkInfo> {
         self.node(side)
             .links
@@ -734,8 +734,8 @@ impl<E: Engine> Pair<E> {
         }
     }
 
-    /// Puts one lane packet on the network: Go's carry, step for step, so the loss draws are the
-    /// same.
+    /// Puts one lane packet on the network. Its steps are the 1.x driver's, in the same order, so
+    /// the loss draws are the same.
     fn transmit(&mut self, side: Side, sock: SockId, dst: SocketAddr, data: &[u8]) {
         let peer = side.peer();
         self.node_mut(side).sent += 1;
@@ -889,7 +889,7 @@ impl<E: Engine> Pair<E> {
         self.run(end - self.now);
     }
 
-    /// Fails unless both sides answered the peer's hello with their key (§7.1, §7.2).
+    /// Fails unless both sides answered the peer's hello with their key (§16, §10.2).
     #[track_caller]
     pub fn expect_keys(&self) {
         for side in [Side::Client, Side::Server] {
@@ -1012,7 +1012,7 @@ pub fn describe(st: &SessionStatus) -> String {
     s
 }
 
-/// Fails unless exactly the lanes `want` are reported as primary.
+/// Fails unless exactly the lanes `want` carry bulk: those whose role reads spread.
 #[track_caller]
 pub fn assert_carrying(st: &SessionStatus, want: &[u16], what: &str) {
     let mut want = want.to_vec();
@@ -1034,10 +1034,10 @@ pub fn assert_state(st: &SessionStatus, id: u16, state: &str, what: &str) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Two sessions keyed by hand, without a network (Go's keyed)
+// Two sessions keyed by hand, without a network
 
 /// A client and a server that exchanged keys and share a Tailscale lane, and one packet the
-/// client sealed for the server: Go's `keyed`.
+/// client sealed for the server.
 pub struct Keyed {
     pub c: Session,
     pub s: Session,
@@ -1100,7 +1100,7 @@ impl Keyed {
     }
 
     /// The server receives `b` on its Tailscale-lane socket from the client's mesh address at
-    /// time 0, as Go's `recv`.
+    /// time 0.
     pub fn recv(&mut self, b: &[u8]) -> Recorder {
         let mut rec = Recorder::default();
         self.s.handle(0, Event::Packet { sock: MESH_SOCK, from: C_MESH, data: b }, &mut self.s_rids, &mut rec);

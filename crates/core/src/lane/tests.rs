@@ -1,10 +1,8 @@
-//! Tests of lane.rs. Owner: C3. Ports from core/lane_test.go: TestLanesUp, TestStall,
-//! TestRebind, TestRelayedProbe, TestWake (`hotel` and `lane_state` are in pair.rs; tests/pair.rs
-//! ports TestIdle).
-//! New (R2-03): a peer that answers a validation probe it never received, by echoing the
-//! predictable Seq from its own address, does not validate the claimed address.
+//! Tests of lane.rs (`hotel` and `lane_state` are in pair.rs; tests/pair.rs tests the idle
+//! session's probes). R2-03: a peer that answers a validation probe it never received, by echoing
+//! the predictable Seq from its own address, does not validate the claimed address.
 //!
-//! The ported tests drive two sessions through pair.rs. The unit tests before them build one side's
+//! The pair tests drive two sessions through pair.rs. The unit tests before them build one side's
 //! lanes from the hotel's links and call lane.rs directly.
 
 use std::net::SocketAddr;
@@ -24,7 +22,7 @@ const fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
 /// The hotel's NAT mappings (pair.rs `hotel`).
 const NAT_WIFI: SocketAddr = v4(203, 0, 113, 9, 61022);
 const NAT_PHONE: SocketAddr = v4(192, 0, 2, 77, 40000);
-/// A third party's address, which an on-path network relays a probe from (A6).
+/// A third party's address, which an on-path network relays a probe from.
 const VICTIM: SocketAddr = v4(192, 0, 2, 200, 5555);
 
 /// The lanes of either side of the hotel, by index: sorted by id 0, 0x0101, 0x0201.
@@ -109,7 +107,7 @@ fn lanes_pair_links_of_one_family() {
 #[test]
 fn no_default_link_shares_every_group() {
     let mut s = hotel_side(Role::Client);
-    s.links[0].default = false; // a Tailscale exit node holds the default route (§6.1)
+    s.links[0].default = false; // a Tailscale exit node holds the default route
     s.set_links(&mut Acts::default(), 0);
     assert_eq!(s.lanes[MESH].group, -1);
 }
@@ -246,7 +244,8 @@ fn next_wait_counts_the_return_address_only() {
 
 #[test]
 fn next_wait_is_bounded_and_wraps() {
-    // R2-24: Go walked every Seq up to tx_seq, 2^32 of them when tx_seq is u32::MAX.
+    // R2-24: unbounded, the scan would walk every Seq up to tx_seq, 2^32 of them when tx_seq is
+    // u32::MAX.
     let mut l = Lane::new(0x0101, 11);
     l.pgen = 1;
     sent(&mut l, u32::MAX - 1, 1);
@@ -381,7 +380,7 @@ fn idle_ticks() {
     }
     assert!(out.0.is_empty());
     assert_eq!(c.next, SEC + PROBE_IDLE);
-    // Its third idle probe unanswered: the lane is down and the next lane takes over (§8.1).
+    // Its third idle probe unanswered: the lane is down and the next lane takes over (§11.1).
     let x = &mut c.lanes[WIFI];
     (x.wait_seq, x.misses) = (5, 2);
     c.lane_tick(&mut out, SEC + PROBE_IDLE, WIFI);
@@ -512,7 +511,7 @@ fn addresses_move_only_as_rule_2_says() {
     let moved = v4(203, 0, 113, 9, 62000);
     assert_eq!(s.move_peer(MESH, NAT_WIFI, 100), None);
     assert_eq!(s.lanes[MESH].peer, Some(C_MESH), "the Tailscale lane's addresses never move");
-    // Not validated (a punching lane, §6.3 item 4): it moves at once, and its path is new.
+    // Not validated (a punching lane): it moves at once, and its path is new.
     let x = &mut s.lanes[WIFI];
     (x.wait_seq, x.hist_n, x.tx_seq, x.min_rtt.cur) = (5, 3, 9, 7);
     assert_eq!(s.move_peer(WIFI, NAT_WIFI, 120), Some(NAT_WIFI));
@@ -562,18 +561,17 @@ fn punched(s: &mut Session, now: Mono) -> Vec<(SocketAddr, usize)> {
 /// A punch round probes an unvalidated return address the peer offered as a candidate, even
 /// with its VALIDATE_AMP budget spent: with a candidate probe, unchecked, before its own probe
 /// (which then carries the newest Seq and the challenge). A return address the peer did not
-/// offer, or a validated one, gets no candidate probe (Rust only: notes/rust.md, accept:
-/// integration).
+/// offer, or a validated one, gets no candidate probe.
 #[test]
 fn punch_rounds_probe_an_offered_return_address() {
     let mut s = hotel_side(Role::Anchor);
     s.tx.rid = 9; // the peer's key: without it no probe is sent
     let (now, moved) = (10 * SEC, v4(203, 0, 113, 9, 62000));
     let cand = HEADER_LEN + probe_len(0) + TAG_LEN;
-    // Both direct lanes unvalidated, their budgets spent (3 × 43 bytes sent for 43 received);
-    // the iPhone lane's return address is the peer's mapping, the Wi-Fi lane's one it never
-    // offered (a port-dependent mapping, §6.3 item 4). Neither lane's own probe is due in this
-    // tick (lane_tick's), so the round tries it itself.
+    // Both direct lanes unvalidated, their budgets spent (3 × 43 bytes sent for 43 received); the
+    // iPhone lane's return address is the peer's mapping, the Wi-Fi lane's one it never offered (a
+    // port-dependent mapping). Neither lane's own probe is due in this tick (lane_tick's), so the
+    // round tries it itself.
     for (l, peer) in [(PHONE, NAT_PHONE), (WIFI, moved)] {
         let x = &mut s.lanes[l];
         (x.peer, x.pgen, x.amp_in, x.amp_out, x.next_probe) = (Some(peer), 2, 43, 129, now + SEC);
@@ -633,7 +631,7 @@ fn lagging_marks_from_the_newest_probe() {
     s.lag_view(SEC);
     assert!(s.lanes[WIFI].peer_lag && !s.lanes[PHONE].peer_lag);
     assert_eq!(s.lag_as_of, 5_000);
-    // A probe sent earlier that arrives late on a slow lane changes nothing (notes/core.md 8b).
+    // A probe sent earlier that arrives late on a slow lane changes nothing.
     s.pin.sent_at = 4_000;
     s.ein[0].flags = 0;
     s.lag_view(SEC);
@@ -651,7 +649,7 @@ fn lagging_marks_from_the_newest_probe() {
 }
 
 // -------------------------------------------------------------------------------------------
-// Ported from core/lane_test.go, and R2-03's forged validation: two sessions through pair.rs.
+// Pair tests, and R2-03's forged validation: two sessions through pair.rs.
 
 /// Lane `id` of side `n`.
 fn lane(n: &Tnode, id: u16) -> &Lane {
@@ -700,7 +698,7 @@ fn lanes_up() {
 }
 
 /// A stall on the Wi-Fi lane is seen at the receiver as missing copies and reported at once, so
-/// the sender marks the lane suspect within about 100 ms (§8.4); it goes down after DOWN_AFTER
+/// the sender marks the lane suspect within about 100 ms (§11.4); it goes down after DOWN_AFTER
 /// and comes back after UP_AFTER of clean echoes.
 #[test]
 fn stall() {
@@ -731,7 +729,7 @@ fn stall() {
 }
 
 /// A NAT rebinding moves the server's return address on the client's next probe, and the new
-/// address is validated within about one RTT (§7.6 rule 2, A7).
+/// address is validated within about one RTT (§10.5 rule 2).
 #[test]
 fn rebind() {
     let mut p = hotel();
@@ -755,7 +753,7 @@ fn rebind() {
 
 /// An on-path network relays a real probe from a victim's address before the real one arrives.
 /// The victim gets probes only, within VALIDATE_AMP × the bytes received from it, the lane carries
-/// on at the real address meanwhile, and the next real probe ends the claim (§7.6 rule 2, A6).
+/// on at the real address meanwhile, and the next real probe ends the claim (§10.5 rule 2).
 #[test]
 fn relayed_probe() {
     let mut p = hotel();
@@ -916,14 +914,14 @@ fn idle_exchange(p: &mut Pair, max: usize, tok: u64) -> Vec<Vec<u8>> {
     back
 }
 
-/// A Go client never returns the challenge (its echo carries the address it saw where a Rust echo
-/// carries the token, which reads as none: R2-03), so a Rust server never validates its address,
-/// and it answers at once every probe that asks (PROBE_ANSWER). An idle server answers every probe
-/// at once (§8.1) and asks for nothing in turn, so the exchange ends with its answer. When that
-/// answer asked, a Go client and a Rust server traded probes as fast as the path carried them for
-/// as long as the session stayed idle (notes/rust.md, system: integration, interop go/rust). A
-/// Rust client returns the challenge the answer carried on its next probe on the lane, which
-/// validates the address; and asked by that probe, the idle server answers without asking.
+/// A client that never returns the challenge (its echo carries the address it saw where the token
+/// belongs, which reads as none: R2-03) never has its address validated by the server, which
+/// answers at once every probe that asks (PROBE_ANSWER). An idle server answers every probe at once
+/// and asks for nothing in turn, so the exchange ends with its answer. Were that answer to ask,
+/// such a client and the server would trade probes as fast as the path carried them for as long as
+/// the session stayed idle. A client that returns the challenge the answer carried does so on its
+/// next probe on the lane, which validates the address; and asked by that probe, the idle server
+/// answers without asking.
 #[test]
 fn idle_answers_ask_nothing() {
     let mut p = hotel();
@@ -931,8 +929,8 @@ fn idle_answers_ask_nothing() {
     p.stream(Side::C, crate::FlowId(1), 50, 100, 5 * MS);
     p.run(10 * SEC);
     let sl = p.s.s.lane_by_id(0x0201).expect("the server's iPhone lane");
-    p.s.s.lanes[sl].validated = false; // as a Go client's address stays
-    // The Go client's probe (as when the lane leaves its copy set going idle), then its answer to
+    p.s.s.lanes[sl].validated = false; // as such a client's address stays
+    // That client's probe (as when the lane leaves its copy set going idle), then its answer to
     // each probe of the server's that asks, at no more echoes than that probe.
     let (mut max, mut asks) = (MAX_ECHOES, 0);
     while asks < 100 {
@@ -945,9 +943,9 @@ fn idle_answers_ask_nothing() {
     }
     assert_eq!(asks, 0, "the idle server's answers asked for {asks} answers in a row");
     assert!(!p.s.s.lanes[sl].validated, "an echo without the challenge validated the address");
-    // A Rust client's next probe on the lane returns the challenge of the answer it took. Its own
-    // view of the lane is unvalidated meanwhile, as after a move (with the bytes of the probe that
-    // moved it to spend), so the probe asks.
+    // A client that returns the challenge: its next probe on the lane returns the challenge of the
+    // answer it took. Its own view of the lane is unvalidated meanwhile, as after a move (with the
+    // bytes of the probe that moved it to spend), so the probe asks.
     let cl = p.c.s.lane_by_id(0x0201).expect("the client's iPhone lane");
     let x = &mut p.c.s.lanes[cl];
     (x.validated, x.amp_in, x.amp_out) = (false, 200, 0);
@@ -964,7 +962,7 @@ fn idle_answers_ask_nothing() {
     );
 }
 
-/// A wake re-probes every lane but turns none suspect on its own (§8.4).
+/// A wake re-probes every lane but turns none suspect on its own (§11.4).
 #[test]
 fn wake_turns_no_lane_suspect() {
     let mut p = hotel();
@@ -984,9 +982,10 @@ fn wake_turns_no_lane_suspect() {
 /// Both sessions start the hotel's lanes a few probes short of the wrap (new lanes count from the
 /// session's highest Seq, R2-10), and every lane carries on across it: the receiver takes the
 /// wrapped Seqs as newer, the sender keeps finding the probe it waits for, and the echoes keep the
-/// lanes up. Go took no probe after the wrap, and its nextWait walked 2^32 Seqs at it. It also
-/// needs estimate.rs's `echo` to compare Seqs serially (`e.seq` against `rtt_seq`, `echo_seq`,
-/// `wait_seq`, `hist_seq`): with plain comparisons every echo after the wrap reads as old.
+/// lanes up. Compared plainly, no probe after the wrap would be taken, and an unbounded scan for
+/// the probe waited for would walk 2^32 Seqs at it. It also needs estimate.rs's `echo` to compare
+/// Seqs serially (`e.seq` against `rtt_seq`, `echo_seq`, `wait_seq`, `hist_seq`): with plain
+/// comparisons every echo after the wrap reads as old.
 #[test]
 fn probe_seqs_wrap() {
     let mut p = Pair::new(33 * MS);
@@ -1022,10 +1021,9 @@ fn probe_seqs_wrap() {
 
 /// A lagging mark that has no copy left to judge, with no small packet arriving on any lane for
 /// ECHO_WINDOW, is cleared. In a session with no small flow nothing else clears it, and the sender
-/// kept the lane suspect for good (a latent defect of Go's engine; notes/rust.md, core:
-/// integration). Here the hotel's Wi-Fi stalls as a stream starts: its first, small, datagrams
-/// mark Wi-Fi lagging at the server, then the stream turns bulk, Wi-Fi recovers, and no small
-/// packet comes again.
+/// kept the lane suspect for good. Here the hotel's Wi-Fi stalls as a stream starts: its first,
+/// small, datagrams mark Wi-Fi lagging at the server, then the stream turns bulk, Wi-Fi recovers,
+/// and no small packet comes again.
 #[test]
 fn lagging_mark_without_copies_clears() {
     let mut p = hotel();
@@ -1045,14 +1043,14 @@ fn lagging_mark_without_copies_clears() {
     complete(&p.s, f, 4_300, 0);
 }
 
-/// §8.4's deadline: a copy that came first on lane B is owed on lane A max(LAG_FLOOR, 3 × dev_A)
+/// §11.4's deadline: a copy that came first on lane B is owed on lane A max(LAG_FLOOR, 3 × dev_A)
 /// after the lateness the two lanes' OWDs predict, as the spec's max(10 ms, 3 × dev_A) + OWD_A −
-/// OWD_B has it, with A's latest OWD and B's base (notes/core.md 33b). Before notes/rust.md
-/// "netem: A2" the floor only bounded the whole wait, so a lane slower than B by LAG_FLOOR or more
-/// and without jitter was owed the copy at the very time it came: the system harness's cell, 15
-/// ms slower than the hotel, was marked lagging by a stream's first, small, datagrams (a full-size
-/// copy is slower at the cell's 80 Mbit/s than the probes that measured its OWD), and the Mac
-/// kept it suspect for 2 s while the hotel overloaded under the stream.
+/// OWD_B has it, with A's latest OWD and B's base. With the floor only bounding the whole wait, a
+/// lane slower than B by LAG_FLOOR or more and without jitter was owed the copy at the very time it
+/// came: the system harness's cell, 15 ms slower than the hotel, was marked lagging by a stream's
+/// first, small, datagrams (a full-size copy is slower at the cell's 80 Mbit/s than the probes that
+/// measured its OWD), and the Mac kept it suspect for 2 s while the hotel overloaded under the
+/// stream.
 #[test]
 fn copies_are_owed_lag_floor_past_the_lateness_owds_predict() {
     let mut s = hotel_side(Role::Anchor);

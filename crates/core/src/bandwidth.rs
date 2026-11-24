@@ -77,7 +77,7 @@ impl Session {
     /// A lane in overuse at PACE_FLOOR for BANDWIDTH_FLOOR_HOLD while it carries bulk, which is
     /// what a lane that drops full-size packets looks like, is barred (§14.2, leaving the spread).
     /// Its group then takes the mesh lane, whose packets Tailscale fragments inside WireGuard, so
-    /// they cross that hop (§5.4; notes/rust.md, review fixes: one-group-fragments).
+    /// they cross that hop.
     fn eligible(&mut self, now: Mono) -> Spread {
         let (mut best, mut mesh) = ([None; MAX_LINKS], None);
         for l in self.lanes.ixs() {
@@ -113,8 +113,8 @@ impl Session {
         if let Some(m) = mesh {
             let g = self.lanes[m].group;
             // A usable direct lane is validated and still answers (up or suspect), barred or not:
-            // the mesh lane, which crosses its group's link, stays out while one is (§14.1,
-            // §14.2; notes/core.md 44a, A5, A6).
+            // the mesh lane, which crosses its group's link, stays out while one is (§14.1, §14.2;
+            // A5, A6).
             let live = self.lanes.iter().any(|x| !x.mesh && x.usable() && (g < 0 || x.group == g));
             if (-1..MAX_LINKS as i32).contains(&g) && !live {
                 best[g.max(0) as usize] = Some(m);

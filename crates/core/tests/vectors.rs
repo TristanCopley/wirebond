@@ -1,12 +1,10 @@
-//! Cross-implementation test vectors: the Rust engine against the Go one, byte for byte.
+//! Cross-implementation test vectors: the Rust engine against the 1.x one, byte for byte.
 //!
-//! `vectors.json` was written by the Go implementation, the reference, in its
-//! core/vectors_test.go (removed after 382cb8d: `git show 382cb8d:core/vectors_test.go`), and is
-//! fixed since: Go's bytes as they were. Through the public API only, these tests check
-//! that [`Msg`] writes and reads control lines as Go does, and that a [`Session`] receives Go's
-//! packets as a Go session does and seals as a Go session seals (notes/rust.md,
-//! "Cross-implementation test vectors"). Probes are not pinned: the Rust port adds a challenge
-//! token to them (notes/open.md R2-03).
+//! `vectors.json` was written by the 1.x implementation, the reference, and is fixed since: its
+//! bytes as they were. Through the public API only, these tests check that [`Msg`] writes and reads
+//! control lines as the reference does, and that a [`Session`] receives the reference's packets as
+//! a reference session does and seals its own as one seals. Probes are not pinned: the Rust port
+//! adds a challenge token to them (R2-03).
 
 use std::net::SocketAddr;
 
@@ -42,7 +40,7 @@ struct Constants {
     max_datagram: usize,
 }
 
-/// A control message as Go's node writes it: json.Marshal, then '\n' on the wire.
+/// A control message as the reference's node writes it: compact JSON, then '\n' on the wire.
 #[derive(Deserialize)]
 struct Message {
     name: String,
@@ -51,7 +49,8 @@ struct Message {
     k: Option<String>,
 }
 
-/// A message with characters Go escapes and serde_json does not; `plain` is it unescaped.
+/// A message with characters the reference escapes and serde_json does not; `plain` is it
+/// unescaped.
 #[derive(Deserialize)]
 struct Escaped {
     name: String,
@@ -75,13 +74,13 @@ struct Seal {
     /// K_0, hex: the client's send key, the only bytes its rand yields.
     key: String,
     steps: Vec<Step>,
-    /// The counter Go's client sealed the datagram under.
+    /// The counter the reference client sealed the datagram under.
     counter: u64,
-    /// What a Go client sends for the datagram under each counter from 0, hex.
+    /// What a reference client sends for the datagram under each counter from 0, hex.
     packets: Vec<String>,
 }
 
-/// One event of a script and what the Go session did with it.
+/// One event of a script and what the reference session did with it.
 #[derive(Deserialize)]
 struct Step {
     name: String,
@@ -132,7 +131,7 @@ struct Packet {
     data: String,
     /// What packet_rid reads.
     rid: Option<u16>,
-    /// For a packet Go sealed: its counter and the sealed payload, hex.
+    /// For a packet the reference sealed: its counter and the sealed payload, hex.
     counter: Option<u64>,
     plain: Option<String>,
 }
@@ -216,8 +215,8 @@ fn constants() {
     assert_eq!(c.max_datagram, MAX_INNER);
 }
 
-/// Every line Go's node writes reads as a Msg that writes the same bytes, and a key message's
-/// base64 is the key's bytes.
+/// Every line the reference's node writes reads as a Msg that writes the same bytes, and a key
+/// message's base64 is the key's bytes.
 #[test]
 #[ignore = "2.0 wave 2: Go-compatible 1.x vectors (8-byte data header, 1.x JSON); regenerate for the 2.0 payload (SPEC 10.3)"]
 fn messages() {
@@ -236,8 +235,8 @@ fn messages() {
     assert!(epochs.map(|m| m.k.as_ref()).eq(v.ratchet.keys[1..].iter().map(Some)));
 }
 
-/// Go escapes <, >, & and U+2028/U+2029 in strings; serde_json writes them as they are. Each
-/// reads the other's line as the same message.
+/// The reference escapes <, >, & and U+2028/U+2029 in strings; serde_json writes them as they
+/// are. Each reads the other's line as the same message.
 #[test]
 #[ignore = "2.0 wave 2: Go-compatible 1.x vectors (8-byte data header, 1.x JSON); regenerate for the 2.0 payload (SPEC 10.3)"]
 fn escaped() {
@@ -250,8 +249,8 @@ fn escaped() {
     }
 }
 
-/// packet_rid reads Go's packets as Go's PacketRID does, and each packet Go sealed has the layout
-/// of §7.3 and §7.4: type, rid, counter, the sealed payload, the tag.
+/// packet_rid reads the reference's packets as the reference's own rid reader did, and each packet
+/// the reference sealed has the layout of §10.3: type, rid, counter, the sealed payload, the tag.
 #[test]
 #[ignore = "2.0 wave 2: Go-compatible 1.x vectors (8-byte data header, 1.x JSON); regenerate for the 2.0 payload (SPEC 10.3)"]
 fn packet_layout() {
@@ -280,7 +279,7 @@ fn packet_layout() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A Session against Go's.
+// A Session against the reference's.
 
 /// Records what a Session does in one call.
 #[derive(Default)]
@@ -321,8 +320,9 @@ fn cyclic(key: Vec<u8>) -> Rand {
 
 const OWNER: u64 = 7;
 
-/// Drives a Session through a script as core/vectors_test.go drove Go's: before each step, a tick
-/// whenever next() is due (at that time, never before the last event), then the step's event.
+/// Drives a Session through a script as the reference's session was driven when the vectors were
+/// written: before each step, a tick whenever next() is due (at that time, never before the last
+/// event), then the step's event.
 struct Driver {
     s: Session,
     rids: RidTable,
@@ -336,7 +336,7 @@ impl Driver {
         Driver { s, rids: RidTable::new(), last: 0, script }
     }
 
-    /// Runs step i and checks what the session did against what Go's did.
+    /// Runs step i and checks what the session did against what the reference's did.
     fn step(&mut self, i: usize, st: &Step) -> Rec {
         let script = self.script;
         let ctx = |what: String| format!("vectors.json, {script} step {i} ({}): {what}", st.name);
@@ -417,10 +417,10 @@ impl Driver {
     }
 }
 
-/// A fresh server receives a Go client's packets: small and bulk, on its IPv4 link and its
+/// A fresh server receives a reference client's packets: small and bulk, on its IPv4 link and its
 /// Tailscale lane, across three epoch boundaries and into the client's next session, with
-/// tampered, replayed, forged and malformed packets in between. It delivers what Go's server
-/// delivered and nothing else, and what Go dropped gets no action.
+/// tampered, replayed, forged and malformed packets in between. It delivers what the reference
+/// server delivered and nothing else, and what the reference dropped gets no action.
 #[test]
 #[ignore = "2.0 wave 2: Go-compatible 1.x vectors (8-byte data header, 1.x JSON); regenerate for the 2.0 payload (SPEC 10.3)"]
 fn receive() {
@@ -429,7 +429,8 @@ fn receive() {
     for (i, st) in v.receive.steps.iter().enumerate() {
         let out = d.step(i, st);
         if let Some(k) = &st.key {
-            // The client sealed its packets for the rid Go's fresh RidTable hands out first.
+            // The client sealed its packets for the rid the reference's fresh RidTable hands out
+            // first.
             let rid = out.keys()[0].rid;
             assert!(
                 rid == k.rid,
@@ -445,7 +446,7 @@ fn receive() {
 }
 
 /// A fresh client whose rand yields only K_0 takes the server's hello and key and sends one
-/// datagram: the packet is byte for byte the one a Go client sends under the same counter.
+/// datagram: the packet is byte for byte the one a reference client sends under the same counter.
 #[test]
 #[ignore = "2.0 wave 2: Go-compatible 1.x vectors (8-byte data header, 1.x JSON); regenerate for the 2.0 payload (SPEC 10.3)"]
 fn seal() {

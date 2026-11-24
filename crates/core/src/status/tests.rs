@@ -1,9 +1,7 @@
-//! Tests of status.rs. Owner: C2. Port from core/status_test.go: TestSnapshot (tests/determinism.rs
-//! ports TestDeterminism).
+//! Tests of status.rs.
 //!
-//! The ports and the R2-06 and R2-14 pair tests drive whole sessions; the others need only
-//! status.rs. The new pair tests were checked against Go's core with the same fixes: they fail
-//! without them.
+//! `snapshot` and the R2-06 and R2-14 pair tests drive whole sessions; the others need only
+//! status.rs. The R2-06 and R2-14 pair tests fail without their fixes.
 
 use std::collections::BTreeMap;
 
@@ -11,9 +9,8 @@ use crate::lane::{Lane, State};
 use crate::pair::*;
 use crate::{BOND_BYTES, MS, Mono, Role, SEC, STATUS_EVENTS, Session};
 
-/// Go: TestSnapshot, in performance. After video outgrows the hotel Wi-Fi, status shows both
-/// groups' lanes carrying bulk, the flows' classes, the metered rate (every packet crosses the
-/// iPhone) (§14.2–§14.4).
+/// In performance: after video outgrows the hotel Wi-Fi, status shows both groups' lanes carrying
+/// bulk, the flows' classes, the metered rate (every packet crosses the iPhone) (§20.2).
 #[test]
 fn snapshot() {
     let mut p = hotel();
@@ -68,8 +65,8 @@ fn roles_follow_the_bulk() {
 
 /// R2-14 end to end: the iPhone lane cannot punch, so it never has an OWD sample, and the others
 /// are relative to the faster of them (Wi-Fi, 32 ms), not to its OWD 0. The pair's two sides share
-/// one clock, so Go showed each lane's whole OWD here (33 and 32 ms); across two devices' clocks it
-/// showed their offset.
+/// one clock, so a base of OWD 0 would show each lane's whole OWD here (33 and 32 ms); across two
+/// devices' clocks it would show their offset.
 #[test]
 fn owd_relative_with_an_unpunched_lane() {
     let mut p = Pair::new(33 * MS);

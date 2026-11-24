@@ -1,6 +1,6 @@
 //! The test driver's own tests: the network model, the control channel, the run loop and the
 //! checks, driven by a fake engine so that they hold whatever state the real engine is in.
-//! Reference values come from Go's core/pair_test.go driver, which this one ports draw for draw.
+//! Reference values come from the 1.x driver, which this one ports draw for draw.
 
 use crate::common::*;
 use std::net::SocketAddr;

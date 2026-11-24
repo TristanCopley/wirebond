@@ -1,16 +1,14 @@
 //! Engine benchmarks: two sessions back to back through the public API only, on the same events
-//! as the Go implementation's benchmark (removed after 382cb8d: `git show 382cb8d:core/bench_test.go`).
-//! notes/rust.md ("Engine benchmarks") gives the reasons for each choice.
+//! as the 1.x implementation's benchmark.
 //!
 //! ```text
 //! cargo bench -p wirebond-core --bench engine [-- [--datagrams N] [--runs R] [FILTER]]
 //! ```
 //!
-//! For each scenario and path it prints a line in the format of Go's benchmarks: the median of R
+//! For each scenario and path it prints a line in the format of `go test -bench`: the median of R
 //! runs (5), each timing N datagrams (50,000) in the steady state, in nanoseconds per datagram,
 //! with the Mbps that cost allows one core and the calls left out as preempted. Run without
-//! `--bench`, as `cargo test --benches` does, it checks each scenario briefly instead, as Go's
-//! TestEngineBench does.
+//! `--bench`, as `cargo test --benches` does, it checks each scenario briefly instead.
 //!
 //! Each `Session::handle` call is timed on its own, together with the driver's work on its
 //! actions (a send copied out, a delivery counted), less the clock's own cost; it counts toward
@@ -47,7 +45,7 @@ struct Scenario {
 const SCENARIOS: [Scenario; 4] = [
     // Video as Sunshine sends it to Moonlight through 127.0.0.1: 1,408-byte datagrams, 120
     // frames a second, each frame one burst (CONTEXT.md). In performance 30 Mbps, every packet on
-    // both lanes; in bandwidth 90 Mbps, as netsim's A5, spread over both lanes.
+    // both lanes; in bandwidth 90 Mbps, spread over both lanes.
     scenario("performance/1408", MODE_PERFORMANCE, 1408, 23, SEC / 120),
     scenario("bandwidth/1408", MODE_BANDWIDTH, 1408, 68, SEC / 120),
     // A small flow, as Moonlight's input: a 100-byte inner packet (a 72-byte datagram and its
@@ -84,7 +82,7 @@ const PREEMPTED: Duration = Duration::from_millis(1);
 /// The fewest datagrams for which a run checks what its window carried.
 const MIN_CHECKED: usize = 1000;
 
-// The owner's setup (SPEC §16) without jitter or loss: the Mac on the hotel's Wi-Fi (38 Mbps, 30
+// The owner's setup (SPEC §23.1) without jitter or loss: the Mac on the hotel's Wi-Fi (38 Mbps, 30
 // ms one way, as netsim's Hotel-clean) and the iPhone (80 Mbps, 45 ms, as netsim's Cell), xanth
 // on Ethernet, and the Tailscale lane (31 ms), which crosses the hotel's Wi-Fi.
 const MAC_WIFI: SocketAddr = v4([192, 168, 1, 20]);
@@ -238,7 +236,7 @@ impl Timing {
 }
 
 /// What timing an empty region reads, the median of 21 means of 100,000: each timed call is that
-/// much longer than its work. The Go benchmark measures its own clock the same way.
+/// much longer than its work.
 fn clock() -> Duration {
     let mut means: Vec<Duration> = (0..21)
         .map(|_| {
@@ -254,7 +252,7 @@ fn clock() -> Duration {
     means[means.len() / 2].max(Duration::from_nanos(1))
 }
 
-/// A deterministic byte stream for the session keys, as in the Go benchmark.
+/// A deterministic byte stream for the session keys.
 fn det_rand(seed: u64) -> Rand {
     let mut r = seed;
     Box::new(move |p: &mut [u8]| {
@@ -678,9 +676,8 @@ impl World {
     /// xanth's have the roles the scenario measures: with video both lanes spread (every packet in
     /// performance, a share in bandwidth); with a small flow both lanes take copies.
     fn steady(&self) -> Result<(), String> {
-        // R2-06 (notes/open.md, notes/rust.md C2): a lane reads spread only while this side sends
-        // bulk, so a small flow's lanes read copies (Go's engine, without the fix, read the
-        // scheduler's primary or spread there).
+        // R2-06: a lane reads spread only while this side sends bulk, so a small flow's lanes read
+        // copies (the 1.x engine, without the fix, read the scheduler's primary or spread there).
         let (want, roles): (&[(u16, &str)], _) = if self.sc.burst == 1 {
             (&[(HOTEL, "copies"), (CELL, "copies")], "xanth's hotel and cell lanes copies")
         } else {

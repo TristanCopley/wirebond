@@ -122,11 +122,11 @@ fn ports(proto: u8, icmp: u8, l4: &[u8]) -> (u16, u16) {
 const FILL_MAX: Mono = (REORDER_MAX as f64 / SKEW_MARGIN) as Mono;
 
 /// Pool bytes past which a datagram behind a gap is delivered out of order rather than held, so
-/// reorder buffers leave room for pacer queues within BOND_BYTES (§7.6 rule 5).
+/// reorder buffers leave room for pacer queues within BOND_BYTES (§10.5 rule 4).
 const REORDER_CAP: usize = (BOND_BYTES as f64 * REORDER_SHARE) as usize;
 
-/// A lane that recently brought a flow's packets, for reorder rule 2 (§10.3). Go: the anonymous
-/// struct in `flow.lanes`. `l` None: empty, or a lane that has since gone.
+/// A lane that recently brought a flow's packets, for reorder's lane rule (§15). `l` None: empty,
+/// or a lane that has since gone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FlowLane {
     pub(crate) l: Option<LaneIx>,
@@ -135,7 +135,7 @@ pub(crate) struct FlowLane {
     pub(crate) seq: u32,
 }
 
-/// One forwarded UDP flow, keyed by FlowId in both directions (§5.1, §10). Go: `flow`.
+/// One forwarded UDP flow, keyed by FlowId in both directions (§13).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Flow {
     pub(crate) id: FlowId,
@@ -146,7 +146,7 @@ pub(crate) struct Flow {
     pub(crate) key: Option<Key>,
     /// Its last packet, for FLOW_IDLE and eviction.
     pub(crate) last: Mono,
-    /// Class of my sending direction (§10.1); a new flow starts small.
+    /// Class of my sending direction (§13); a new flow starts small.
     pub(crate) small: bool,
     /// The peer's direction carries the small bit.
     pub(crate) rx_small: bool,
@@ -157,7 +157,7 @@ pub(crate) struct Flow {
     pub(crate) tx: Meter,
     pub(crate) rx: Meter,
 
-    // Receiving: per-flow order (§10.3).
+    // Receiving: per-flow order (§15).
     /// The next seq to deliver; a new flow starts at 1.
     pub(crate) next: u32,
     /// By seq % REORDER_SLOTS (`buf` None when empty); empty until the first gap, then
@@ -171,7 +171,7 @@ pub(crate) struct Flow {
     pub(crate) gap_at: Mono,
     /// The seqs that gap skipped: `gap_n` of them from `gap_seq`. Only a late datagram among them
     /// teaches `fill` how long a gap needs; `gap_n` 0 (a new flow, or after a jump) teaches
-    /// nothing (R2-13). Rust only: a new field (notes/rust.md, C5).
+    /// nothing (R2-13).
     pub(crate) gap_seq: u32,
     pub(crate) gap_n: u32,
     pub(crate) lanes: [FlowLane; FLOW_LANES],
@@ -184,8 +184,8 @@ impl Flow {
     /// Notes that lane `l` brought `seq` of the flow, in l's entry, else an empty one, else the
     /// oldest. The entry keeps the highest seq in serial order, a new one starting from `seq`
     /// itself (R2-24: from 0, a seq past 2^31 would never count as higher). An empty entry goes
-    /// before the oldest: Go compared `at` alone, and Mono's origin is arbitrary, so a lane
-    /// recorded at or before 0 gave way while entries were free.
+    /// before the oldest: by `at` alone, since Mono's origin is arbitrary, a lane recorded at or
+    /// before 0 would give way while entries were free.
     pub(crate) fn carried(&mut self, l: LaneIx, now: Mono, seq: u32) {
         // Two steps, not one `min_by_key` over all four: this runs for every bulk packet, and
         // `find` stops at the lane's own entry.
@@ -291,7 +291,7 @@ impl Session {
         self.wake_at(next);
     }
 
-    /// Notes data in either direction; the first after idle wakes the session (§8.1).
+    /// Notes data in either direction; the first after idle wakes the session (§11.1).
     pub(crate) fn touch(&mut self, now: Mono) {
         if !self.active {
             self.activate(now);
@@ -299,9 +299,9 @@ impl Session {
         self.last_data = now;
     }
 
-    /// Marks each flow's sending direction small or bulk (§10.1): under SMALL_RATE over
-    /// SMALL_WINDOW, cheapest first, until the small flows total SMALL_COPY_BUDGET. Sorts slot indices
-    /// with `sort_unstable_by` and the slot as tiebreak (Go's stable sort; no allocation).
+    /// Marks each flow's sending direction small or bulk (§13): under SMALL_RATE over SMALL_WINDOW,
+    /// cheapest first, until the small flows total SMALL_COPY_BUDGET. Sorts slot indices with
+    /// `sort_unstable_by` and the slot as tiebreak: a stable sort's order, with no allocation.
     pub(crate) fn classify(&mut self, now: Mono) {
         let mut fs = [0usize; MAX_FLOWS];
         let mut n = 0;
@@ -354,10 +354,10 @@ impl Session {
     }
 
     /// Sends the sealed small packet in pool buffer `buf` (`n` bytes) on every lane of the copy
-    /// set, unpaced, or on every known lane while none is confirmed (§8.1, §10.1); each lane's
-    /// rewind ring keeps its counter. Then puts the buffer back.
+    /// set (§13), unpaced, or on every known lane while none is confirmed; each lane's rewind ring
+    /// keeps its counter. Then puts the buffer back.
     fn copies(&mut self, out: &mut dyn Out, now: Mono, buf: BufIx, n: usize) {
-        let c = be(&self.pool.buf(buf)[3..HEADER_LEN]); // its counter (§7.3)
+        let c = be(&self.pool.buf(buf)[3..HEADER_LEN]); // its counter (§10.3)
         let mut sent = false;
         for l in self.lanes.ixs() {
             let x = &self.lanes[l];
@@ -375,12 +375,12 @@ impl Session {
 
     /// Queues the sealed bulk packet in pool buffer `buf` (`n` bytes) on the lanes the scheduler
     /// chose (`bulk_lanes`); each extra lane gets its own copy of the bytes; with none, unpaced,
-    /// once per bottleneck group (`send_unpaced`; §11).
+    /// once per bottleneck group (`send_unpaced`; §14).
     fn bulk(&mut self, out: &mut dyn Out, now: Mono, buf: BufIx, n: usize) {
         let p = Pkt { c: be(&self.pool.buf(buf)[3..HEADER_LEN]), at: now, buf: Some(buf), n: n as u32 };
         let mut ls = self.bulk_lanes(now, n);
         let Some(first) = ls.next() else {
-            // No lane carries bulk: never worse than one lane (notes/core.md 24).
+            // No lane carries bulk: never worse than one lane.
             self.send_unpaced(out, now, buf, n);
             self.pool.put(buf);
             return;
@@ -395,19 +395,18 @@ impl Session {
     }
 
     /// Sends the sealed bulk packet in pool buffer `buf` (`n` bytes), which no lane carries, at
-    /// once (notes/core.md 24, 37): on every validated lane but those that share a bottleneck
-    /// group (§6.1) with a validated lane that answers and comes before them, so each group's
-    /// shaper takes the stream once. A lane answers if it was echoed within its suspect timeout;
-    /// one that answers comes first, a direct lane before the Tailscale lane (§11.1 rule 6), then
-    /// the lower OWD. A group none of whose lanes answers (at start, after idle, blind) still gets
-    /// the packet on every validated lane: never worse than one.
+    /// once: on every validated lane but those that share a bottleneck group (§8) with a validated
+    /// lane that answers and comes before them, so each group's shaper takes the stream once. A
+    /// lane answers if it was echoed within its suspect timeout; one that answers comes first, a
+    /// direct lane before the Tailscale lane (§14.1), then the lower OWD. A group none of whose
+    /// lanes answers (at start, after idle, blind) still gets the packet on every validated lane:
+    /// never worse than one.
     ///
-    /// Go sent it on every validated lane (`sendAll`). Once every lane was down, as after a sleep
-    /// longer than the probe ring, the direct lane and the Tailscale lane over the same hotel
+    /// An earlier version sent it on every validated lane. Once every lane was down, as after a
+    /// sleep longer than the probe ring, the direct lane and the Tailscale lane over the same hotel
     /// Wi-Fi took the stream twice through its shaper. The overuse this caused reset `clean_at` on
     /// every echo, so no lane had the clean UP_AFTER that brings it back up and bulk stayed
-    /// doubled: video never played again (the swarm's seed 5; notes/rust.md, accept:
-    /// integration).
+    /// doubled: video never played again (the swarm's seed 5).
     fn send_unpaced(&mut self, out: &mut dyn Out, now: Mono, buf: BufIx, n: usize) {
         // Whether a lane answers: `owds` holds a sample once a lane was echoed since it was made
         // or I woke, and the newest echo is within its suspect timeout.
@@ -432,12 +431,12 @@ impl Session {
         }
     }
 
-    /// Picks the lanes small packets go on (§10.1) and tells the peer at once when one joins or
-    /// leaves (§8.4): the lanes carrying bulk; the lowest-OWD validated direct lane of each group
-    /// that answers, while its send rate plus the copies stays under COPY_LOAD_MAX × its rate;
-    /// and the Tailscale lane while fewer than two groups have such a lane.
+    /// Picks the lanes small packets go on (§13) and tells the peer at once when one joins or
+    /// leaves (§11.2): the lanes carrying bulk; the lowest-OWD validated direct lane of each group
+    /// that answers, while its send rate plus the copies stays under COPY_LOAD_MAX × its rate; and
+    /// the Tailscale lane while fewer than two groups have such a lane.
     pub(crate) fn set_copies(&mut self, out: &mut dyn Out, now: Mono) {
-        // The best lane of each bottleneck group (§6.1), by group index: direct lanes only.
+        // The best lane of each bottleneck group (§8), by group index: direct lanes only.
         let mut best = [None::<LaneIx>; MAX_LINKS];
         let answers = |x: &Lane| matches!(x.state, State::Up | State::Suspect);
         for l in self.lanes.ixs().filter(|&l| !self.lanes[l].mesh) {
@@ -462,11 +461,10 @@ impl Session {
         }
     }
 
-    /// Acts on one authenticated data payload, `self.rxbuf[..n]`, that arrived on a lane (None:
-    /// no lane has its address; delivered, but it moves nothing, §7.5): small packets at once,
-    /// bulk through the reorder buffer (§10.3). `packet` drops a payload shorter than DATA_LEN.
-    /// The lane is not used here: `packet` records it through `Flow::carried` for every copy
-    /// (notes/core.md 19).
+    /// Acts on one authenticated data payload, `self.rxbuf[..n]`, that arrived on a lane (None: no
+    /// lane has its address; delivered, but it moves nothing, §10.4): small packets at once, bulk
+    /// through the reorder buffer (§15). `packet` drops a payload shorter than DATA_LEN. The lane
+    /// is not used here: `packet` records it through `Flow::carried` for every copy.
     pub(crate) fn data(&mut self, out: &mut dyn Out, now: Mono, l: Option<LaneIx>, typ: u8, n: usize) {
         let lane = l.map(|l| self.lanes[l].id);
         let (id, seq) = (FlowId(be(&self.rxbuf[..2]) as u16), be(&self.rxbuf[2..DATA_LEN]) as u32);
@@ -480,7 +478,7 @@ impl Session {
         fl.rx.add(now, SMALL_WINDOW, n - DATA_LEN);
         fl.rx_small = typ & SMALL_BIT != 0;
         if fl.rx_small {
-            // Small packets bypass the reorder buffer (§10.3), and a flow that turns bulk resumes
+            // Small packets bypass the reorder buffer (§15), and a flow that turns bulk resumes
             // after them. One at or past `next` passes what is held before it first (`pass`).
             let passes = !after(fl.next, seq);
             if passes {
@@ -493,11 +491,10 @@ impl Session {
             return;
         }
         // Exactly 2^31 ahead is neither after nor before `next` in serial order: it counts as far
-        // ahead too, so `hold` only ever sees seqs within REORDER_SLOTS past `next` (notes/rust.md,
-        // review fixes: flow-half-range).
+        // ahead too, so `hold` only ever sees seqs within REORDER_SLOTS past `next`.
         if !after(fl.next, seq) && seq.wrapping_sub(fl.next) as usize >= REORDER_SLOTS {
-            // Too far ahead to hold: deliver what is held, then jump (notes/core.md 30). No gap was
-            // timed: nothing to learn (R2-13).
+            // Too far ahead to hold: deliver what is held, then jump. No gap was timed: nothing to
+            // learn (R2-13).
             self.flush_held(out, f);
             (self.flows[f].next, self.flows[f].gap_n) = (seq, 0);
             self.unrecovered += 1;
@@ -505,9 +502,9 @@ impl Session {
         let fl = &mut self.flows[f];
         if after(fl.next, seq) {
             // Its gap was skipped; Moonlight discards stale frames itself. One of the last gap
-            // given up shows how long that gap needed (notes/core.md 27). A seq passed by small
-            // packets or a jump shows nothing, nor does one later than REORDER_RESCUE, the longest
-            // any gap waits: a stall's leftover that no timer could have kept in order (R2-13).
+            // given up shows how long that gap needed. A seq passed by small packets or a jump
+            // shows nothing, nor does one later than REORDER_RESCUE, the longest any gap waits: a
+            // stall's leftover that no timer could have kept in order (R2-13).
             let needed = now.saturating_sub(fl.gap_at);
             if seq.wrapping_sub(fl.gap_seq) < fl.gap_n && needed <= REORDER_RESCUE {
                 fl.fill = fl.fill.max(needed).min(FILL_MAX);
@@ -533,12 +530,12 @@ impl Session {
     }
 
     /// Moves flow slot `f` past `seq`, which a small packet brought: the datagrams held up to it
-    /// are delivered first, in order, each gap behind one of them given up as `release` gives a
-    /// gap up. Delivered alone, the small packet would leave them to come later, behind it and
-    /// several in one call when one gap is given up, which §17.2's order invariant forbids (Go
-    /// did; notes/rust.md, harden: integration, group C). A missing run just before `seq` is no
-    /// gap given up: nothing but the small packet waited behind it, and the flow passes it as when
-    /// nothing is held. The gaps passed here teach `fill` nothing: no timer ran out (R2-13).
+    /// are delivered first, in order, each gap behind one of them given up as `release` gives a gap
+    /// up. Delivered alone, the small packet would leave them to come later, behind it and several
+    /// in one call when one gap is given up, which netsim's order invariant forbids. A missing run
+    /// just before `seq` is no gap given up: nothing but the small packet waited behind it, and the
+    /// flow passes it as when nothing is held. The gaps passed here teach `fill` nothing: no timer
+    /// ran out (R2-13).
     fn pass(&mut self, out: &mut dyn Out, f: usize, seq: u32) {
         let mut gap = false;
         // Held seqs lie within REORDER_SLOTS past `next`, so this many steps deliver them all; the
@@ -557,7 +554,7 @@ impl Session {
     }
 
     /// Holds the datagram `rxbuf[DATA_LEN..n]`, seq `seq` of flow slot `f`, in a pool buffer
-    /// until its gap fills (§10.3); false when the pool is past REORDER_CAP or full.
+    /// until its gap fills (§15); false when the pool is past REORDER_CAP or full.
     fn hold(&mut self, f: usize, now: Mono, seq: u32, n: usize, lane: Option<u16>) -> bool {
         // The reorder buffer, made on the first gap (exactly REORDER_SLOTS) and kept until the
         // flow ends.
@@ -583,9 +580,9 @@ impl Session {
         true
     }
 
-    /// Moves flow slot `f` past one seq, delivering it if held; reports a seq that was missing.
-    /// The bytes delivered (a pool buffer here, `rxbuf` in `data`) go to `out` straight: Go
-    /// appended an ActDeliver.
+    /// Moves flow slot `f` past one seq, delivering it if held; reports a seq that was missing. The
+    /// bytes delivered (a pool buffer here, `rxbuf` in `data`) go to `out` straight, not into a
+    /// list of actions.
     pub(crate) fn step(&mut self, out: &mut dyn Out, f: usize) -> bool {
         let fl = &mut self.flows[f];
         let seq = fl.next;
@@ -602,7 +599,7 @@ impl Session {
 
     /// Delivers every datagram flow slot `f` holds, in order, stepping past its gaps. Held seqs lie
     /// within REORDER_SLOTS past `next`, so this many steps deliver them all; the bound only keeps
-    /// a broken count from spinning (Go looped while f.n > 0).
+    /// a broken count from spinning.
     pub(crate) fn flush_held(&mut self, out: &mut dyn Out, f: usize) {
         for _ in 0..REORDER_SLOTS {
             if self.flows[f].n == 0 {
@@ -613,8 +610,8 @@ impl Session {
     }
 
     /// Delivers flow slot `f`'s held datagrams in order; a gap waits until it fills, until every
-    /// lane that carried the flow within REORDER_LANES has passed it, or until its timer runs
-    /// out (§10.3).
+    /// lane that carried the flow within REORDER_LANES has passed it, or until its timer runs out
+    /// (§15).
     pub(crate) fn release(&mut self, out: &mut dyn Out, now: Mono, f: usize) {
         while self.flows[f].n > 0 {
             let fl = &self.flows[f];
