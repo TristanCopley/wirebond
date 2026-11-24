@@ -175,7 +175,7 @@ fn random_script(seed: u64, i: u64) -> Vec<u8> {
 fn fuzz_scenario() {
     let any = repro("fuzz", "fuzz_scenario", 1);
     let mut scripts: Vec<(String, Vec<u8>, String)> =
-        CORPUS.iter().enumerate().map(|(i, s)| (format!("Go corpus entry {i}"), s.to_vec(), any.clone())).collect();
+        CORPUS.iter().enumerate().map(|(i, s)| (format!("corpus entry {i}"), s.to_vec(), any.clone())).collect();
     let files = committed().unwrap_or_else(|e| panic!("testdata/fuzz: {e}"));
     scripts.extend(files.into_iter().map(|(n, s)| (n, s, any.clone())));
     let n = per_seed();

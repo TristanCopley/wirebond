@@ -119,7 +119,7 @@ fn steady(mode: &'static str) {
             assert_eq!(
                 at(side, kind).allocs,
                 0,
-                "{mode}: the {side:?}'s {kind} events allocated in steady state (§4.2):{report}"
+                "{mode}: the {side:?}'s {kind} events allocated in steady state:{report}"
             );
         }
     }

@@ -113,7 +113,7 @@ fn probe_codec() {
     let p = Probe { lane: 0x0102, seq: 7, sent_at: -5, flags: 1, n: 3 };
     let mut b = vec![0xee; MAX_PACKET];
     let n = p.encode(&echoes, &mut b);
-    assert_eq!(n, 175, "three-echo probe is {n} bytes, want 175 (§8.2)");
+    assert_eq!(n, 175, "three-echo probe is {n} bytes, want 175 (§11.2)");
     assert_eq!(n, probe_len(3));
     assert_eq!(b[n], 0xee, "encode wrote past the probe");
     // Big-endian, fixed-width: the header, then each echo's fields at their offsets.

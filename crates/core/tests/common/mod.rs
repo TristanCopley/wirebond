@@ -895,7 +895,7 @@ impl<E: Engine> Pair<E> {
         for side in [Side::Client, Side::Server] {
             assert!(
                 self.node(side).key().is_some(),
-                "the {side:?} session sent no `key` control message after the peer's hello (§7.1, §7.2: a \
+                "the {side:?} session sent no `key` control message after the peer's hello (§16, §10.2: a \
                  session answers hello with its rid and send key), so nothing can flow; its control \
                  messages: {:?}",
                 self.node(side).ctls
@@ -1060,11 +1060,11 @@ impl Keyed {
         let mut rec = Recorder::default();
         let hello = Msg { t: "hello".into(), ..Msg::default() };
         c.handle(0, Event::Control(&hello), &mut c_rids, &mut rec);
-        let c_key = rec.keys().pop().expect("the client answered the server's hello with no key message (§7.2)");
+        let c_key = rec.keys().pop().expect("the client answered the server's hello with no key message (§10.2)");
         rec.calls.clear();
         let hello = Msg { t: "hello".into(), mode: wirebond_core::MODE_PERFORMANCE.into(), ..Msg::default() };
         s.handle(0, Event::Control(&hello), &mut s_rids, &mut rec);
-        let s_key = rec.keys().pop().expect("the server answered the client's hello with no key message (§7.2)");
+        let s_key = rec.keys().pop().expect("the server answered the client's hello with no key message (§10.2)");
         s.handle(0, Event::Control(&c_key), &mut s_rids, &mut rec);
         c.handle(0, Event::Control(&s_key), &mut c_rids, &mut rec);
         let mesh = MeshLane { sock: MESH_SOCK, local: C_MESH, peer: S_MESH };

@@ -206,7 +206,7 @@ fn nat_shows_the_mapping_and_hides_the_socket() {
     let infos = p.infos(Side::Client);
     assert_eq!(infos.len(), 1);
     assert_eq!((infos[0].id, &infos[0].label[..], infos[0].default), (1, "Wi-Fi", true));
-    assert_eq!(infos[0].cands, [C_WIFI, C_WIFI_NAT], "the local address, then the mapping (§6.3)");
+    assert_eq!(infos[0].cands, [C_WIFI, C_WIFI_NAT], "the local address, then the mapping (§9.3)");
     assert_eq!(p.infos(Side::Server)[0].cands, [S_ETH], "a public address has no mapping");
 
     p.c.engine.sock = 11;

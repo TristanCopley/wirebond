@@ -90,7 +90,7 @@ fn keys_are_exchanged_through_hello_and_key() {
         assert_eq!(packet_rid(&sent.data), Some(rid), "a packet from the {:?} carries the peer's rid", sent.by);
         let pt = open(&by.key().expect("checked").k, &sent.data).unwrap_or_else(|| {
             panic!(
-                "a packet from the {:?} does not open under the key it announced (§7.3): {:02x?}",
+                "a packet from the {:?} does not open under the key it announced (§10.3): {:02x?}",
                 sent.by, sent.data
             )
         });
