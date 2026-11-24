@@ -1,20 +1,15 @@
 //! What the acceptance criteria measure (Go netsim/metrics_test.go, which lived in a test file
 //! because only tests use it; the Rust integration tests need it from the library): the Recorder
-//! that samples lane roles, bulk bytes and queues; quantiles; frame, gap and lateness metrics; and
-//! A1b's input metric at the wirebond layer (notes/netsim.md 24). Owner: N3.
+//! that samples lane roles, bulk bytes and queues; quantiles; and frame, gap and lateness
+//! metrics. Owner: N3.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
-use wirebond_core::{Event, HEADER_LEN, SMALL_BIT, TYPE_DATA};
-
-use crate::apps::{Frame, MoonId, Moonlight, Sample};
-use crate::check::header;
+use crate::apps::{Frame, Moonlight, Sample};
 use crate::env::is_bulk;
-use crate::link::{DirId, LinkId};
+use crate::link::DirId;
 use crate::node::DevId;
-use crate::sim::{Dur, HOUR, HookArgs, HookKind, MS, World};
+use crate::sim::{Dur, HookKind, MS, World};
 
 /// The Recorder's period for lane roles and bulk bytes.
 pub const WINDOW: Dur = 100 * MS;
@@ -29,7 +24,7 @@ pub const LANES: usize = 9;
 const QUEUE_EVERY: Dur = 10 * MS;
 
 /// Samples what the acceptance criteria need (§17.3): per WINDOW, the bulk bytes the server sent
-/// on each lane and the lane its Snapshot calls primary or trial; every 10 ms, the queue of each
+/// on each lane and the lane its Snapshot calls primary; every 10 ms, the queue of each
 /// watched direction. Owned by the world (`world.rec`), started by [`record`].
 #[derive(Clone, Debug, Default)]
 pub struct Recorder {
@@ -37,8 +32,6 @@ pub struct Recorder {
     pub bytes: Vec<[i64; LANES]>,
     /// The server's primary per window, from Snapshot; −1: none reported.
     pub roles: Vec<i8>,
-    /// The server's trial lane per window; −1: none.
-    pub trials: Vec<i8>,
     /// Queue samples every 10 ms per watched direction (Go keyed them by *Dir).
     pub queues: BTreeMap<DirId, Vec<Dur>>,
     pub(crate) cur: [i64; LANES],
@@ -85,7 +78,7 @@ impl World {
         }
     }
 
-    /// Closes one window: its bytes, and the server's primary and trial lanes (Go window).
+    /// Closes one window: its bytes, and the server's primary lane (Go window).
     pub(crate) fn rec_window(&mut self) {
         let lanes = self[DevId::Server].snap().lanes;
         let Some(r) = self.rec.as_mut() else {
@@ -93,20 +86,14 @@ impl World {
         };
         r.bytes.push(r.cur);
         r.cur = [0; LANES];
-        let (mut prim, mut trial) = (-1, -1);
-        for l in &lanes {
-            let i = match l.id {
+        let mut prim = -1;
+        for l in lanes.iter().filter(|l| l.out.role == "primary") {
+            prim = match l.id {
                 0 => MESH_LANE,
                 id => ((id >> 8) as i8).wrapping_sub(1),
             };
-            match l.out.role.as_str() {
-                "primary" => prim = i,
-                "trial" => trial = i,
-                _ => {}
-            }
         }
         r.roles.push(prim);
-        r.trials.push(trial);
     }
 }
 
@@ -118,21 +105,6 @@ fn lane_bytes(b: &[i64; LANES], lane: i8) -> i64 {
 /// The first lane with the most bytes.
 fn first_max(b: &[i64; LANES]) -> usize {
     (1..LANES).fold(0, |best, i| if b[i] > b[best] { i } else { best })
-}
-
-/// Primary changes among windows [a, b) of p, and of those the returns to a lane with a shorter
-/// delay than the one bulk leaves (Moves' count, with the delays given).
-fn rec_moves(p: &[i8], a: usize, b: usize, delay: impl Fn(i8) -> Dur) -> (usize, usize) {
-    let (mut moves, mut returns) = (0, 0);
-    for i in a.max(1)..b {
-        if p[i - 1] >= 0 && p[i] != p[i - 1] {
-            moves += 1;
-            if delay(p[i]) < delay(p[i - 1]) {
-                returns += 1;
-            }
-        }
-    }
-    (moves, returns)
 }
 
 impl Recorder {
@@ -157,67 +129,12 @@ impl Recorder {
         out
     }
 
-    /// The fraction of windows in [from, to) in which lane carried bulk bytes (performance sends
-    /// every packet on every lane of its spread, so no lane is primary).
-    pub fn carried(&self, lane: i8, from: Dur, to: Dur) -> f64 {
-        let (a, b) = span(from, to, self.bytes.len());
-        let n = self.bytes[a..b].iter().filter(|w| lane_bytes(w, lane) > 0).count();
-        n as f64 / (b - a).max(1) as f64
-    }
-
     /// The fraction of windows in [from, to) whose primary is lane.
     pub fn share(&self, lane: i8, from: Dur, to: Dur) -> f64 {
         let p = self.primary();
         let (a, b) = span(from, to, p.len());
         let n = p[a..b].iter().filter(|&&x| x == lane).count();
         n as f64 / (b - a).max(1) as f64
-    }
-
-    /// The start of the first window at or after from whose primary is lane; None: never.
-    pub fn first_primary(&self, lane: i8, from: Dur) -> Option<Dur> {
-        let p = self.primary();
-        let a = (from / WINDOW).max(0) as usize;
-        (a..p.len()).find(|&i| p[i] == lane).map(|i| i as Dur * WINDOW)
-    }
-
-    /// Primary changes in [from, to), and of those the returns to a lane whose link has a shorter
-    /// propagation delay than the one bulk leaves (Go Moves; w gives the client links' delays).
-    pub fn moves(&self, w: &World, from: Dur, to: Dur) -> (usize, usize) {
-        let p = self.primary();
-        let (a, b) = span(from, to, p.len());
-        rec_moves(&p, a, b, |lane| self.delay(w, lane))
-    }
-
-    /// A lane's down propagation delay; an hour for an unknown lane (Go delay).
-    pub(crate) fn delay(&self, w: &World, lane: i8) -> Dur {
-        let link = if lane == MESH_LANE {
-            w.default_link(DevId::Client)
-        } else {
-            let ls = &w[DevId::Client].links;
-            usize::try_from(lane).ok().and_then(|i| ls.get(i)).copied()
-        };
-        link.map_or(HOUR, |l| w[l].down.p.delay)
-    }
-
-    /// The runs of windows in [from, to) in which lane carried bulk while it was not primary:
-    /// trials, reported by Snapshot or seen as at least 20% of the primary's bulk bytes; the
-    /// window in which bulk moved off lane is not one (Go TrialRuns, notes/netsim.md 23).
-    pub fn trial_runs(&self, lane: i8, from: Dur, to: Dur) -> usize {
-        let p = self.primary();
-        let (a, b) = span(from, to, p.len());
-        let (mut runs, mut inside) = (0, false);
-        for i in a..b {
-            let mut on = self.trials[i] == lane;
-            if self.trials[i] < 0 && p[i] >= 0 && p[i] != lane && (i == 0 || p[i - 1] != lane) {
-                let x = lane_bytes(&self.bytes[i], lane);
-                on = x > 0 && x >= lane_bytes(&self.bytes[i], p[i]) / 5;
-            }
-            if on && !inside {
-                runs += 1;
-            }
-            inside = on;
-        }
-        runs
     }
 
     /// The 95th percentile over time of d's queue in [from, to) (Go QueueP95).
@@ -237,9 +154,6 @@ pub fn span(from: Dur, to: Dur, n: usize) -> (usize, usize) {
     (at(from).min(b), b)
 }
 
-/// Evaluates A1b's input metric over [from, to) after the run ([`input_copies`]).
-pub type InputEval = Box<dyn Fn(&World, Dur, Dur) -> Vec<Dur>>;
-
 /// The p-th quantile of xs (nearest rank); `Dur::MAX` (+Inf) when xs is empty (Go Pct).
 pub fn pct(xs: &[Dur], p: f64) -> Dur {
     if xs.is_empty() {
@@ -248,154 +162,6 @@ pub fn pct(xs: &[Dur], p: f64) -> Dur {
     let mut s = xs.to_vec();
     let k = ((p * s.len() as f64).ceil() as usize).saturating_sub(1);
     *s.select_nth_unstable(k.min(xs.len() - 1)).1
-}
-
-/// A1b's input metric at the wirebond layer (notes/netsim.md 24): for each input datagram, each
-/// ENet try, the time from its send to wirebond delivering its first copy, beyond the lowest
-/// ground-truth OWD at that send among the client links, leaving out each link on which the link
-/// model lost the copy wirebond sent. A datagram wirebond never sent, or never delivered while a
-/// copy reached the server, is `Dur::MAX`; one whose every copy the links lost is not counted.
-/// Installs a hook now; the returned function evaluates [from, to) after the run (Go inputCopies,
-/// which took the env only to reach its world).
-pub fn input_copies(w: &mut World, m: MoonId) -> InputEval {
-    let st = Rc::new(RefCell::new(InputCopies::default()));
-    let hooked = Rc::clone(&st);
-    w.hook(move |w, a| input_hook(w, a, m, &hooked));
-    Box::new(move |w: &World, from: Dur, to: Dur| st.borrow().eval(&w[m], from, to))
-}
-
-/// What input_copies remembers of the copies of one input try (Go's rec).
-#[derive(Clone, Debug, Default, PartialEq)]
-struct InputRec {
-    sent: Dur,
-    got: Dur,
-    /// Each client link's OWD toward the server at the first copy's send.
-    owd: Vec<Dur>,
-    /// Bits of the client links that sent a copy, and of those whose copy reached the server;
-    /// the Tailscale lane counts as the default link.
-    sent_on: u16,
-    delivered: u16,
-}
-
-/// input_copies' state, shared by its hook and its evaluation: one record per sealed input try,
-/// by counter (every copy of a small packet carries the same one) and by (ENet seq, try).
-#[derive(Debug, Default)]
-struct InputCopies {
-    recs: Vec<InputRec>,
-    by_ctr: BTreeMap<u64, usize>,
-    by_try: BTreeMap<(u32, u32), usize>,
-}
-
-impl InputCopies {
-    /// The client sent a copy of input try t sealed under ctr on the link with bit; owd is used
-    /// for its first copy.
-    fn sent(&mut self, ctr: u64, t: (u32, u32), now: Dur, owd: Vec<Dur>, bit: u16) {
-        let i = match self.by_ctr.get(&ctr) {
-            Some(&i) => i,
-            None => {
-                let i = self.recs.len();
-                self.recs.push(InputRec { sent: now, owd, ..InputRec::default() });
-                self.by_ctr.insert(ctr, i);
-                self.by_try.insert(t, i);
-                i
-            }
-        };
-        self.recs[i].sent_on |= bit;
-    }
-
-    /// The link model delivered to the server a packet sealed under ctr, sent on the link with bit.
-    fn received(&mut self, ctr: u64, bit: u16) {
-        if let Some(&i) = self.by_ctr.get(&ctr) {
-            self.recs[i].delivered |= bit;
-        }
-    }
-
-    /// wirebond delivered input try t at the server.
-    fn delivered(&mut self, t: (u32, u32), now: Dur) {
-        if let Some(&i) = self.by_try.get(&t)
-            && self.recs[i].got == 0
-        {
-            self.recs[i].got = now;
-        }
-    }
-
-    /// The metric over the inputs of m sent in [from, to).
-    fn eval(&self, m: &Moonlight, from: Dur, to: Dur) -> Vec<Dur> {
-        let mut xs = Vec::new();
-        for (i, input) in m.inputs.iter().enumerate() {
-            if input.sent < from || input.sent >= to {
-                continue;
-            }
-            for t in 1..=m.enet[i].tries {
-                match self.by_try.get(&(i as u32, t)).map(|&r| &self.recs[r]) {
-                    None => xs.push(Dur::MAX),
-                    Some(r) if r.got == 0 && r.delivered != 0 => xs.push(Dur::MAX),
-                    Some(r) if r.got > 0 => {
-                        let lost = r.sent_on & !r.delivered;
-                        let kept = |j: usize| lost.checked_shr(j as u32).unwrap_or(0) & 1 == 0;
-                        let owd = r.owd.iter().enumerate().filter(|&(j, _)| kept(j));
-                        let reference = owd.map(|(_, &o)| o).min().unwrap_or(Dur::MAX);
-                        xs.push(r.got - r.sent - reference);
-                    }
-                    Some(_) => {} // every copy lost by the links: theirs, not counted
-                }
-            }
-        }
-        xs
-    }
-}
-
-/// input_copies' hook: the client's input copies (S), what reached the server (R) and what
-/// wirebond delivered there (D). It holds no borrow of the state across a call into the world.
-fn input_hook(w: &mut World, a: &HookArgs<'_>, m: MoonId, st: &RefCell<InputCopies>) {
-    match a.kind {
-        HookKind::Sent if a.dev == DevId::Client => {
-            let Some(app) = a.event.and_then(|e| match e {
-                Event::Send { packet } => crate::sim::outer(packet).map(|i| i.data),
-                _ => None,
-            }) else {
-                return;
-            };
-            if a.data.len() < HEADER_LEN || a.data[0] != TYPE_DATA | SMALL_BIT {
-                return;
-            }
-            let Some((_, s, h)) = w.registry().find(app) else {
-                return;
-            };
-            if s != w[m].input {
-                return;
-            }
-            let (_, ctr) = header(a.data);
-            let known = st.borrow().by_ctr.contains_key(&ctr);
-            let owd = if known { Vec::new() } else { w.owds(true) };
-            let bit = input_bit(w, a.link);
-            st.borrow_mut().sent(ctr, (h.seq, h.aux), w.now, owd, bit);
-        }
-        HookKind::Received if a.dev == DevId::Server && a.data.len() >= HEADER_LEN => {
-            let (_, ctr) = header(a.data);
-            let known = st.borrow().by_ctr.contains_key(&ctr);
-            if known {
-                let bit = input_bit(w, a.link);
-                st.borrow_mut().received(ctr, bit);
-            }
-        }
-        HookKind::Delivered if a.dev == DevId::Server => {
-            if let Some((_, s, h)) = w.registry().find(a.data)
-                && s == w[m].input
-            {
-                st.borrow_mut().delivered((h.seq, h.aux), w.now);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The bit of client link l in input_copies' masks; the Tailscale lane (None) counts as the
-/// default link.
-fn input_bit(w: &World, l: Option<LinkId>) -> u16 {
-    let l = l.or_else(|| w.default_link(DevId::Client));
-    let shift = l.and_then(|l| u32::from(w[l].id).checked_sub(1));
-    shift.and_then(|s| 1u16.checked_shl(s)).unwrap_or(0)
 }
 
 impl Moonlight {
@@ -425,12 +191,6 @@ impl Moonlight {
         }
         gap.max(to - prev)
     }
-
-    /// The longest gap between two video datagrams delivered in [from, to) (Go BulkGap).
-    pub fn bulk_gap(&self, from: Dur, to: Dur) -> Dur {
-        let gaps = self.video_gaps.iter().filter(|x| x[0] >= from && x[0] - x[1] < to);
-        gaps.fold(0, |g, x| g.max(x[1]))
-    }
 }
 
 /// For each sample sent in [from, to): its delay beyond the reference, the lowest client link's
@@ -453,12 +213,12 @@ pub fn late(ss: &[Sample], r: Option<usize>, from: Dur, to: Dur) -> Vec<Dur> {
 
 #[cfg(test)]
 mod tests {
-    use wirebond_core::{LaneOut, LaneStatus, Role};
+    use wirebond_core::{LaneOut, LaneStatus, Role, SMALL_BIT, TYPE_DATA};
 
     use super::*;
-    use crate::apps::EnetState;
     use crate::fake::{Evil, Fake, fake_maker};
-    use crate::sim::{Rng, SEC, key_reader};
+    use crate::link::LinkId;
+    use crate::sim::{HookArgs, Rng, SEC, key_reader};
 
     fn world() -> World {
         World::new(1, fake_maker(false, Evil::None))
@@ -513,7 +273,6 @@ mod tests {
             ],
             lost_at: vec![SEC + 20 * MS, 2 * SEC, 3 * SEC],
             shown: vec![1_100 * MS, 1_150 * MS, 1_400 * MS, 3 * SEC],
-            video_gaps: vec![[1_050 * MS, 30 * MS], [2_010 * MS, 200 * MS], [5 * SEC, 25 * MS]],
             ..Moonlight::default()
         };
         assert_eq!(m.unrecovered(SEC, 2 * SEC), 1);
@@ -524,22 +283,17 @@ mod tests {
         assert_eq!(m.max_gap(SEC, 1_500 * MS), 250 * MS);
         assert_eq!(m.max_gap(SEC, 2 * SEC), 600 * MS);
         assert_eq!(m.max_gap(5 * SEC, 6 * SEC), SEC);
-        // A gap counts if it ends at or after from and starts before to.
-        assert_eq!(m.bulk_gap(SEC, 2 * SEC), 200 * MS);
-        assert_eq!(m.bulk_gap(2_020 * MS, 10 * SEC), 25 * MS);
-        assert_eq!(m.bulk_gap(6 * SEC, 7 * SEC), 0);
     }
 
     /// A Recorder from windows of bulk bytes on lanes 0, 1 and the Tailscale lane, with the
-    /// primary and trial lanes the server reported.
-    fn rec(windows: &[([i64; 3], i8, i8)]) -> Recorder {
+    /// primary the server reported.
+    fn rec(windows: &[([i64; 3], i8)]) -> Recorder {
         let mut r = Recorder::default();
-        for &([a, b, mesh], role, trial) in windows {
+        for &([a, b, mesh], role) in windows {
             let mut x = [0; LANES];
             (x[0], x[1], x[MESH_LANE as usize]) = (a, b, mesh);
             r.bytes.push(x);
             r.roles.push(role);
-            r.trials.push(trial);
         }
         r
     }
@@ -547,69 +301,20 @@ mod tests {
     #[test]
     fn primary_follows_the_report_else_the_bytes() {
         let r = rec(&[
-            ([0, 0, 0], -1, -1),    // no bulk yet
-            ([0, 0, 100], -1, -1),  // the Tailscale lane
-            ([90, 0, 100], -1, -1), // still the most
-            ([100, 0, 85], -1, -1), // at least 80% of the most: stays
-            ([100, 0, 79], -1, -1), // below: moves
-            ([0, 0, 0], -1, -1),    // nothing: stays
-            ([0, 0, 0], 1, -1),     // reported
-            ([500, 0, 0], -1, -1),  // the reported lane carried nothing
-            ([50, 50, 0], -1, -1),  // a tie with the previous: stays
+            ([0, 0, 0], -1),    // no bulk yet
+            ([0, 0, 100], -1),  // the Tailscale lane
+            ([90, 0, 100], -1), // still the most
+            ([100, 0, 85], -1), // at least 80% of the most: stays
+            ([100, 0, 79], -1), // below: moves
+            ([0, 0, 0], -1),    // nothing: stays
+            ([0, 0, 0], 1),     // reported
+            ([500, 0, 0], -1),  // the reported lane carried nothing
+            ([50, 50, 0], -1),  // a tie with the previous: stays
         ]);
         assert_eq!(r.primary(), [-1, 8, 8, 8, 0, 0, 1, 0, 0]);
         assert_eq!(r.share(8, 100 * MS, 600 * MS), 0.6);
         assert_eq!(r.share(0, 0, SEC), 4.0 / 9.0);
         assert_eq!(r.share(0, 5 * SEC, 6 * SEC), 0.0);
-        assert_eq!(r.first_primary(0, 0), Some(400 * MS));
-        assert_eq!(r.first_primary(0, 600 * MS), Some(700 * MS));
-        assert_eq!(r.first_primary(1, 0), Some(600 * MS));
-        assert_eq!(r.first_primary(8, -SEC), Some(100 * MS));
-        assert_eq!(r.first_primary(8, 450 * MS), None);
-        assert_eq!(r.first_primary(5, 0), None);
-    }
-
-    #[test]
-    fn moves_count_returns_to_shorter_delays() {
-        let p = [-1, 8, 8, 0, 0, 8, 1, 1, 0];
-        let delay = |lane| match lane {
-            0 => 30 * MS,
-            1 => 35 * MS,
-            _ => 31 * MS,
-        };
-        assert_eq!(rec_moves(&p, 0, 9, delay), (4, 2));
-        assert_eq!(rec_moves(&p, 4, 9, delay), (3, 1));
-        assert_eq!(rec_moves(&p, 0, 3, delay), (0, 0));
-        // Through a world: lanes it has no link for are an hour away, so no move returns.
-        let r = rec(&[([0; 3], 0, -1), ([0; 3], 1, -1), ([0; 3], 0, -1)]);
-        assert_eq!(r.moves(&world(), 0, SEC), (2, 0));
-        assert_eq!(r.delay(&world(), 3), HOUR);
-        assert_eq!(r.delay(&world(), -1), HOUR);
-    }
-
-    #[test]
-    fn trial_runs_count_reported_and_seen_trials() {
-        let r = rec(&[
-            ([100, 0, 0], 0, -1),   // 0
-            ([100, 0, 0], 0, -1),   // 1
-            ([100, 30, 0], 0, 1),   // 2: a reported trial of lane 1
-            ([100, 30, 0], 0, 1),   // 3: the same run
-            ([100, 0, 0], 0, -1),   // 4
-            ([100, 20, 0], -1, -1), // 5: seen, 20% of the primary's bytes
-            ([100, 0, 0], -1, -1),  // 6
-            ([100, 50, 0], -1, -1), // 7: seen
-            ([100, 50, 0], -1, -1), // 8: the same run
-            ([100, 19, 0], -1, -1), // 9: too little
-            ([100, 0, 0], 0, -1),   // 10
-            ([0, 100, 0], 1, -1),   // 11: lane 1 primary
-            ([0, 100, 0], 1, -1),   // 12
-            ([100, 60, 0], 0, -1),  // 13: bulk moved off lane 1 here: not a trial
-            ([100, 60, 0], 0, -1),  // 14: now it is
-        ]);
-        assert_eq!(r.trial_runs(1, 0, 2 * SEC), 4);
-        assert_eq!(r.trial_runs(1, 300 * MS, 600 * MS), 2);
-        assert_eq!(r.trial_runs(0, 0, 2 * SEC), 0);
-        assert_eq!(r.trial_runs(1, 3 * SEC, 4 * SEC), 0);
     }
 
     #[test]
@@ -655,7 +360,7 @@ mod tests {
             b
         };
         assert_eq!(r.bytes, [mesh(1500), mesh(100)]);
-        assert_eq!((r.roles.as_slice(), r.trials.as_slice()), (&[-1, 1][..], &[-1, 8][..]));
+        assert_eq!(r.roles, [-1, 1]);
         assert_eq!(r.cur, [0; LANES]);
     }
 
@@ -671,48 +376,5 @@ mod tests {
         assert_eq!(r.dirs, [a, b]);
         assert_eq!((r.queues[&a].as_slice(), r.queues[&b].as_slice()), (&[0; 5][..], &[0; 5][..]));
         assert_eq!(w.q.len(), 2, "the window timer and one queue sampler");
-    }
-
-    #[test]
-    fn input_copies_count_the_first_copy_beyond_the_links_that_delivered() {
-        let mut m = Moonlight::default();
-        let input = |sent| Sample { sent, ..Sample::default() };
-        m.inputs = [10, 20, 30, 40, 50, 1000].map(|t| input(t * MS)).to_vec();
-        let tries = [1, 1, 2, 1, 1, 1];
-        let enet = |tries| EnetState { tries, ..EnetState::default() };
-        m.enet = tries.map(enet).to_vec();
-        let mut st = InputCopies::default();
-        let (hotel, cell) = (1, 2);
-        let owd = || vec![30 * MS, 40 * MS];
-        // 0: both copies reach the server; the first delivery counts, 2 ms beyond the hotel's.
-        st.sent(100, (0, 1), 10 * MS, owd(), hotel);
-        st.sent(100, (0, 1), 10 * MS, Vec::new(), cell);
-        st.received(100, hotel);
-        st.received(100, cell);
-        st.delivered((0, 1), 42 * MS);
-        st.delivered((0, 1), 50 * MS);
-        // 1: the link lost the hotel's copy: measured against the cell, 1 ms beyond.
-        st.sent(101, (1, 1), 20 * MS, owd(), hotel);
-        st.sent(101, (1, 1), 20 * MS, Vec::new(), cell);
-        st.received(101, cell);
-        st.delivered((1, 1), 61 * MS);
-        // 2: try 1 reached the server and was never delivered; wirebond never sent try 2.
-        st.sent(102, (2, 1), 30 * MS, owd(), hotel);
-        st.received(102, hotel);
-        // 3: the links lost every copy: not counted.
-        st.sent(103, (3, 1), 40 * MS, owd(), hotel | cell);
-        // 4: on time over the Tailscale lane (the hotel's bit).
-        st.sent(104, (4, 1), 50 * MS, vec![35 * MS, 40 * MS], hotel);
-        st.received(104, hotel);
-        st.delivered((4, 1), 85 * MS);
-        // Packets it never saw sent change nothing.
-        st.received(999, cell);
-        st.delivered((9, 9), 90 * MS);
-        assert_eq!(st.recs.len(), 5);
-        let all = [2 * MS, MS, Dur::MAX, Dur::MAX, 0];
-        assert_eq!(st.eval(&m, 0, SEC), all);
-        assert_eq!(st.eval(&m, 20 * MS, 31 * MS), all[1..4]);
-        assert_eq!(st.eval(&m, SEC, 2 * SEC), [Dur::MAX]);
-        assert_eq!(st.recs[0].sent_on, hotel | cell);
     }
 }

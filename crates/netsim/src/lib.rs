@@ -8,7 +8,7 @@
 //! The crate is one [`World`] that owns everything: two [`Device`]s (the node stand-in), every
 //! [`Link`] and its two [`Dir`]ections, the event queue, the datagram registry, the checker, the
 //! adversary and the traffic models. Everything else names a part of it by a small `Copy` id
-//! ([`DevId`], [`LinkId`], [`DirId`], [`StreamId`], [`MoonId`], [`FloodId`], [`BulkId`]) and
+//! ([`DevId`], [`LinkId`], [`DirId`], [`StreamId`], [`MoonId`], [`BulkId`]) and
 //! reads it through `world[id]`. Scheduled events are closures that receive `&mut World`.
 
 #![forbid(unsafe_code)]
@@ -25,8 +25,8 @@ pub mod sim;
 pub mod trace;
 
 pub use apps::{
-    AUDIO_SIZE, Bulk, BulkId, Echo, EchoId, Flood, FloodId, Frame, Hdr, INPUT_SIZE, MoonId, Moonlight, PING_EVERY,
-    PING_SIZE, PING_TIMEOUT, PORT_AUDIO, PORT_CONTROL, PORT_VIDEO, Sample, Stream, StreamId, VIDEO_SIZE,
+    AUDIO_SIZE, Bulk, BulkId, Echo, EchoId, Frame, Hdr, INPUT_SIZE, MoonId, Moonlight, PING_EVERY, PING_SIZE,
+    PING_TIMEOUT, PORT_AUDIO, PORT_CONTROL, PORT_VIDEO, Sample, Stream, StreamId, VIDEO_SIZE,
 };
 pub use check::{ADV_KINDS, Adv, Adversary};
 pub use env::{Check, Env, Eval, Opts};

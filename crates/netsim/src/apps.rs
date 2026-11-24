@@ -336,8 +336,6 @@ pub struct Moonlight {
     /// By ENet seq; `got` is when it was applied in order.
     pub inputs: Vec<Sample>,
     pub audios: Vec<Sample>,
-    /// (end, length) of gaps over 20 ms between video datagrams.
-    pub video_gaps: Vec<[Dur; 2]>,
     pub(crate) vflow: FlowId,
     pub(crate) aflow: FlowId,
     pub(crate) cflow: FlowId,
@@ -347,8 +345,6 @@ pub struct Moonlight {
     /// The frame being assembled.
     pub(crate) cur: u32,
     pub(crate) freeze: Dur,
-    /// The last video datagram; −1: none.
-    pub(crate) last_v: Dur,
     pub(crate) enet: Vec<EnetState>,
     pub(crate) rtt: Dur,
     pub(crate) rtt_var: Dur,
@@ -363,34 +359,6 @@ pub(crate) struct EnetState {
     pub(crate) tries: u32,
     pub(crate) acked: bool,
     pub(crate) arrived: bool,
-}
-
-/// A saturating sender: index into the world's (Go *Flood).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FloodId(pub usize);
-
-/// A saturating UDP sender from the server toward the client at bps, on a flow the client opens
-/// by pinging the port (Go Flood).
-#[derive(Clone, Debug, Default)]
-pub struct Flood {
-    pub bps: f64,
-    pub s: StreamId,
-    /// Bytes delivered per 100 ms.
-    pub got: Vec<i64>,
-    pub(crate) flow: FlowId,
-}
-
-/// Flood's goodput buckets.
-const FLOOD_BUCKET: Dur = 100 * MS;
-
-impl Flood {
-    /// The delivered rate in bits per second over [from, to) (Go Goodput).
-    pub fn goodput(&self, from: Dur, to: Dur) -> f64 {
-        let a = (from / FLOOD_BUCKET).max(0) as usize;
-        let b = ((to / FLOOD_BUCKET).max(0) as usize).min(self.got.len());
-        let bytes: i64 = self.got.get(a..b).map_or(0, |g| g.iter().sum());
-        bytes as f64 * 8.0 / secs(to - from)
-    }
 }
 
 /// A TCP-like sender: index into the world's (Go *Bulk).
@@ -488,7 +456,6 @@ impl Echo {
 #[derive(Default)]
 pub struct Apps {
     pub(crate) moon: Vec<Moonlight>,
-    pub(crate) floods: Vec<Flood>,
     pub(crate) bulks: Vec<Bulk>,
     pub(crate) echoes: Vec<Echo>,
 }
@@ -506,7 +473,7 @@ impl World {
         while data + (0.2 * data as f64).ceil() as usize > total {
             data -= 1;
         }
-        self.apps.moon.push(Moonlight { bps, fps, data, total, last_v: -1, ..Moonlight::default() });
+        self.apps.moon.push(Moonlight { bps, fps, data, total, ..Moonlight::default() });
         let video = on_recv(move |w, _, _, h, _| w.moon_video(m, h));
         let video = self.stream("video", PORT_VIDEO, true, video);
         let audio = on_recv(move |w, _, _, h, _| w[m].audios[h.seq as usize].got = w.now);
@@ -625,10 +592,6 @@ impl World {
     pub(crate) fn moon_video(&mut self, m: MoonId, h: Hdr) {
         let now = self.now;
         let mo = &mut self[m];
-        if mo.last_v >= 0 && now - mo.last_v > 20 * MS {
-            mo.video_gaps.push([now, now - mo.last_v]);
-        }
-        mo.last_v = now;
         let f = h.aux >> 8;
         if f < mo.cur {
             return;
@@ -739,41 +702,6 @@ impl World {
             mo.rtt_var += (d.abs() - mo.rtt_var) / 4;
             mo.rtt += (s - mo.rtt) / 8;
         }
-    }
-
-    /// Starts a saturating sender toward the client on port at bps from start until stop (Go Flood).
-    pub fn flood(&mut self, port: u16, bps: f64, start: Dur, stop: Dur) -> FloodId {
-        let fl = FloodId(self.apps.floods.len());
-        self.apps.floods.push(Flood { bps, ..Flood::default() });
-        let got = on_recv(move |w, _, _, _, b| {
-            let i = (w.now / FLOOD_BUCKET) as usize;
-            let got = &mut w[fl].got;
-            if got.len() <= i {
-                got.resize(i + 1, 0);
-            }
-            got[i] += b.len() as i64;
-        });
-        let s = self.stream("flood", port, true, got);
-        self[fl].s = s;
-        let ping = on_recv(move |w, _, f, _, _| w[fl].flow = f);
-        let ping = self.stream("flood-ping", port, false, ping);
-        self.every(start, PING_EVERY, move |w| {
-            let b = w.datagram(ping, 0, 0, PING_SIZE, w.now);
-            w.send_from(DevId::Client, port, 50010, b);
-            w.now < stop
-        });
-        let size = VIDEO_SIZE - 16;
-        let mut seq = 0;
-        self.every(start, (size as f64 * 8.0 / bps * 1e9) as Dur, move |w| {
-            let flow = w[fl].flow;
-            if flow != NO_FLOW {
-                seq += 1;
-                let b = w.datagram(s, seq, 0, size, w.now);
-                w.send_on(DevId::Server, flow, b);
-            }
-            w.now < stop
-        });
-        fl
     }
 
     /// Starts a bulk TCP sender toward the client on port from start until stop ([`Bulk`]).
@@ -929,19 +857,6 @@ impl Index<MoonId> for World {
 impl IndexMut<MoonId> for World {
     fn index_mut(&mut self, m: MoonId) -> &mut Moonlight {
         &mut self.apps.moon[m.0]
-    }
-}
-
-impl Index<FloodId> for World {
-    type Output = Flood;
-    fn index(&self, f: FloodId) -> &Flood {
-        &self.apps.floods[f.0]
-    }
-}
-
-impl IndexMut<FloodId> for World {
-    fn index_mut(&mut self, f: FloodId) -> &mut Flood {
-        &mut self.apps.floods[f.0]
     }
 }
 
@@ -1226,7 +1141,7 @@ mod tests {
         let ids = [mo.video, mo.audio, mo.input, mo.acks];
         assert_eq!(ids, [0, 1, 2, 3].map(StreamId));
         assert_eq!(mo.pings, [4, 5, 6].map(StreamId));
-        assert_eq!((mo.last_v, mo.moving, mo.vflow), (-1, false, NO_FLOW));
+        assert_eq!((mo.moving, mo.vflow), (false, NO_FLOW));
         // Three pings, frames, audio, the mouse and the input sender.
         assert_eq!(w.q.len(), 7);
     }
@@ -1252,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn video_assembles_frames_and_records_gaps() {
+    fn video_assembles_frames() {
         let mut w = world();
         paired(&mut w);
         let m = w.moonlight(30e6, 120.0, SEC, 2 * SEC);
@@ -1282,13 +1197,11 @@ mod tests {
             shard(&mut w, 1, i, at(t1, i));
         }
         let mo = &w[m];
-        assert_eq!(mo.video_gaps, [[t1, 25 * MS]]);
         assert_eq!((mo.cur, mo.frames[1].done, mo.shown.len()), (1, at(t1, data - 1), 1));
         assert!(mo.lost_at.is_empty() && !mo.frames[0].lost);
         // A packet of a frame already passed is rejected.
         shard(&mut w, 0, 0, t1 + 500 * MS);
         assert_eq!(u32::from(w[m].frames[0].got), data);
-        assert_eq!(w[m].last_v, t1 + 500 * MS);
         // Settle passes the decoded frames sent over a second ago and keeps the recent one.
         w.now = 2_200 * MS;
         w.settle(m);
@@ -1320,29 +1233,6 @@ mod tests {
         assert_eq!(ack(1, 90 * MS), (41_250_000, 13_750_000));
         assert_eq!(ack(2, 300 * MS), (41_250_000, 13_750_000));
         assert!(w[m].enet.iter().all(|e| e.acked));
-    }
-
-    #[test]
-    fn flood_counts_goodput_per_100_ms() {
-        let mut w = world();
-        paired(&mut w);
-        let fl = w.flood(9000, 1e8, SEC, 2 * SEC);
-        assert_eq!(w.q.len(), 2, "the pinger and the sender");
-        let (s, f) = (w[fl].s, FlowId::new(9000, 1));
-        assert_eq!((w[s].name, w[s].bulk, w[s].port), ("flood", true, 9000));
-        let ping = w.datagram(StreamId(s.0 + 1), 0, 0, PING_SIZE, 0);
-        carry(&mut w, DevId::Client, f, &ping, 0);
-        assert_eq!(w[fl].flow, f);
-        for (seq, at) in [(1, 50), (2, 150), (3, 160), (4, 450)] {
-            let b = w.datagram(s, seq, 0, 1392, 0);
-            carry(&mut w, DevId::Server, f, &b, at * MS);
-        }
-        assert_eq!(w[fl].got, [1392, 2784, 0, 0, 1392]);
-        let goodput = |bytes: f64, secs: f64| bytes * 8.0 / secs;
-        assert_eq!(w[fl].goodput(0, 200 * MS), goodput(4176.0, 0.2));
-        assert_eq!(w[fl].goodput(100 * MS, SEC), goodput(4176.0, 0.9));
-        assert_eq!(w[fl].goodput(SEC, 2 * SEC), 0.0);
-        assert_eq!(w.failed(), None);
     }
 
     #[test]

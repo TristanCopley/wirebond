@@ -108,7 +108,7 @@ pub const UDP: u8 = 17;
 /// | 47998 | Moonlight video | UDP over IPv4 | the anchor, 10.77.0.1 |
 /// | 47999 | Moonlight control and input | UDP over IPv6 | the anchor, fd77:b0d::1 |
 /// | 48000 | Moonlight audio | UDP over IPv6 | the anchor, fd77:b0d::1 |
-/// | 9000–9099 | saturating UDP ([`World::flood`]) | UDP over IPv6 | the internet server |
+/// | 9000–9099 | UDP loads and tests | UDP over IPv6 | the internet server |
 /// | 9100–9199 | TCP-like bulk ([`World::bulk`]) | TCP over IPv4 | the internet server |
 /// | 9200–9299 | TCP-like bulk | TCP over IPv6 | the internet server |
 /// | any other | echo loads and tests | UDP over IPv4 | the anchor |
@@ -670,7 +670,7 @@ pub struct World {
     pub mesh_link: Option<LinkId>,
     /// The on-path adversary, if a scenario made one (Go Adv).
     pub adv: Option<Adversary>,
-    /// The traffic models' state: index with [`crate::MoonId`], [`crate::FloodId`], [`crate::BulkId`].
+    /// The traffic models' state: index with [`crate::MoonId`], [`crate::BulkId`].
     pub apps: Apps,
     /// The acceptance criteria's sampler, once [`crate::metrics::record`] started it.
     pub rec: Option<Recorder>,
