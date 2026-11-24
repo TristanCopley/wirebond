@@ -6,32 +6,35 @@
 //! None of this has run on real hardware yet, only in CI (NOTES.md).
 
 use std::ffi::{OsStr, c_void};
-use std::fs::OpenOptions;
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::windows::io::{AsRawHandle, AsRawSocket};
 use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, PoisonError};
-use std::{env, slice, thread, time::Duration};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::{env, mem, slice, thread, time::Duration};
 
+use sha2::{Digest, Sha256};
 use socket2::{SockRef, Socket};
 use windows_sys::Win32::Media::{TIMERR_NOERROR, timeBeginPeriod, timeEndPeriod};
-use windows_sys::Win32::NetworkManagement::{IpHelper::*, Ndis::IfOperStatusUp};
+use windows_sys::Win32::NetworkManagement::{IpHelper::*, Ndis::IfOperStatusUp, Ndis::NET_LUID_LH};
 use windows_sys::Win32::Security::{Authorization::*, *};
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, RegGetValueW, RegSetKeyValueW};
 use windows_sys::Win32::System::Registry::{RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
-use windows_sys::Win32::System::{Services::*, SystemInformation::*, Threading::CREATE_NO_WINDOW};
+use windows_sys::Win32::System::{Services::*, SystemInformation::*, Threading::*};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
 use windows_sys::Win32::{Foundation::*, Networking::WinSock::*, Storage::FileSystem::*};
-use windows_sys::core::{BOOL, PWSTR};
+use windows_sys::core::{BOOL, GUID, PWSTR};
 
+use super::net::{Capture, Egress, EgressOn, Routes, Share, TunConfig};
 use super::{Iface, Scope};
 use wirebond_core::SOCK_BUF;
 
@@ -381,8 +384,8 @@ pub fn register(_: Scope, exe: &Path, _restart: bool) -> io::Result<bool> {
     // After the rule, whose absence alone decides whether to add it.
     changed |= exe.parent().is_some_and(|d| machine_path(d, true).unwrap_or(false));
     // wintun.dll beside the executable (SPEC 2.0 §5.3), from the copy embedded in it.
-    if v2::wintun_embedded() {
-        changed |= v2::place_wintun(exe)?;
+    if wintun_embedded() {
+        changed |= place_wintun(exe)?;
     }
     let m = Sc::manager()?;
     let s = match m.service() {
@@ -520,7 +523,7 @@ fn later(line: &str) -> io::Result<()> {
 }
 
 /// Deletes the download, which is this process's executable, once this process has exited.
-pub fn drop(download: &Path) {
+pub fn discard(download: &Path) {
     let _ = later(&format!(r#"del /f /q "{}""#, download.display()));
 }
 
@@ -682,677 +685,642 @@ mod tests;
 // The 2.0 platform API (SPEC 2.0 §5–§8; host/net.rs has the types and the contract). Owner: host
 // macos and windows.
 
-pub use v2::*;
+/// The adapter's name, tunnel type and fixed GUID: Windows keeps one network profile for it.
+const ADAPTER: &str = "wirebond";
+const ADAPTER_GUID: GUID = GUID::from_u128(0x7849b0d0_2e0f_4a7c_9d3e_77b0d0007849);
+/// Wintun's ring: a power of two between 128 KiB and 64 MiB.
+const RING: u32 = 0x40_0000;
+/// The interface metric (§5.3, §7): below every physical link's, so its DNS server is asked first.
+const METRIC: u32 = 5;
+/// What Windows ICS gives the shared adapter (§6.2): it readdresses it to 192.168.137.1/24.
+const ICS_ADDR: (Ipv4Addr, u8) = (Ipv4Addr::new(192, 168, 137, 1), 24);
+/// Wintun 0.14.1's wintun.dll for this architecture, from the zip crates/wirebond/wintun.sum pins
+/// (build.rs; .github/scripts/wintun.sh downloads and checks it). Empty in a build without it.
+#[cfg(wintun)]
+const WINTUN_DLL: &[u8] = include_bytes!(env!("WIREBOND_WINTUN_DLL"));
+#[cfg(not(wintun))]
+const WINTUN_DLL: &[u8] = &[];
 
-mod v2 {
-    use std::ffi::c_void;
-    use std::fs::{self, OpenOptions};
-    use std::io::{self, Read};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-    use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawSocket;
-    use std::os::windows::process::CommandExt;
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-    use std::ptr::{null, null_mut};
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-    use std::{env, mem, slice};
+type Adapter = *mut c_void;
+type Session = *mut c_void;
 
-    use sha2::{Digest, Sha256};
-    use windows_sys::Win32::Foundation::*;
-    use windows_sys::Win32::NetworkManagement::IpHelper::*;
-    use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-    use windows_sys::Win32::Networking::WinSock::*;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-    use windows_sys::Win32::System::Threading::*;
-    use windows_sys::core::GUID;
+/// Wintun's entry points (wintun.h, 0.14).
+struct Wintun {
+    create: unsafe extern "system" fn(*const u16, *const u16, *const GUID) -> Adapter,
+    close: unsafe extern "system" fn(Adapter),
+    luid: unsafe extern "system" fn(Adapter, *mut NET_LUID_LH),
+    start: unsafe extern "system" fn(Adapter, u32) -> Session,
+    end: unsafe extern "system" fn(Session),
+    event: unsafe extern "system" fn(Session) -> HANDLE,
+    receive: unsafe extern "system" fn(Session, *mut u32) -> *mut u8,
+    release: unsafe extern "system" fn(Session, *const u8),
+    allocate: unsafe extern "system" fn(Session, u32) -> *mut u8,
+    send: unsafe extern "system" fn(Session, *const u8),
+}
 
-    use super::super::net::{Capture, Egress, EgressOn, Routes, Share, TunConfig};
-    use super::{CREATE_NO_WINDOW, adapters, sockaddr_ip, wide, win32};
+/// wintun.dll beside the executable, written from the embedded copy where missing or different,
+/// checked against the embedded copy's SHA-256 before it loads, loaded once a process.
+fn wintun() -> io::Result<&'static Wintun> {
+    static LIB: OnceLock<Result<Wintun, String>> = OnceLock::new();
+    let lib = LIB.get_or_init(|| load().map_err(|e| e.to_string()));
+    lib.as_ref().map_err(|e| io::Error::other(e.clone()))
+}
 
-    /// The adapter's name, tunnel type and fixed GUID: Windows keeps one network profile for it.
-    const NAME: &str = "wirebond";
-    const ADAPTER_GUID: GUID = GUID::from_u128(0x7849b0d0_2e0f_4a7c_9d3e_77b0d0007849);
-    /// Wintun's ring: a power of two between 128 KiB and 64 MiB.
-    const RING: u32 = 0x40_0000;
-    /// The interface metric (§5.3, §7): below every physical link's, so its DNS server is asked first.
-    const METRIC: u32 = 5;
-    /// What Windows ICS gives the shared adapter (§6.2): it readdresses it to 192.168.137.1/24.
-    const ICS_ADDR: (Ipv4Addr, u8) = (Ipv4Addr::new(192, 168, 137, 1), 24);
-    /// Wintun 0.14.1's wintun.dll for this architecture, from the zip crates/wirebond/wintun.sum pins
-    /// (build.rs; .github/scripts/wintun.sh downloads and checks it). Empty in a build without it.
-    #[cfg(wintun)]
-    const WINTUN_DLL: &[u8] = include_bytes!(env!("WIREBOND_WINTUN_DLL"));
-    #[cfg(not(wintun))]
-    const WINTUN_DLL: &[u8] = &[];
+/// Where wintun.dll goes: beside the running executable (§5.3).
+pub fn wintun_path() -> io::Result<PathBuf> {
+    let exe = env::current_exe()?;
+    Ok(exe.parent().unwrap_or(Path::new(".")).join("wintun.dll"))
+}
 
-    type Adapter = *mut c_void;
-    type Session = *mut c_void;
-
-    /// Wintun's entry points (wintun.h, 0.14).
-    struct Wintun {
-        create: unsafe extern "system" fn(*const u16, *const u16, *const GUID) -> Adapter,
-        close: unsafe extern "system" fn(Adapter),
-        luid: unsafe extern "system" fn(Adapter, *mut NET_LUID_LH),
-        start: unsafe extern "system" fn(Adapter, u32) -> Session,
-        end: unsafe extern "system" fn(Session),
-        event: unsafe extern "system" fn(Session) -> HANDLE,
-        receive: unsafe extern "system" fn(Session, *mut u32) -> *mut u8,
-        release: unsafe extern "system" fn(Session, *const u8),
-        allocate: unsafe extern "system" fn(Session, u32) -> *mut u8,
-        send: unsafe extern "system" fn(Session, *const u8),
+/// Writes wintun.dll beside `exe` unless it is there already, byte for byte: install calls it
+/// with the installed executable (§5.3). Returns whether it wrote.
+pub fn place_wintun(exe: &Path) -> io::Result<bool> {
+    if WINTUN_DLL.is_empty() {
+        return Err(no_wintun());
     }
-
-    /// wintun.dll beside the executable, written from the embedded copy where missing or different,
-    /// checked against the embedded copy's SHA-256 before it loads, loaded once a process.
-    fn wintun() -> io::Result<&'static Wintun> {
-        static LIB: OnceLock<Result<Wintun, String>> = OnceLock::new();
-        let lib = LIB.get_or_init(|| load().map_err(|e| e.to_string()));
-        lib.as_ref().map_err(|e| io::Error::other(e.clone()))
+    let path = exe.parent().unwrap_or(Path::new(".")).join("wintun.dll");
+    if fs::read(&path).is_ok_and(|b| b == WINTUN_DLL) {
+        return Ok(false);
     }
+    super::install::put(&path, WINTUN_DLL, 0o644).map(|()| true)
+}
 
-    /// Where wintun.dll goes: beside the running executable (§5.3).
-    pub fn wintun_path() -> io::Result<PathBuf> {
-        let exe = env::current_exe()?;
-        Ok(exe.parent().unwrap_or(Path::new(".")).join("wintun.dll"))
+/// Whether this build embeds wintun.dll: every release build for Windows does (build.rs).
+pub fn wintun_embedded() -> bool {
+    !WINTUN_DLL.is_empty()
+}
+
+fn no_wintun() -> io::Error {
+    io::Error::other(
+        "this build has no wintun.dll embedded: run .github/scripts/wintun.sh, which downloads Wintun \
+         0.14.1 and checks it against crates/wirebond/wintun.sum, then build again",
+    )
+}
+
+#[allow(clippy::missing_transmute_annotations)] // each target type is the field's, FARPROC's the source
+fn load() -> io::Result<Wintun> {
+    let path = wintun_path()?;
+    let exe = env::current_exe()?;
+    place_wintun(&exe)?;
+    // Opened without write or delete sharing, so nothing can change the file between the check and
+    // the load, which shares it for reading.
+    let mut f = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path)?;
+    let mut b = Vec::with_capacity(WINTUN_DLL.len());
+    f.read_to_end(&mut b)?;
+    if Sha256::digest(&b) != Sha256::digest(WINTUN_DLL) {
+        let msg = format!("{} does not match the embedded Wintun's SHA-256", path.display());
+        return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
     }
-
-    /// Writes wintun.dll beside `exe` unless it is there already, byte for byte: install calls it
-    /// with the installed executable (§5.3). Returns whether it wrote.
-    pub fn place_wintun(exe: &Path) -> io::Result<bool> {
-        if WINTUN_DLL.is_empty() {
-            return Err(no_wintun());
-        }
-        let path = exe.parent().unwrap_or(Path::new(".")).join("wintun.dll");
-        if fs::read(&path).is_ok_and(|b| b == WINTUN_DLL) {
-            return Ok(false);
-        }
-        super::super::install::put(&path, WINTUN_DLL, 0o644).map(|()| true)
+    // SAFETY: the path is NUL-terminated; the module stays loaded for the process's life.
+    let m = unsafe { LoadLibraryW(wide(&path).as_ptr()) };
+    if m.is_null() {
+        return Err(io::Error::last_os_error());
     }
-
-    /// Whether this build embeds wintun.dll: every release build for Windows does (build.rs).
-    pub fn wintun_embedded() -> bool {
-        !WINTUN_DLL.is_empty()
+    drop(f);
+    let get = |name: &str| {
+        let c: Vec<u8> = name.bytes().chain([0]).collect();
+        // SAFETY: m is a loaded module and c is NUL-terminated.
+        unsafe { GetProcAddress(m, c.as_ptr()) }.ok_or_else(|| io::Error::other(format!("wintun.dll has no {name}")))
+    };
+    // SAFETY: each entry point has the signature wintun.h 0.14 declares for it, WINAPI being
+    // "system".
+    unsafe {
+        Ok(Wintun {
+            create: mem::transmute(get("WintunCreateAdapter")?),
+            close: mem::transmute(get("WintunCloseAdapter")?),
+            luid: mem::transmute(get("WintunGetAdapterLUID")?),
+            start: mem::transmute(get("WintunStartSession")?),
+            end: mem::transmute(get("WintunEndSession")?),
+            event: mem::transmute(get("WintunGetReadWaitEvent")?),
+            receive: mem::transmute(get("WintunReceivePacket")?),
+            release: mem::transmute(get("WintunReleaseReceivePacket")?),
+            allocate: mem::transmute(get("WintunAllocateSendPacket")?),
+            send: mem::transmute(get("WintunSendPacket")?),
+        })
     }
+}
 
-    fn no_wintun() -> io::Error {
-        io::Error::other(
-            "this build has no wintun.dll embedded: run .github/scripts/wintun.sh, which downloads Wintun \
-             0.14.1 and checks it against crates/wirebond/wintun.sum, then build again",
-        )
-    }
+/// A Wintun 0.14.1 adapter named `wirebond`, interface metric 5, and its session; wintun.dll
+/// is embedded, written beside the executable and checked against its SHA-256 before every
+/// load (§5.3). Closing it removes the adapter, and with it its addresses and routes.
+pub struct Tun {
+    name: String,
+    lib: &'static Wintun,
+    adapter: Adapter,
+    session: Session,
+    /// Wintun's read-wait event, one of the three handles the loop waits on (§4.3).
+    event: HANDLE,
+    luid: NET_LUID_LH,
+}
 
-    #[allow(clippy::missing_transmute_annotations)] // each target type is the field's, FARPROC's the source
-    fn load() -> io::Result<Wintun> {
-        let path = wintun_path()?;
-        let exe = env::current_exe()?;
-        place_wintun(&exe)?;
-        // Opened without write or delete sharing, so nothing can change the file between the check and
-        // the load, which shares it for reading.
-        let mut f = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path)?;
-        let mut b = Vec::with_capacity(WINTUN_DLL.len());
-        f.read_to_end(&mut b)?;
-        if Sha256::digest(&b) != Sha256::digest(WINTUN_DLL) {
-            let msg = format!("{} does not match the embedded Wintun's SHA-256", path.display());
-            return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
-        }
-        // SAFETY: the path is NUL-terminated; the module stays loaded for the process's life.
-        let m = unsafe { LoadLibraryW(wide(&path).as_ptr()) };
-        if m.is_null() {
+// SAFETY: Wintun's session calls may come from any thread; the loop uses one at a time.
+unsafe impl Send for Tun {}
+
+impl Tun {
+    /// Creates the adapter, gives it the MTU, metric 5 and the addresses, and starts its session.
+    pub fn open(c: &TunConfig) -> io::Result<Tun> {
+        let lib = wintun()?;
+        let (name, kind) = (wide(&c.name), wide(ADAPTER));
+        // SAFETY: both strings are NUL-terminated and the GUID outlives the call.
+        let adapter = unsafe { (lib.create)(name.as_ptr(), kind.as_ptr(), &ADAPTER_GUID) };
+        if adapter.is_null() {
             return Err(io::Error::last_os_error());
         }
-        drop(f);
-        let get = |name: &str| {
-            let c: Vec<u8> = name.bytes().chain([0]).collect();
-            // SAFETY: m is a loaded module and c is NUL-terminated.
-            unsafe { GetProcAddress(m, c.as_ptr()) }
-                .ok_or_else(|| io::Error::other(format!("wintun.dll has no {name}")))
-        };
-        // SAFETY: each entry point has the signature wintun.h 0.14 declares for it, WINAPI being
-        // "system".
-        unsafe {
-            Ok(Wintun {
-                create: mem::transmute(get("WintunCreateAdapter")?),
-                close: mem::transmute(get("WintunCloseAdapter")?),
-                luid: mem::transmute(get("WintunGetAdapterLUID")?),
-                start: mem::transmute(get("WintunStartSession")?),
-                end: mem::transmute(get("WintunEndSession")?),
-                event: mem::transmute(get("WintunGetReadWaitEvent")?),
-                receive: mem::transmute(get("WintunReceivePacket")?),
-                release: mem::transmute(get("WintunReleaseReceivePacket")?),
-                allocate: mem::transmute(get("WintunAllocateSendPacket")?),
-                send: mem::transmute(get("WintunSendPacket")?),
-            })
-        }
-    }
-
-    /// A Wintun 0.14.1 adapter named `wirebond`, interface metric 5, and its session; wintun.dll
-    /// is embedded, written beside the executable and checked against its SHA-256 before every
-    /// load (§5.3). Closing it removes the adapter, and with it its addresses and routes.
-    pub struct Tun {
-        name: String,
-        lib: &'static Wintun,
-        adapter: Adapter,
-        session: Session,
-        /// Wintun's read-wait event, one of the three handles the loop waits on (§4.3).
-        event: HANDLE,
-        luid: NET_LUID_LH,
-    }
-
-    // SAFETY: Wintun's session calls may come from any thread; the loop uses one at a time.
-    unsafe impl Send for Tun {}
-
-    impl Tun {
-        /// Creates the adapter, gives it the MTU, metric 5 and the addresses, and starts its session.
-        pub fn open(c: &TunConfig) -> io::Result<Tun> {
-            let lib = wintun()?;
-            let (name, kind) = (wide(&c.name), wide(NAME));
-            // SAFETY: both strings are NUL-terminated and the GUID outlives the call.
-            let adapter = unsafe { (lib.create)(name.as_ptr(), kind.as_ptr(), &ADAPTER_GUID) };
-            if adapter.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let mut luid = NET_LUID_LH { Value: 0 };
-            // SAFETY: adapter is open and luid an out parameter.
-            unsafe { (lib.luid)(adapter, &mut luid) };
-            // SAFETY: adapter is open; RING is a power of two in Wintun's range.
-            let session = unsafe { (lib.start)(adapter, RING) };
-            if session.is_null() {
-                let e = io::Error::last_os_error();
-                // SAFETY: adapter is open and closed only here.
-                unsafe { (lib.close)(adapter) };
-                return Err(e);
-            }
-            // SAFETY: session is started.
-            let event = unsafe { (lib.event)(session) };
-            let tun = Tun { name: c.name.clone(), lib, adapter, session, event, luid };
-            if let Ok(g) = guid_of(&tun.luid) {
-                let _ = (dns(g, false, None), dns(g, true, None)); // none left from a crash (§5.4)
-            }
-            for v6 in [false, true] {
-                interface(&tun.luid, v6, c.mtu as u32).or_else(|e| if v6 { Ok(()) } else { Err(e) })?;
-            }
-            if let Some((a, bits)) = c.addr4 {
-                address(&tun.luid, IpAddr::V4(a), bits)?;
-            }
-            if let Some((a, bits)) = c.addr6 {
-                // A PC with IPv6 turned off has no IPv6 interface: the device opens on IPv4 alone,
-                // as with the MTU above.
-                let _ = address(&tun.luid, IpAddr::V6(a), bits);
-            }
-            Ok(tun)
-        }
-        pub fn name(&self) -> &str {
-            &self.name
-        }
-        /// One packet into `buf`; WouldBlock when none waits. A packet longer than `buf` is dropped.
-        pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-            let mut n = 0u32;
-            // SAFETY: the session is started; n is an out parameter.
-            let p = unsafe { (self.lib.receive)(self.session, &mut n) };
-            if p.is_null() {
-                let e = io::Error::last_os_error();
-                return Err(match e.raw_os_error() {
-                    Some(c) if c == ERROR_NO_MORE_ITEMS as i32 => io::ErrorKind::WouldBlock.into(),
-                    _ => e,
-                });
-            }
-            let n = n as usize;
-            let fits = n <= buf.len();
-            if fits {
-                // SAFETY: Wintun gave n bytes at p, valid until released below.
-                buf[..n].copy_from_slice(unsafe { slice::from_raw_parts(p, n) });
-            }
-            // SAFETY: p came from WintunReceivePacket on this session and is released once.
-            unsafe { (self.lib.release)(self.session, p) };
-            if fits { Ok(n) } else { Err(io::Error::new(io::ErrorKind::InvalidData, "packet longer than the buffer")) }
-        }
-        /// One packet; WouldBlock when Wintun's ring is full.
-        pub fn write(&self, packet: &[u8]) -> io::Result<()> {
-            // SAFETY: the session is started.
-            let p = unsafe { (self.lib.allocate)(self.session, packet.len() as u32) };
-            if p.is_null() {
-                let e = io::Error::last_os_error();
-                return Err(match e.raw_os_error() {
-                    Some(c) if c == ERROR_BUFFER_OVERFLOW as i32 => io::ErrorKind::WouldBlock.into(),
-                    _ => e,
-                });
-            }
-            // SAFETY: Wintun allocated packet.len() bytes at p, which WintunSendPacket then takes.
-            unsafe {
-                p.copy_from_nonoverlapping(packet.as_ptr(), packet.len());
-                (self.lib.send)(self.session, p);
-            }
-            Ok(())
-        }
-        /// Signalled when a packet waits: WaitForMultipleObjects with the sockets' WSAEventSelect
-        /// event and the waitable timer (§4.3, [`EventLoop`]).
-        pub fn read_event(&self) -> HANDLE {
-            self.event
-        }
-    }
-
-    impl Drop for Tun {
-        fn drop(&mut self) {
-            // SAFETY: the session and the adapter are open, and only this ends and closes them.
-            unsafe {
-                (self.lib.end)(self.session);
-                (self.lib.close)(self.adapter);
-            }
-        }
-    }
-
-    /// Sets the adapter's MTU and metric 5 for one family.
-    fn interface(luid: &NET_LUID_LH, v6: bool, mtu: u32) -> io::Result<()> {
-        // SAFETY: MIB_IPINTERFACE_ROW is plain data; Initialize fills its defaults.
-        let mut row: MIB_IPINTERFACE_ROW = unsafe { mem::zeroed() };
-        // SAFETY: row is a valid row.
-        unsafe { InitializeIpInterfaceEntry(&mut row) };
-        row.Family = if v6 { AF_INET6 } else { AF_INET };
-        row.InterfaceLuid = *luid;
-        // SAFETY: as above; Get fills the rest from the interface.
-        win32(unsafe { GetIpInterfaceEntry(&mut row) })?;
-        row.NlMtu = mtu;
-        row.UseAutomaticMetric = false;
-        row.Metric = METRIC;
-        row.SitePrefixLength = 0; // Set refuses the value Get returns for IPv4
-        // SAFETY: as above.
-        win32(unsafe { SetIpInterfaceEntry(&mut row) })
-    }
-
-    /// Adds `addr`/`bits` to the adapter, which also routes the subnet into it, and returns once a
-    /// socket can bind it.
-    ///
-    /// An address made here is preferred at once. One that was there already may not be: Internet
-    /// Connection Sharing gives the adapter 192.168.137.1 through duplicate detection, tentative
-    /// for some seconds, and binding a tentative address fails with WSAEADDRNOTAVAIL. The anchor
-    /// binds its DNS relay to the address egress_enable reports as soon as it returns, so this
-    /// waits for the address, 10 s at most; past that the bind's own error says what is wrong.
-    fn address(luid: &NET_LUID_LH, addr: IpAddr, bits: u8) -> io::Result<()> {
-        // SAFETY: as in `interface`.
-        let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { mem::zeroed() };
-        // SAFETY: row is a valid row.
-        unsafe { InitializeUnicastIpAddressEntry(&mut row) };
-        row.InterfaceLuid = *luid;
-        row.Address = inet(addr);
-        row.OnLinkPrefixLength = bits;
-        row.DadState = IpDadStatePreferred; // no duplicate detection on a point-to-point device
-        // SAFETY: as above.
-        match unsafe { CreateUnicastIpAddressEntry(&row) } {
-            ERROR_OBJECT_ALREADY_EXISTS => {}
-            e => return win32(e),
-        }
-        for _ in 0..200 {
-            // SAFETY: row names the address by its interface and value; Get fills in the rest.
-            if unsafe { GetUnicastIpAddressEntry(&mut row) } != 0 || row.DadState == IpDadStatePreferred {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        Ok(())
-    }
-
-    fn inet(a: IpAddr) -> SOCKADDR_INET {
-        // SAFETY: SOCKADDR_INET is plain data, all zeros the unspecified address.
-        let mut s: SOCKADDR_INET = unsafe { mem::zeroed() };
-        match a {
-            IpAddr::V4(a) => {
-                s.Ipv4.sin_family = AF_INET;
-                s.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(a.octets());
-            }
-            IpAddr::V6(a) => {
-                s.Ipv6.sin6_family = AF_INET6;
-                s.Ipv6.sin6_addr.u.Byte = a.octets();
-            }
-        }
-        s
-    }
-
-    /// The four /1 routes (§5.3): they cover the default without replacing it.
-    fn halves() -> [(IpAddr, u8); 4] {
-        let (v4, v6) =
-            (|b| IpAddr::V4(Ipv4Addr::new(b, 0, 0, 0)), |s| IpAddr::V6(Ipv6Addr::new(s, 0, 0, 0, 0, 0, 0, 0)));
-        [(v4(0), 1), (v4(128), 1), (v6(0), 1), (v6(0x8000), 1)]
-    }
-
-    /// The adapter named `name`'s LUID, or None when there is none.
-    fn luid_of(name: &str) -> Option<NET_LUID_LH> {
         let mut luid = NET_LUID_LH { Value: 0 };
-        // SAFETY: the name is NUL-terminated and luid an out parameter.
-        (unsafe { ConvertInterfaceAliasToLuid(wide(name).as_ptr(), &mut luid) } == 0).then_some(luid)
-    }
-
-    /// Adds or deletes one on-link route through the adapter; one that exists, or is gone, is fine.
-    fn route(luid: &NET_LUID_LH, (net, bits): (IpAddr, u8), add: bool) -> io::Result<()> {
-        // SAFETY: as in `interface`.
-        let mut row: MIB_IPFORWARD_ROW2 = unsafe { mem::zeroed() };
-        // SAFETY: row is a valid row.
-        unsafe { InitializeIpForwardEntry(&mut row) };
-        row.InterfaceLuid = *luid;
-        row.DestinationPrefix = IP_ADDRESS_PREFIX { Prefix: inet(net), PrefixLength: bits };
-        let none = if net.is_ipv4() { IpAddr::V4(Ipv4Addr::UNSPECIFIED) } else { IpAddr::V6(Ipv6Addr::UNSPECIFIED) };
-        row.NextHop = inet(none); // on-link
-        row.Metric = 0;
-        row.Protocol = MIB_IPPROTO_NETMGMT;
-        // SAFETY: row is a valid row.
-        match unsafe { if add { CreateIpForwardEntry2(&row) } else { DeleteIpForwardEntry2(&row) } } {
-            ERROR_OBJECT_ALREADY_EXISTS | ERROR_NOT_FOUND => Ok(()),
-            e => win32(e),
+        // SAFETY: adapter is open and luid an out parameter.
+        unsafe { (lib.luid)(adapter, &mut luid) };
+        // SAFETY: adapter is open; RING is a power of two in Wintun's range.
+        let session = unsafe { (lib.start)(adapter, RING) };
+        if session.is_null() {
+            let e = io::Error::last_os_error();
+            // SAFETY: adapter is open and closed only here.
+            unsafe { (lib.close)(adapter) };
+            return Err(e);
         }
-    }
-
-    /// The adapter's interface GUID, which SetInterfaceDnsSettings takes.
-    fn guid_of(luid: &NET_LUID_LH) -> io::Result<GUID> {
-        let mut g = GUID::from_u128(0);
-        // SAFETY: luid is valid and g an out parameter.
-        win32(unsafe { ConvertInterfaceLuidToGuid(luid, &mut g) }).map(|()| g)
-    }
-
-    /// Sets (or with None clears) the adapter's DNS server for one family (Windows 10 2004 and later).
-    fn dns(guid: GUID, v6: bool, server: Option<IpAddr>) -> io::Result<()> {
-        let mut name = wide(server.map(|a| a.to_string()).unwrap_or_default());
-        let flags = DNS_SETTING_NAMESERVER as u64 | if v6 { DNS_SETTING_IPV6 as u64 } else { 0 };
-        let s = DNS_INTERFACE_SETTINGS {
-            Version: DNS_INTERFACE_SETTINGS_VERSION1,
-            Flags: flags,
-            NameServer: name.as_mut_ptr(),
-            Domain: null_mut(),
-            SearchList: null_mut(),
-            RegistrationEnabled: 0,
-            RegisterAdapterName: 0,
-            EnableLLMNR: 0,
-            QueryAdapterName: 0,
-            ProfileNameServer: null_mut(),
-        };
-        // SAFETY: s and the string it points to outlive the call.
-        win32(unsafe { SetInterfaceDnsSettings(guid, &s) })
-    }
-
-    /// 0.0.0.0/1, 128.0.0.0/1, ::/1 and 8000::/1 through CreateIpForwardEntry2, and
-    /// SetInterfaceDnsSettings on the adapter, whose metric is 5 (§5.3, §7). The bond's subnets are
-    /// on the adapter already; the mesh's more specific routes keep winning.
-    pub fn capture_install(c: &Capture) -> io::Result<()> {
-        let luid = luid_of(&c.tun).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no wirebond adapter"))?;
-        if c.routes == Routes::All {
-            for net in halves() {
-                route(&luid, net, true).or_else(|e| if net.0.is_ipv6() { ipv6_off(e) } else { Err(e) })?;
-            }
+        // SAFETY: session is started.
+        let event = unsafe { (lib.event)(session) };
+        let tun = Tun { name: c.name.clone(), lib, adapter, session, event, luid };
+        if let Ok(g) = guid_of(&tun.luid) {
+            let _ = (dns(g, false, None), dns(g, true, None)); // none left from a crash (§5.4)
         }
-        if let Some(a) = c.dns {
-            dns(guid_of(&luid)?, a.is_ipv6(), Some(a))?;
+        for v6 in [false, true] {
+            interface(&tun.luid, v6, c.mtu as u32).or_else(|e| if v6 { Ok(()) } else { Err(e) })?;
+        }
+        if let Some((a, bits)) = c.addr4 {
+            address(&tun.luid, IpAddr::V4(a), bits)?;
+        }
+        if let Some((a, bits)) = c.addr6 {
+            // A PC with IPv6 turned off has no IPv6 interface: the device opens on IPv4 alone,
+            // as with the MTU above.
+            let _ = address(&tun.luid, IpAddr::V6(a), bits);
+        }
+        Ok(tun)
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// One packet into `buf`; WouldBlock when none waits. A packet longer than `buf` is dropped.
+    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut n = 0u32;
+        // SAFETY: the session is started; n is an out parameter.
+        let p = unsafe { (self.lib.receive)(self.session, &mut n) };
+        if p.is_null() {
+            let e = io::Error::last_os_error();
+            return Err(match e.raw_os_error() {
+                Some(c) if c == ERROR_NO_MORE_ITEMS as i32 => io::ErrorKind::WouldBlock.into(),
+                _ => e,
+            });
+        }
+        let n = n as usize;
+        let fits = n <= buf.len();
+        if fits {
+            // SAFETY: Wintun gave n bytes at p, valid until released below.
+            buf[..n].copy_from_slice(unsafe { slice::from_raw_parts(p, n) });
+        }
+        // SAFETY: p came from WintunReceivePacket on this session and is released once.
+        unsafe { (self.lib.release)(self.session, p) };
+        if fits { Ok(n) } else { Err(io::Error::new(io::ErrorKind::InvalidData, "packet longer than the buffer")) }
+    }
+    /// One packet; WouldBlock when Wintun's ring is full.
+    pub fn write(&self, packet: &[u8]) -> io::Result<()> {
+        // SAFETY: the session is started.
+        let p = unsafe { (self.lib.allocate)(self.session, packet.len() as u32) };
+        if p.is_null() {
+            let e = io::Error::last_os_error();
+            return Err(match e.raw_os_error() {
+                Some(c) if c == ERROR_BUFFER_OVERFLOW as i32 => io::ErrorKind::WouldBlock.into(),
+                _ => e,
+            });
+        }
+        // SAFETY: Wintun allocated packet.len() bytes at p, which WintunSendPacket then takes.
+        unsafe {
+            p.copy_from_nonoverlapping(packet.as_ptr(), packet.len());
+            (self.lib.send)(self.session, p);
         }
         Ok(())
     }
-
-    /// An IPv6 route fails where IPv6 is unbound from the adapter: IPv4 capture still stands.
-    fn ipv6_off(e: io::Error) -> io::Result<()> {
-        if e.raw_os_error() == Some(ERROR_NOT_FOUND as i32) { Ok(()) } else { Err(e) }
+    /// Signalled when a packet waits: WaitForMultipleObjects with the sockets' WSAEventSelect
+    /// event and the waitable timer (§4.3, [`EventLoop`]).
+    pub fn read_event(&self) -> HANDLE {
+        self.event
     }
+}
 
-    /// Deletes the four routes and the adapter's DNS server: only what capture_install made.
-    pub fn capture_remove(c: &Capture) -> io::Result<()> {
-        let Some(luid) = luid_of(&c.tun) else { return Ok(()) }; // the adapter, and all on it, is gone
-        let mut r = Ok(());
+impl Drop for Tun {
+    fn drop(&mut self) {
+        // SAFETY: the session and the adapter are open, and only this ends and closes them.
+        unsafe {
+            (self.lib.end)(self.session);
+            (self.lib.close)(self.adapter);
+        }
+    }
+}
+
+/// Sets the adapter's MTU and metric 5 for one family.
+fn interface(luid: &NET_LUID_LH, v6: bool, mtu: u32) -> io::Result<()> {
+    // SAFETY: MIB_IPINTERFACE_ROW is plain data; Initialize fills its defaults.
+    let mut row: MIB_IPINTERFACE_ROW = unsafe { mem::zeroed() };
+    // SAFETY: row is a valid row.
+    unsafe { InitializeIpInterfaceEntry(&mut row) };
+    row.Family = if v6 { AF_INET6 } else { AF_INET };
+    row.InterfaceLuid = *luid;
+    // SAFETY: as above; Get fills the rest from the interface.
+    win32(unsafe { GetIpInterfaceEntry(&mut row) })?;
+    row.NlMtu = mtu;
+    row.UseAutomaticMetric = false;
+    row.Metric = METRIC;
+    row.SitePrefixLength = 0; // Set refuses the value Get returns for IPv4
+    // SAFETY: as above.
+    win32(unsafe { SetIpInterfaceEntry(&mut row) })
+}
+
+/// Adds `addr`/`bits` to the adapter, which also routes the subnet into it, and returns once a
+/// socket can bind it.
+///
+/// An address made here is preferred at once. One that was there already may not be: Internet
+/// Connection Sharing gives the adapter 192.168.137.1 through duplicate detection, tentative
+/// for some seconds, and binding a tentative address fails with WSAEADDRNOTAVAIL. The anchor
+/// binds its DNS relay to the address egress_enable reports as soon as it returns, so this
+/// waits for the address, 10 s at most; past that the bind's own error says what is wrong.
+fn address(luid: &NET_LUID_LH, addr: IpAddr, bits: u8) -> io::Result<()> {
+    // SAFETY: as in `interface`.
+    let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { mem::zeroed() };
+    // SAFETY: row is a valid row.
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+    row.InterfaceLuid = *luid;
+    row.Address = inet(addr);
+    row.OnLinkPrefixLength = bits;
+    row.DadState = IpDadStatePreferred; // no duplicate detection on a point-to-point device
+    // SAFETY: as above.
+    match unsafe { CreateUnicastIpAddressEntry(&row) } {
+        ERROR_OBJECT_ALREADY_EXISTS => {}
+        e => return win32(e),
+    }
+    for _ in 0..200 {
+        // SAFETY: row names the address by its interface and value; Get fills in the rest.
+        if unsafe { GetUnicastIpAddressEntry(&mut row) } != 0 || row.DadState == IpDadStatePreferred {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+fn inet(a: IpAddr) -> SOCKADDR_INET {
+    // SAFETY: SOCKADDR_INET is plain data, all zeros the unspecified address.
+    let mut s: SOCKADDR_INET = unsafe { mem::zeroed() };
+    match a {
+        IpAddr::V4(a) => {
+            s.Ipv4.sin_family = AF_INET;
+            s.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(a.octets());
+        }
+        IpAddr::V6(a) => {
+            s.Ipv6.sin6_family = AF_INET6;
+            s.Ipv6.sin6_addr.u.Byte = a.octets();
+        }
+    }
+    s
+}
+
+/// The four /1 routes (§5.3): they cover the default without replacing it.
+fn halves() -> [(IpAddr, u8); 4] {
+    let (v4, v6) = (|b| IpAddr::V4(Ipv4Addr::new(b, 0, 0, 0)), |s| IpAddr::V6(Ipv6Addr::new(s, 0, 0, 0, 0, 0, 0, 0)));
+    [(v4(0), 1), (v4(128), 1), (v6(0), 1), (v6(0x8000), 1)]
+}
+
+/// The adapter named `name`'s LUID, or None when there is none.
+fn luid_of(name: &str) -> Option<NET_LUID_LH> {
+    let mut luid = NET_LUID_LH { Value: 0 };
+    // SAFETY: the name is NUL-terminated and luid an out parameter.
+    (unsafe { ConvertInterfaceAliasToLuid(wide(name).as_ptr(), &mut luid) } == 0).then_some(luid)
+}
+
+/// Adds or deletes one on-link route through the adapter; one that exists, or is gone, is fine.
+fn route(luid: &NET_LUID_LH, (net, bits): (IpAddr, u8), add: bool) -> io::Result<()> {
+    // SAFETY: as in `interface`.
+    let mut row: MIB_IPFORWARD_ROW2 = unsafe { mem::zeroed() };
+    // SAFETY: row is a valid row.
+    unsafe { InitializeIpForwardEntry(&mut row) };
+    row.InterfaceLuid = *luid;
+    row.DestinationPrefix = IP_ADDRESS_PREFIX { Prefix: inet(net), PrefixLength: bits };
+    let none = if net.is_ipv4() { IpAddr::V4(Ipv4Addr::UNSPECIFIED) } else { IpAddr::V6(Ipv6Addr::UNSPECIFIED) };
+    row.NextHop = inet(none); // on-link
+    row.Metric = 0;
+    row.Protocol = MIB_IPPROTO_NETMGMT;
+    // SAFETY: row is a valid row.
+    match unsafe { if add { CreateIpForwardEntry2(&row) } else { DeleteIpForwardEntry2(&row) } } {
+        ERROR_OBJECT_ALREADY_EXISTS | ERROR_NOT_FOUND => Ok(()),
+        e => win32(e),
+    }
+}
+
+/// The adapter's interface GUID, which SetInterfaceDnsSettings takes.
+fn guid_of(luid: &NET_LUID_LH) -> io::Result<GUID> {
+    let mut g = GUID::from_u128(0);
+    // SAFETY: luid is valid and g an out parameter.
+    win32(unsafe { ConvertInterfaceLuidToGuid(luid, &mut g) }).map(|()| g)
+}
+
+/// Sets (or with None clears) the adapter's DNS server for one family (Windows 10 2004 and later).
+fn dns(guid: GUID, v6: bool, server: Option<IpAddr>) -> io::Result<()> {
+    let mut name = wide(server.map(|a| a.to_string()).unwrap_or_default());
+    let flags = DNS_SETTING_NAMESERVER as u64 | if v6 { DNS_SETTING_IPV6 as u64 } else { 0 };
+    let s = DNS_INTERFACE_SETTINGS {
+        Version: DNS_INTERFACE_SETTINGS_VERSION1,
+        Flags: flags,
+        NameServer: name.as_mut_ptr(),
+        Domain: null_mut(),
+        SearchList: null_mut(),
+        RegistrationEnabled: 0,
+        RegisterAdapterName: 0,
+        EnableLLMNR: 0,
+        QueryAdapterName: 0,
+        ProfileNameServer: null_mut(),
+    };
+    // SAFETY: s and the string it points to outlive the call.
+    win32(unsafe { SetInterfaceDnsSettings(guid, &s) })
+}
+
+/// 0.0.0.0/1, 128.0.0.0/1, ::/1 and 8000::/1 through CreateIpForwardEntry2, and
+/// SetInterfaceDnsSettings on the adapter, whose metric is 5 (§5.3, §7). The bond's subnets are
+/// on the adapter already; the mesh's more specific routes keep winning.
+pub fn capture_install(c: &Capture) -> io::Result<()> {
+    let luid = luid_of(&c.tun).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no wirebond adapter"))?;
+    if c.routes == Routes::All {
         for net in halves() {
-            r = r.and(route(&luid, net, false));
+            route(&luid, net, true).or_else(|e| if net.0.is_ipv6() { ipv6_off(e) } else { Err(e) })?;
         }
-        if let Some(a) = c.dns {
-            r = r.and(guid_of(&luid).and_then(|g| dns(g, a.is_ipv6(), None)));
-        }
-        r
     }
-
-    /// Internet Connection Sharing (HNetCfg.HNetShare) from the uplink to the adapter, which ICS
-    /// readdresses to 192.168.137.1/24: `EgressOn::addr4` says so. IPv4 only; ICS busy or refused
-    /// gives v4 false and local delivery only (§6.2), at the address of the bond's own subnet that
-    /// the adapter was opened with. Either way the adapter has the address this reports: the anchor
-    /// hands it to its clients as its own, and what they send there must reach this device.
-    pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
-        let uplink = uplink();
-        // Why not, in a line: PowerShell's error starts with the message and goes on with where.
-        let why = match &uplink {
-            Some(up) => ics(up, &e.tun, true).err().map(|e| e.to_string().lines().next().unwrap_or_default().into()),
-            None => Some("no default route".to_string()),
-        };
-        let v4 = why.is_none();
-        let addr4 = egress_addr4(v4, e.net4);
-        if let Some(luid) = luid_of(&e.tun) {
-            // There already unless ICS has yet to set it, or took the other when it came or went.
-            address(&luid, IpAddr::V4(addr4.0), addr4.1)?;
-        }
-        Ok(EgressOn { v4, v6: false, addr4, uplink, why })
+    if let Some(a) = c.dns {
+        dns(guid_of(&luid)?, a.is_ipv6(), Some(a))?;
     }
+    Ok(())
+}
 
-    /// The anchor's own address: ICS's while it shares, else the first of the bond's subnet `net4`.
-    pub(super) fn egress_addr4(ics: bool, net4: (Ipv4Addr, u8)) -> (Ipv4Addr, u8) {
-        if ics { ICS_ADDR } else { (Ipv4Addr::from(u32::from(net4.0) | 1), net4.1) }
+/// An IPv6 route fails where IPv6 is unbound from the adapter: IPv4 capture still stands.
+fn ipv6_off(e: io::Error) -> io::Result<()> {
+    if e.raw_os_error() == Some(ERROR_NOT_FOUND as i32) { Ok(()) } else { Err(e) }
+}
+
+/// Deletes the four routes and the adapter's DNS server: only what capture_install made.
+pub fn capture_remove(c: &Capture) -> io::Result<()> {
+    let Some(luid) = luid_of(&c.tun) else { return Ok(()) }; // the adapter, and all on it, is gone
+    let mut r = Ok(());
+    for net in halves() {
+        r = r.and(route(&luid, net, false));
     }
-
-    /// Turns off the sharing whose private side is the adapter: only what egress_enable made.
-    pub fn egress_disable(e: &Egress) -> io::Result<()> {
-        ics("", &e.tun, false)
+    if let Some(a) = c.dns {
+        r = r.and(guid_of(&luid).and_then(|g| dns(g, a.is_ipv6(), None)));
     }
+    r
+}
 
-    /// The friendly name of the default route's interface (§6.2).
-    fn uplink() -> Option<String> {
-        let index = best_index()?;
-        super::ifaces().ok()?.into_iter().find(|i| i.index == index).map(|i| i.name)
+/// Internet Connection Sharing (HNetCfg.HNetShare) from the uplink to the adapter, which ICS
+/// readdresses to 192.168.137.1/24: `EgressOn::addr4` says so. IPv4 only; ICS busy or refused
+/// gives v4 false and local delivery only (§6.2), at the address of the bond's own subnet that
+/// the adapter was opened with. Either way the adapter has the address this reports: the anchor
+/// hands it to its clients as its own, and what they send there must reach this device.
+pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
+    let uplink = uplink();
+    // Why not, in a line: PowerShell's error starts with the message and goes on with where.
+    let why = match &uplink {
+        Some(up) => ics(up, &e.tun, true).err().map(|e| e.to_string().lines().next().unwrap_or_default().into()),
+        None => Some("no default route".to_string()),
+    };
+    let v4 = why.is_none();
+    let addr4 = egress_addr4(v4, e.net4);
+    if let Some(luid) = luid_of(&e.tun) {
+        // There already unless ICS has yet to set it, or took the other when it came or went.
+        address(&luid, IpAddr::V4(addr4.0), addr4.1)?;
     }
+    Ok(EgressOn { v4, v6: false, addr4, uplink, why })
+}
 
-    /// The index of the interface that reaches the internet (1.1.1.1), never the adapter's own /1.
-    fn best_index() -> Option<u32> {
-        // SAFETY: SOCKADDR_IN is plain data.
-        let mut sa: SOCKADDR_IN = unsafe { mem::zeroed() };
-        sa.sin_family = AF_INET;
-        sa.sin_addr.S_un.S_addr = u32::from_ne_bytes([1, 1, 1, 1]);
-        let mut index = 0;
-        // SAFETY: sa is a SOCKADDR_IN, read as a SOCKADDR, and index an out parameter.
-        let r = unsafe { GetBestInterfaceEx((&raw const sa).cast(), &mut index) };
-        (r == 0).then_some(index)
-    }
+/// The anchor's own address: ICS's while it shares, else the first of the bond's subnet `net4`.
+fn egress_addr4(ics: bool, net4: (Ipv4Addr, u8)) -> (Ipv4Addr, u8) {
+    if ics { ICS_ADDR } else { (Ipv4Addr::from(u32::from(net4.0) | 1), net4.1) }
+}
 
-    /// Shares `public` to `private` through HNetCfg.HNetShare, driven by PowerShell (§6.2, §8), or,
-    /// with `enable` false, ends the sharing whose private side is `private`. ICS serves one shared
-    /// pair at a time: a pair of ours moves to the new public side (the uplink changed); one in use by
-    /// something else, Mobile Hotspot included, is an error and stays.
-    ///
-    /// This process's first sharing turns the pair off and on (`ics_script`'s `fresh`): Windows
-    /// keeps the pair's flags across a reboot, but shares nothing for an adapter made anew until
-    /// then. Later calls change only what differs.
-    fn ics(public: &str, private: &str, enable: bool) -> io::Result<()> {
-        static SHARED: AtomicBool = AtomicBool::new(false);
-        let fresh = enable && !SHARED.load(Ordering::Relaxed);
-        powershell(&ics_script(public, private, enable, fresh))?;
-        SHARED.fetch_or(enable, Ordering::Relaxed);
-        Ok(())
-    }
+/// Turns off the sharing whose private side is the adapter: only what egress_enable made.
+pub fn egress_disable(e: &Egress) -> io::Result<()> {
+    ics("", &e.tun, false)
+}
 
-    /// `ics`'s script. `fresh`: sharing the pair already shows is turned off first, then on.
-    pub(super) fn ics_script(public: &str, private: &str, enable: bool, fresh: bool) -> String {
-        let q = |s: &str| s.replace('\'', "''");
-        format!(
-            "$ErrorActionPreference = 'Stop'\n\
-             $m = New-Object -ComObject HNetCfg.HNetShare\n\
-             $pub = $null; $priv = $null; $others = @()\n\
-             foreach ($c in $m.EnumEveryConnection) {{\n\
-               $n = $m.NetConnectionProps.Invoke($c).Name\n\
-               $s = $m.INetSharingConfigurationForINetConnection.Invoke($c)\n\
-               if ($n -eq '{pub}') {{ $pub = $s }} elseif ($n -eq '{priv}') {{ $priv = $s }}\n\
-               elseif ($s.SharingEnabled) {{ $others += $s }}\n\
-             }}\n\
-             $ours = $priv -and $priv.SharingEnabled -and $priv.SharingConnectionType -eq 1\n\
-             if ({enable}) {{\n\
-               if (-not $pub -or -not $priv) {{ throw 'no connection named {pub} or {priv}' }}\n\
-               if ($others -and -not $ours) {{ throw 'Internet Connection Sharing is in use by another connection' }}\n\
-               foreach ($s in $others) {{ $s.DisableSharing() }}\n\
-               if ({fresh}) {{\n\
-                 if ($priv.SharingEnabled) {{ $priv.DisableSharing() }}\n\
-                 if ($pub.SharingEnabled) {{ $pub.DisableSharing() }}\n\
-                 $ours = $false\n\
-               }}\n\
-               if (-not ($pub.SharingEnabled -and $pub.SharingConnectionType -eq 0)) {{ $pub.EnableSharing(0) }}\n\
-               if (-not $ours) {{ $priv.EnableSharing(1) }}\n\
-             }} elseif ($ours) {{\n\
-               $priv.DisableSharing()\n\
-               foreach ($s in $others) {{ if ($s.SharingConnectionType -eq 0) {{ $s.DisableSharing() }} }}\n\
-               if ($pub -and $pub.SharingEnabled) {{ $pub.DisableSharing() }}\n\
-             }}\n",
-            pub = q(public),
-            priv = q(private),
-            enable = if enable { "$true" } else { "$false" },
-            fresh = if fresh { "$true" } else { "$false" },
-        )
-    }
+/// The friendly name of the default route's interface (§6.2).
+fn uplink() -> Option<String> {
+    let index = best_index()?;
+    ifaces().ok()?.into_iter().find(|i| i.index == index).map(|i| i.name)
+}
 
-    /// Runs a PowerShell script without a window or a profile; its error becomes ours.
-    fn powershell(script: &str) -> io::Result<()> {
-        let mut c = Command::new("powershell");
-        c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]);
-        let out = c.creation_flags(CREATE_NO_WINDOW).output()?;
-        let err = String::from_utf8_lossy(&out.stderr);
-        if out.status.success() { Ok(()) } else { Err(io::Error::other(format!("powershell: {}", err.trim()))) }
-    }
+/// The index of the interface that reaches the internet (1.1.1.1), never the adapter's own /1.
+fn best_index() -> Option<u32> {
+    // SAFETY: SOCKADDR_IN is plain data.
+    let mut sa: SOCKADDR_IN = unsafe { mem::zeroed() };
+    sa.sin_family = AF_INET;
+    sa.sin_addr.S_un.S_addr = u32::from_ne_bytes([1, 1, 1, 1]);
+    let mut index = 0;
+    // SAFETY: sa is a SOCKADDR_IN, read as a SOCKADDR, and index an out parameter.
+    let r = unsafe { GetBestInterfaceEx((&raw const sa).cast(), &mut index) };
+    (r == 0).then_some(index)
+}
 
-    /// The first DNS server of the default-route adapter, from GetAdaptersAddresses (§7), port 53.
-    pub fn upstream_resolver() -> io::Result<SocketAddr> {
-        let index = best_index().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no default route"))?;
-        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_UNICAST;
-        let list = adapters(flags)?;
-        for a in list.iter() {
-            // SAFETY: as in super::ifaces: IfIndex is the union arm the API fills, and the DNS
-            // server records lie in the list's buffer, each address as large as its family's.
-            unsafe {
-                if a.Anonymous1.Anonymous.IfIndex == index || a.Ipv6IfIndex == index {
-                    let mut d = a.FirstDnsServerAddress;
-                    while let Some(s) = d.as_ref() {
-                        // A site-local fec0::/10 server is Windows' placeholder for none.
-                        let placeholder =
-                            |ip: &IpAddr| matches!(ip, IpAddr::V6(a) if a.segments()[0] & 0xffc0 == 0xfec0);
-                        if let Some(ip) = sockaddr_ip(s.Address.lpSockaddr).filter(|ip| !placeholder(ip)) {
-                            return Ok(SocketAddr::new(ip, 53));
-                        }
-                        d = s.Next;
+/// Shares `public` to `private` through HNetCfg.HNetShare, driven by PowerShell (§6.2, §8), or,
+/// with `enable` false, ends the sharing whose private side is `private`. ICS serves one shared
+/// pair at a time: a pair of ours moves to the new public side (the uplink changed); one in use by
+/// something else, Mobile Hotspot included, is an error and stays.
+///
+/// This process's first sharing turns the pair off and on (`ics_script`'s `fresh`): Windows
+/// keeps the pair's flags across a reboot, but shares nothing for an adapter made anew until
+/// then. Later calls change only what differs.
+fn ics(public: &str, private: &str, enable: bool) -> io::Result<()> {
+    static SHARED: AtomicBool = AtomicBool::new(false);
+    let fresh = enable && !SHARED.load(Ordering::Relaxed);
+    powershell(&ics_script(public, private, enable, fresh))?;
+    SHARED.fetch_or(enable, Ordering::Relaxed);
+    Ok(())
+}
+
+/// `ics`'s script. `fresh`: sharing the pair already shows is turned off first, then on.
+fn ics_script(public: &str, private: &str, enable: bool, fresh: bool) -> String {
+    let q = |s: &str| s.replace('\'', "''");
+    format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         $m = New-Object -ComObject HNetCfg.HNetShare\n\
+         $pub = $null; $priv = $null; $others = @()\n\
+         foreach ($c in $m.EnumEveryConnection) {{\n\
+           $n = $m.NetConnectionProps.Invoke($c).Name\n\
+           $s = $m.INetSharingConfigurationForINetConnection.Invoke($c)\n\
+           if ($n -eq '{pub}') {{ $pub = $s }} elseif ($n -eq '{priv}') {{ $priv = $s }}\n\
+           elseif ($s.SharingEnabled) {{ $others += $s }}\n\
+         }}\n\
+         $ours = $priv -and $priv.SharingEnabled -and $priv.SharingConnectionType -eq 1\n\
+         if ({enable}) {{\n\
+           if (-not $pub -or -not $priv) {{ throw 'no connection named {pub} or {priv}' }}\n\
+           if ($others -and -not $ours) {{ throw 'Internet Connection Sharing is in use by another connection' }}\n\
+           foreach ($s in $others) {{ $s.DisableSharing() }}\n\
+           if ({fresh}) {{\n\
+             if ($priv.SharingEnabled) {{ $priv.DisableSharing() }}\n\
+             if ($pub.SharingEnabled) {{ $pub.DisableSharing() }}\n\
+             $ours = $false\n\
+           }}\n\
+           if (-not ($pub.SharingEnabled -and $pub.SharingConnectionType -eq 0)) {{ $pub.EnableSharing(0) }}\n\
+           if (-not $ours) {{ $priv.EnableSharing(1) }}\n\
+         }} elseif ($ours) {{\n\
+           $priv.DisableSharing()\n\
+           foreach ($s in $others) {{ if ($s.SharingConnectionType -eq 0) {{ $s.DisableSharing() }} }}\n\
+           if ($pub -and $pub.SharingEnabled) {{ $pub.DisableSharing() }}\n\
+         }}\n",
+        pub = q(public),
+        priv = q(private),
+        enable = if enable { "$true" } else { "$false" },
+        fresh = if fresh { "$true" } else { "$false" },
+    )
+}
+
+/// Runs a PowerShell script without a window or a profile; its error becomes ours.
+fn powershell(script: &str) -> io::Result<()> {
+    let mut c = Command::new("powershell");
+    c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]);
+    let out = c.creation_flags(CREATE_NO_WINDOW).output()?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() { Ok(()) } else { Err(io::Error::other(format!("powershell: {}", err.trim()))) }
+}
+
+/// The first DNS server of the default-route adapter, from GetAdaptersAddresses (§7), port 53.
+pub fn upstream_resolver() -> io::Result<SocketAddr> {
+    let index = best_index().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no default route"))?;
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_UNICAST;
+    let list = adapters(flags)?;
+    for a in list.iter() {
+        // SAFETY: as in ifaces: IfIndex is the union arm the API fills, and the DNS server records
+        // lie in the list's buffer, each address as large as its family's.
+        unsafe {
+            if a.Anonymous1.Anonymous.IfIndex == index || a.Ipv6IfIndex == index {
+                let mut d = a.FirstDnsServerAddress;
+                while let Some(s) = d.as_ref() {
+                    // A site-local fec0::/10 server is Windows' placeholder for none.
+                    let placeholder = |ip: &IpAddr| matches!(ip, IpAddr::V6(a) if a.segments()[0] & 0xffc0 == 0xfec0);
+                    if let Some(ip) = sockaddr_ip(s.Address.lpSockaddr).filter(|ip| !placeholder(ip)) {
+                        return Ok(SocketAddr::new(ip, 53));
                     }
+                    d = s.Next;
                 }
             }
         }
-        Err(io::Error::new(io::ErrorKind::NotFound, "the default route's adapter has no DNS server"))
     }
+    Err(io::Error::new(io::ErrorKind::NotFound, "the default route's adapter has no DNS server"))
+}
 
-    /// ICS through HNetCfg.HNetShare, driven by PowerShell (§8). A refusal carries the manual steps.
-    pub fn support_share(s: &Share) -> io::Result<()> {
-        ics(&s.uplink, &s.cable, true).map_err(|e| {
-            io::Error::other(format!(
-                "{e}. By hand: Control Panel > Network Connections > {} > Properties > Sharing: allow other \
-                 network users to connect through this computer's Internet connection, home networking \
-                 connection {}",
-                s.uplink, s.cable
-            ))
-        })
-    }
-    pub fn support_unshare(s: &Share) -> io::Result<()> {
-        ics(&s.uplink, &s.cable, false)
-    }
+/// ICS through HNetCfg.HNetShare, driven by PowerShell (§8). A refusal carries the manual steps.
+pub fn support_share(s: &Share) -> io::Result<()> {
+    ics(&s.uplink, &s.cable, true).map_err(|e| {
+        io::Error::other(format!(
+            "{e}. By hand: Control Panel > Network Connections > {} > Properties > Sharing: allow other \
+             network users to connect through this computer's Internet connection, home networking \
+             connection {}",
+            s.uplink, s.cable
+        ))
+    })
+}
+pub fn support_unshare(s: &Share) -> io::Result<()> {
+    ics(&s.uplink, &s.cable, false)
+}
 
-    /// Clears the DNS settings and ICS sharing a crash left on the adapter's GUID (§5.4). The adapter
-    /// itself, its addresses and its routes go with the process that made it.
-    pub fn cleanup_stale() -> io::Result<()> {
-        for v6 in [false, true] {
-            let _ = dns(ADAPTER_GUID, v6, None); // fails where the adapter never was
+/// Clears the DNS settings and ICS sharing a crash left on the adapter's GUID (§5.4). The adapter
+/// itself, its addresses and its routes go with the process that made it.
+pub fn cleanup_stale() -> io::Result<()> {
+    for v6 in [false, true] {
+        let _ = dns(ADAPTER_GUID, v6, None); // fails where the adapter never was
+    }
+    if luid_of(ADAPTER).is_some() {
+        let _ = ics("", ADAPTER, false);
+    }
+    Ok(())
+}
+
+/// The daemon's wait (§4.3): every socket associated with one event through WSAEventSelect, and
+/// WaitForMultipleObjects on that event, Wintun's read-wait event and a high-resolution waitable
+/// timer. After a wait, the loop drains each source without blocking.
+pub struct EventLoop {
+    /// A WSAEVENT, which is a HANDLE.
+    event: WSAEVENT,
+    timer: HANDLE,
+}
+
+// SAFETY: the two handles are kernel objects, usable from any thread.
+unsafe impl Send for EventLoop {}
+
+impl EventLoop {
+    pub fn new() -> io::Result<EventLoop> {
+        // SAFETY: WSACreateEvent takes nothing; a manual-reset event, reset in wait.
+        let event = unsafe { WSACreateEvent() };
+        if event == 0 {
+            return Err(io::Error::last_os_error());
         }
-        if luid_of(NAME).is_some() {
-            let _ = ics("", NAME, false);
+        let access = TIMER_ALL_ACCESS;
+        // SAFETY: no attributes and no name. The high-resolution timer needs Windows 10 1803; an
+        // ordinary one is the fallback, which timeBeginPeriod(1) makes fine enough.
+        let mut timer =
+            unsafe { CreateWaitableTimerExW(null(), null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, access) };
+        if timer.is_null() {
+            // SAFETY: as above.
+            timer = unsafe { CreateWaitableTimerExW(null(), null(), 0, access) };
+        }
+        if timer.is_null() {
+            let e = io::Error::last_os_error();
+            // SAFETY: event is open and closed only here.
+            unsafe { WSACloseEvent(event) };
+            return Err(e);
+        }
+        Ok(EventLoop { event, timer })
+    }
+
+    /// Associates `s` with the event: a datagram, a connection to accept, or data or a close on a
+    /// stream signals it. It makes `s` nonblocking.
+    pub fn add(&self, s: &impl AsRawSocket) -> io::Result<()> {
+        let what = (FD_READ | FD_ACCEPT | FD_CLOSE) as i32;
+        // SAFETY: s is an open socket and the event is open.
+        if unsafe { WSAEventSelect(s.as_raw_socket() as SOCKET, self.event, what) } != 0 {
+            // SAFETY: WSAGetLastError only reads this thread's last error.
+            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
         }
         Ok(())
     }
 
-    /// The daemon's wait (§4.3): every socket associated with one event through WSAEventSelect, and
-    /// WaitForMultipleObjects on that event, Wintun's read-wait event and a high-resolution waitable
-    /// timer. After a wait, the loop drains each source without blocking.
-    pub struct EventLoop {
-        /// A WSAEVENT, which is a HANDLE.
-        event: WSAEVENT,
-        timer: HANDLE,
+    /// Associates node's waker as `add` does a socket, so a wake from another thread ends the
+    /// wait (as `Poll::add_waker` does for a poll).
+    pub fn add_waker(&self, w: &super::Waker) -> io::Result<()> {
+        self.add(&w.rx)
     }
 
-    // SAFETY: the two handles are kernel objects, usable from any thread.
-    unsafe impl Send for EventLoop {}
-
-    impl EventLoop {
-        pub fn new() -> io::Result<EventLoop> {
-            // SAFETY: WSACreateEvent takes nothing; a manual-reset event, reset in wait.
-            let event = unsafe { WSACreateEvent() };
-            if event == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let access = TIMER_ALL_ACCESS;
-            // SAFETY: no attributes and no name. The high-resolution timer needs Windows 10 1803; an
-            // ordinary one is the fallback, which timeBeginPeriod(1) makes fine enough.
-            let mut timer =
-                unsafe { CreateWaitableTimerExW(null(), null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, access) };
-            if timer.is_null() {
-                // SAFETY: as above.
-                timer = unsafe { CreateWaitableTimerExW(null(), null(), 0, access) };
-            }
-            if timer.is_null() {
-                let e = io::Error::last_os_error();
-                // SAFETY: event is open and closed only here.
-                unsafe { WSACloseEvent(event) };
-                return Err(e);
-            }
-            Ok(EventLoop { event, timer })
+    /// Waits until a socket or the TUN device has something to read or `t` has passed, never less.
+    /// On return it resets the sockets' event: the loop then drains every source, and whatever
+    /// arrives meanwhile signals the next wait.
+    pub fn wait(&self, tun: Option<HANDLE>, t: Duration) -> io::Result<()> {
+        // Relative, in 100 ns units: negative.
+        let due = -(i64::try_from(t.as_nanos().div_ceil(100)).unwrap_or(i64::MAX).max(1));
+        // SAFETY: the timer is open and due outlives the call; no completion routine.
+        if unsafe { SetWaitableTimer(self.timer, &due, 0, None, null(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
         }
-
-        /// Associates `s` with the event: a datagram, a connection to accept, or data or a close on a
-        /// stream signals it. It makes `s` nonblocking.
-        pub fn add(&self, s: &impl AsRawSocket) -> io::Result<()> {
-            let what = (FD_READ | FD_ACCEPT | FD_CLOSE) as i32;
-            // SAFETY: s is an open socket and the event is open.
-            if unsafe { WSAEventSelect(s.as_raw_socket() as SOCKET, self.event, what) } != 0 {
-                // SAFETY: WSAGetLastError only reads this thread's last error.
-                return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
-            }
-            Ok(())
-        }
-
-        /// Associates node's waker as `add` does a socket, so a wake from another thread ends the
-        /// wait (as `Poll::add_waker` does for a poll).
-        pub fn add_waker(&self, w: &super::super::Waker) -> io::Result<()> {
-            self.add(&w.rx)
-        }
-
-        /// Waits until a socket or the TUN device has something to read or `t` has passed, never less.
-        /// On return it resets the sockets' event: the loop then drains every source, and whatever
-        /// arrives meanwhile signals the next wait.
-        pub fn wait(&self, tun: Option<HANDLE>, t: Duration) -> io::Result<()> {
-            // Relative, in 100 ns units: negative.
-            let due = -(i64::try_from(t.as_nanos().div_ceil(100)).unwrap_or(i64::MAX).max(1));
-            // SAFETY: the timer is open and due outlives the call; no completion routine.
-            if unsafe { SetWaitableTimer(self.timer, &due, 0, None, null(), 0) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let mut handles = vec![self.event as HANDLE, self.timer];
-            handles.extend(tun.filter(|h| !h.is_null()));
-            // A backstop in case the timer is late: the timeout rounded up, plus a millisecond.
-            let ms = u32::try_from(t.as_millis().saturating_add(1)).unwrap_or(INFINITE - 1);
-            // SAFETY: handles holds open handles, at most three.
-            let r = unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, ms) };
-            // SAFETY: the event is open.
-            unsafe { WSAResetEvent(self.event) };
-            if r == WAIT_FAILED { Err(io::Error::last_os_error()) } else { Ok(()) }
-        }
+        let mut handles = vec![self.event as HANDLE, self.timer];
+        handles.extend(tun.filter(|h| !h.is_null()));
+        // A backstop in case the timer is late: the timeout rounded up, plus a millisecond.
+        let ms = u32::try_from(t.as_millis().saturating_add(1)).unwrap_or(INFINITE - 1);
+        // SAFETY: handles holds open handles, at most three.
+        let r = unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, ms) };
+        // SAFETY: the event is open.
+        unsafe { WSAResetEvent(self.event) };
+        if r == WAIT_FAILED { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
+}
 
-    impl Drop for EventLoop {
-        fn drop(&mut self) {
-            // SAFETY: both handles are open, and only this closes them.
-            unsafe {
-                WSACloseEvent(self.event);
-                CloseHandle(self.timer);
-            }
+impl Drop for EventLoop {
+    fn drop(&mut self) {
+        // SAFETY: both handles are open, and only this closes them.
+        unsafe {
+            WSACloseEvent(self.event);
+            CloseHandle(self.timer);
         }
     }
 }

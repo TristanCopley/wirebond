@@ -2,14 +2,19 @@
 //! firewall (§9.1, §22.2). Then the 2.0 platform API (SPEC 2.0 §5–§8).
 
 use super::Scope;
+use super::net::{Capture, Egress, EgressOn, Routes, Share, TunConfig};
 pub use super::unix::*;
 use libc::{IPPROTO_IP, IPPROTO_IPV6};
 use socket2::Socket;
 use std::ffi::{CStr, OsStr};
-use std::mem::MaybeUninit;
+use std::mem::{self, MaybeUninit};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::{env, io, ptr};
+use std::process::Command;
+use std::sync::Mutex;
+use std::{env, fs, io, ptr};
 use wirebond_core::SOCK_BUF;
 
 pub(super) const BOOT_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
@@ -134,343 +139,324 @@ pub(super) fn unregister(s: Scope, exe: &Path) -> io::Result<(bool, String)> {
 // The 2.0 platform API (SPEC 2.0 §5–§8; host/net.rs has the types and the contract). Owner: host
 // macos and windows.
 
-pub use v2::*;
+/// The dynamic-store key of the client's DNS service (§7).
+const DNS_KEY: &str = "State:/Network/Service/com.wirebond/DNS";
+/// The pf anchor the default /etc/pf.conf includes through `nat-anchor "com.apple/*"` (§6.2).
+const ANCHOR: &str = "com.apple/wirebond";
+/// Internet Sharing's preferences and launchd job (§8).
+const NAT_PLIST: &str = "/Library/Preferences/SystemConfiguration/com.apple.nat";
+const SHARING_JOB: &str = "system/com.apple.NetworkSharing";
 
-mod v2 {
-    use std::io;
-    use std::mem;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-    use std::process::Command;
-    use std::sync::Mutex;
-    use std::{fs, path::PathBuf};
+/// A utun interface from a PF_SYSTEM / SYSPROTO_CONTROL socket connected to
+/// com.apple.net.utun_control (root); each packet carries a 4-byte family header (§5.3). Closing
+/// it destroys the interface, and with it its addresses and routes.
+pub struct Tun {
+    fd: OwnedFd,
+    /// The utunN it got.
+    name: String,
+}
 
-    use super::super::Scope;
-    use super::super::net::{Capture, Egress, EgressOn, Routes, Share, TunConfig};
-    use super::{cvt, mask4, network};
-
-    /// The dynamic-store key of the client's DNS service (§7).
-    const DNS_KEY: &str = "State:/Network/Service/com.wirebond/DNS";
-    /// The pf anchor the default /etc/pf.conf includes through `nat-anchor "com.apple/*"` (§6.2).
-    const ANCHOR: &str = "com.apple/wirebond";
-    /// Internet Sharing's preferences and launchd job (§8).
-    const NAT_PLIST: &str = "/Library/Preferences/SystemConfiguration/com.apple.nat";
-    const SHARING_JOB: &str = "system/com.apple.NetworkSharing";
-
-    /// A utun interface from a PF_SYSTEM / SYSPROTO_CONTROL socket connected to
-    /// com.apple.net.utun_control (root); each packet carries a 4-byte family header (§5.3). Closing
-    /// it destroys the interface, and with it its addresses and routes.
-    pub struct Tun {
-        fd: OwnedFd,
-        /// The utunN it got.
-        name: String,
+impl Tun {
+    /// Takes the next free utunN, nonblocking, and gives it the MTU, the addresses and the
+    /// bond's subnets.
+    pub fn open(c: &TunConfig) -> io::Result<Tun> {
+        // SAFETY: socket takes no pointers.
+        let fd = cvt(unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) })?;
+        // SAFETY: fd is a new descriptor that only this owns.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: ctl_info is plain data.
+        let mut info: libc::ctl_info = unsafe { mem::zeroed() };
+        for (d, s) in info.ctl_name.iter_mut().zip(b"com.apple.net.utun_control") {
+            *d = *s as libc::c_char;
+        }
+        // SAFETY: CTLIOCGINFO reads the name and writes the id in info.
+        cvt(unsafe { libc::ioctl(fd.as_raw_fd(), libc::CTLIOCGINFO, &mut info) })?;
+        let sc = libc::sockaddr_ctl {
+            sc_len: mem::size_of::<libc::sockaddr_ctl>() as u8,
+            sc_family: libc::AF_SYSTEM as u8,
+            ss_sysaddr: libc::AF_SYS_CONTROL as u16,
+            sc_id: info.ctl_id,
+            sc_unit: 0, // the next free utunN
+            sc_reserved: [0; 5],
+        };
+        let len = mem::size_of_val(&sc) as libc::socklen_t;
+        // SAFETY: sc is a sockaddr_ctl of len bytes.
+        cvt(unsafe { libc::connect(fd.as_raw_fd(), (&raw const sc).cast(), len) })?;
+        let (mut name, mut n) = ([0u8; 32], 32 as libc::socklen_t);
+        let p = name.as_mut_ptr().cast();
+        // SAFETY: the option writes at most n bytes into name and sets n.
+        cvt(unsafe { libc::getsockopt(fd.as_raw_fd(), libc::SYSPROTO_CONTROL, libc::UTUN_OPT_IFNAME, p, &mut n) })?;
+        let end = name.iter().position(|&b| b == 0).unwrap_or(n as usize);
+        let name = String::from_utf8_lossy(&name[..end]).into_owned();
+        // SAFETY: fcntl on an open descriptor.
+        unsafe {
+            cvt(libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK))?;
+            cvt(libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC))?;
+        }
+        let tun = Tun { fd, name };
+        let t = tun.name.as_str();
+        run("ifconfig", &[t, "mtu", &c.mtu.to_string(), "up"])?;
+        if let Some((ip, bits)) = c.addr4 {
+            let (a, mask) = (ip.to_string(), mask4(Ipv4Addr::BROADCAST, bits).to_string());
+            run("ifconfig", &[t, "inet", &a, &a, "netmask", &mask, "alias"])?;
+            route(true, (network(IpAddr::V4(ip), bits), bits), t)?;
+        }
+        if let Some((a, bits)) = c.addr6 {
+            run("ifconfig", &[t, "inet6", &format!("{a}/{bits}"), "alias"])?;
+            route(true, (network(IpAddr::V6(a), bits), bits), t)?;
+        }
+        Ok(tun)
     }
-
-    impl Tun {
-        /// Takes the next free utunN, nonblocking, and gives it the MTU, the addresses and the
-        /// bond's subnets.
-        pub fn open(c: &TunConfig) -> io::Result<Tun> {
-            // SAFETY: socket takes no pointers.
-            let fd = cvt(unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) })?;
-            // SAFETY: fd is a new descriptor that only this owns.
-            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-            // SAFETY: ctl_info is plain data.
-            let mut info: libc::ctl_info = unsafe { mem::zeroed() };
-            for (d, s) in info.ctl_name.iter_mut().zip(b"com.apple.net.utun_control") {
-                *d = *s as libc::c_char;
-            }
-            // SAFETY: CTLIOCGINFO reads the name and writes the id in info.
-            cvt(unsafe { libc::ioctl(fd.as_raw_fd(), libc::CTLIOCGINFO, &mut info) })?;
-            let sc = libc::sockaddr_ctl {
-                sc_len: mem::size_of::<libc::sockaddr_ctl>() as u8,
-                sc_family: libc::AF_SYSTEM as u8,
-                ss_sysaddr: libc::AF_SYS_CONTROL as u16,
-                sc_id: info.ctl_id,
-                sc_unit: 0, // the next free utunN
-                sc_reserved: [0; 5],
-            };
-            let len = mem::size_of_val(&sc) as libc::socklen_t;
-            // SAFETY: sc is a sockaddr_ctl of len bytes.
-            cvt(unsafe { libc::connect(fd.as_raw_fd(), (&raw const sc).cast(), len) })?;
-            let (mut name, mut n) = ([0u8; 32], 32 as libc::socklen_t);
-            let p = name.as_mut_ptr().cast();
-            // SAFETY: the option writes at most n bytes into name and sets n.
-            cvt(unsafe { libc::getsockopt(fd.as_raw_fd(), libc::SYSPROTO_CONTROL, libc::UTUN_OPT_IFNAME, p, &mut n) })?;
-            let end = name.iter().position(|&b| b == 0).unwrap_or(n as usize);
-            let name = String::from_utf8_lossy(&name[..end]).into_owned();
-            // SAFETY: fcntl on an open descriptor.
-            unsafe {
-                cvt(libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK))?;
-                cvt(libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC))?;
-            }
-            let tun = Tun { fd, name };
-            let t = tun.name.as_str();
-            super::run("ifconfig", &[t, "mtu", &c.mtu.to_string(), "up"])?;
-            if let Some((ip, bits)) = c.addr4 {
-                let (a, mask) = (ip.to_string(), mask4(Ipv4Addr::BROADCAST, bits).to_string());
-                super::run("ifconfig", &[t, "inet", &a, &a, "netmask", &mask, "alias"])?;
-                route(true, (network(IpAddr::V4(ip), bits), bits), t)?;
-            }
-            if let Some((a, bits)) = c.addr6 {
-                super::run("ifconfig", &[t, "inet6", &format!("{a}/{bits}"), "alias"])?;
-                route(true, (network(IpAddr::V6(a), bits), bits), t)?;
-            }
-            Ok(tun)
-        }
-        pub fn name(&self) -> &str {
-            &self.name
-        }
-        /// One packet into `buf`, without the family header; WouldBlock when none waits.
-        pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-            let mut head = [0u8; 4];
-            let iov = [
-                libc::iovec { iov_base: head.as_mut_ptr().cast(), iov_len: 4 },
-                libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() },
-            ];
-            // SAFETY: both buffers outlive the call and readv writes within them.
-            let n = unsafe { libc::readv(self.fd.as_raw_fd(), iov.as_ptr(), 2) };
-            if n < 0 {
-                return Err(io::Error::last_os_error()); // EAGAIN is WouldBlock
-            }
-            Ok((n as usize).saturating_sub(4))
-        }
-        /// One packet, behind the family header its version nibble names.
-        pub fn write(&self, packet: &[u8]) -> io::Result<()> {
-            let family = match packet.first().map(|b| b >> 4) {
-                Some(4) => libc::AF_INET,
-                Some(6) => libc::AF_INET6,
-                _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not an IP packet")),
-            };
-            let head = (family as u32).to_be_bytes();
-            let iov = [
-                libc::iovec { iov_base: head.as_ptr().cast_mut().cast(), iov_len: 4 },
-                libc::iovec { iov_base: packet.as_ptr().cast_mut().cast(), iov_len: packet.len() },
-            ];
-            // SAFETY: both buffers outlive the call; writev only reads them.
-            cvt(unsafe { libc::writev(self.fd.as_raw_fd(), iov.as_ptr(), 2) } as libc::c_int).map(|_| ())
-        }
+    pub fn name(&self) -> &str {
+        &self.name
     }
-
-    impl AsRawFd for Tun {
-        fn as_raw_fd(&self) -> RawFd {
-            self.fd.as_raw_fd()
+    /// One packet into `buf`, without the family header; WouldBlock when none waits.
+    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut head = [0u8; 4];
+        let iov = [
+            libc::iovec { iov_base: head.as_mut_ptr().cast(), iov_len: 4 },
+            libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() },
+        ];
+        // SAFETY: both buffers outlive the call and readv writes within them.
+        let n = unsafe { libc::readv(self.fd.as_raw_fd(), iov.as_ptr(), 2) };
+        if n < 0 {
+            return Err(io::Error::last_os_error()); // EAGAIN is WouldBlock
         }
+        Ok((n as usize).saturating_sub(4))
     }
-
-    /// Adds or deletes `net` through interface `tun` with the route tool. A route that exists, or is
-    /// gone, is fine.
-    fn route(add: bool, (net, bits): (IpAddr, u8), tun: &str) -> io::Result<()> {
-        let family = if net.is_ipv4() { "-inet" } else { "-inet6" };
-        let op = if add { "add" } else { "delete" };
-        // Not -q, which would hide the error that tells an existing or missing route apart.
-        let out =
-            Command::new("route").args(["-n", op, family, &format!("{net}/{bits}"), "-interface", tun]).output()?;
-        let done = if add { "File exists" } else { "not in table" };
-        super::route_said(out.status.success(), &String::from_utf8_lossy(&out.stderr), done)
+    /// One packet, behind the family header its version nibble names.
+    pub fn write(&self, packet: &[u8]) -> io::Result<()> {
+        let family = match packet.first().map(|b| b >> 4) {
+            Some(4) => libc::AF_INET,
+            Some(6) => libc::AF_INET6,
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not an IP packet")),
+        };
+        let head = (family as u32).to_be_bytes();
+        let iov = [
+            libc::iovec { iov_base: head.as_ptr().cast_mut().cast(), iov_len: 4 },
+            libc::iovec { iov_base: packet.as_ptr().cast_mut().cast(), iov_len: packet.len() },
+        ];
+        // SAFETY: both buffers outlive the call; writev only reads them.
+        cvt(unsafe { libc::writev(self.fd.as_raw_fd(), iov.as_ptr(), 2) } as libc::c_int).map(|_| ())
     }
+}
 
-    /// Runs scutil with `commands` on its standard input.
-    fn scutil(commands: &str) -> io::Result<()> {
-        let out = super::output(&mut Command::new("scutil"), Some(commands))?;
-        let err = String::from_utf8_lossy(&out.stderr);
-        if out.status.success() && err.trim().is_empty() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("scutil: {}", err.trim())))
-        }
+impl AsRawFd for Tun {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
+}
 
-    /// The sixteen capture routes (`capture_routes`) to the utun, and a dynamic-store DNS service
-    /// through scutil (§5.3, §7). The bond's subnets are on the utun already; the mesh's more
-    /// specific routes (100.64.0.0/10 and fd7a:115c:a1e0::/48 on Tailscale's utun) keep winning.
-    pub fn capture_install(c: &Capture) -> io::Result<()> {
-        if c.routes == Routes::All {
-            for net in super::capture_routes() {
-                route(true, net, &c.tun)?;
-            }
-        }
-        if let Some(dns) = c.dns {
-            scutil(&format!(
-                "d.init\nd.add ServerAddresses * {dns}\nd.add SupplementalMatchDomains * \"\"\n\
-                 d.add InterfaceName {}\nset {DNS_KEY}\nquit\n",
-                c.tun
-            ))?;
-        }
+/// Adds or deletes `net` through interface `tun` with the route tool. A route that exists, or is
+/// gone, is fine.
+fn route(add: bool, (net, bits): (IpAddr, u8), tun: &str) -> io::Result<()> {
+    let family = if net.is_ipv4() { "-inet" } else { "-inet6" };
+    let op = if add { "add" } else { "delete" };
+    // Not -q, which would hide the error that tells an existing or missing route apart.
+    let out = Command::new("route").args(["-n", op, family, &format!("{net}/{bits}"), "-interface", tun]).output()?;
+    let done = if add { "File exists" } else { "not in table" };
+    route_said(out.status.success(), &String::from_utf8_lossy(&out.stderr), done)
+}
+
+/// Runs scutil with `commands` on its standard input.
+fn scutil(commands: &str) -> io::Result<()> {
+    let out = output(&mut Command::new("scutil"), Some(commands))?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() && err.trim().is_empty() {
         Ok(())
+    } else {
+        Err(io::Error::other(format!("scutil: {}", err.trim())))
     }
+}
 
-    /// Deletes the capture routes and the DNS service: only what capture_install made.
-    pub fn capture_remove(c: &Capture) -> io::Result<()> {
-        let mut r = Ok(());
-        for net in super::capture_routes() {
-            r = r.and(route(false, net, &c.tun).or_else(|e| if gone(&c.tun) { Ok(()) } else { Err(e) }));
-        }
-        r.and(scutil(&format!("remove {DNS_KEY}\nquit\n")))
-    }
-
-    /// Whether interface `name` no longer exists, which takes its routes with it.
-    fn gone(name: &str) -> bool {
-        super::ifreq(name, libc::SIOCGIFMTU).is_none()
-    }
-
-    /// What egress_enable changed, kept beside config.json so that a crash's leftovers can be undone
-    /// (§5.4): the forwarding sysctls it found off and pf's enable token.
-    fn egress_file() -> PathBuf {
-        Scope::System.paths().1.join("egress.state")
-    }
-
-    static EGRESS: Mutex<()> = Mutex::new(());
-
-    /// net.inet.ip.forwarding and net.inet6.ip6.forwarding, pf NAT rules in the anchor
-    /// com.apple/wirebond, `pfctl -E` and its reference released on disable (§6.2). Called again,
-    /// it follows the uplink and enables pf once.
-    pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
-        let _one = EGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let uplink = default_interface(false)?;
-        // IPv6 leaves through the interface of the IPv6 default route, which may be another one.
-        let uplink6 = e.net6.and_then(|_| default_interface(true).ok());
-        let up6 = uplink6.is_some();
-        let mut state = fs::read_to_string(egress_file()).unwrap_or_default();
-        for (key, on) in [("net.inet.ip.forwarding", true), ("net.inet6.ip6.forwarding", up6)] {
-            let was = super::run("sysctl", &["-n", key]).map(|o| String::from_utf8_lossy(&o).trim() == "1")?;
-            if on && !was {
-                super::run("sysctl", &["-w", &format!("{key}=1")])?;
-                state.push_str(&format!("sysctl {key}\n"));
-            }
-        }
-        let (n4, b4) = (mask4(e.net4.0, e.net4.1), e.net4.1);
-        let mut rules = format!("nat on {uplink} inet from {n4}/{b4} to any -> ({uplink})\n");
-        if let (Some(up), Some((a, bits))) = (&uplink6, e.net6) {
-            let n6 = network(IpAddr::V6(a), bits);
-            rules.push_str(&format!("nat on {up} inet6 from {n6}/{bits} to any -> ({up})\n"));
-        }
-        pfctl(&["-a", ANCHOR, "-f", "-"], Some(&rules))?;
-        if !state.contains("token ") {
-            let out = pfctl(&["-E"], None)?;
-            let token = token(&out).ok_or_else(|| io::Error::other(format!("pfctl -E gave no token: {out}")))?;
-            state.push_str(&format!("token {token}\n"));
-        }
-        fs::write(egress_file(), &state)?;
-        let first = Ipv4Addr::from_bits(n4.to_bits() + 1);
-        Ok(EgressOn { v4: true, v6: up6, addr4: (first, e.net4.1), uplink: Some(uplink), why: None })
-    }
-
-    /// Flushes the anchor, releases pf's reference and turns forwarding back off where egress_enable
-    /// turned it on.
-    pub fn egress_disable(_e: &Egress) -> io::Result<()> {
-        let _one = EGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        undo_egress()
-    }
-
-    fn undo_egress() -> io::Result<()> {
-        let Ok(state) = fs::read_to_string(egress_file()) else { return Ok(()) };
-        let mut r = pfctl(&["-a", ANCHOR, "-F", "all"], None).map(|_| ());
-        for line in state.lines() {
-            match line.split_once(' ') {
-                Some(("token", t)) => r = r.and(pfctl(&["-X", t], None).map(|_| ())),
-                Some(("sysctl", key)) => r = r.and(super::run("sysctl", &["-w", &format!("{key}=0")]).map(|_| ())),
-                _ => {}
-            }
-        }
-        r.and_then(|()| fs::remove_file(egress_file()))
-    }
-
-    /// Runs pfctl with `input` on its standard input; returns its standard output and error together,
-    /// where it prints the token.
-    fn pfctl(args: &[&str], input: Option<&str>) -> io::Result<String> {
-        let out = super::output(Command::new("pfctl").args(args), Some(input.unwrap_or_default()))?;
-        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
-        if out.status.success() {
-            Ok(text)
-        } else {
-            Err(io::Error::other(format!("pfctl {}: {}", args.join(" "), text.trim())))
+/// The sixteen capture routes (`capture_routes`) to the utun, and a dynamic-store DNS service
+/// through scutil (§5.3, §7). The bond's subnets are on the utun already; the mesh's more
+/// specific routes (100.64.0.0/10 and fd7a:115c:a1e0::/48 on Tailscale's utun) keep winning.
+pub fn capture_install(c: &Capture) -> io::Result<()> {
+    if c.routes == Routes::All {
+        for net in capture_routes() {
+            route(true, net, &c.tun)?;
         }
     }
-
-    /// The reference `pfctl -E` prints: "Token : 123".
-    pub(super) fn token(out: &str) -> Option<&str> {
-        out.lines().find_map(|l| l.trim().strip_prefix("Token : ")).map(str::trim).filter(|t| !t.is_empty())
+    if let Some(dns) = c.dns {
+        scutil(&format!(
+            "d.init\nd.add ServerAddresses * {dns}\nd.add SupplementalMatchDomains * \"\"\n\
+             d.add InterfaceName {}\nset {DNS_KEY}\nquit\n",
+            c.tun
+        ))?;
     }
+    Ok(())
+}
 
-    /// The interface of the default route (`route -n get default`).
-    fn default_interface(v6: bool) -> io::Result<String> {
-        let args: &[&str] = if v6 { &["-n", "get", "-inet6", "default"] } else { &["-n", "get", "default"] };
-        let out = super::run("route", args)?;
-        interface(&String::from_utf8_lossy(&out))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no default route"))
+/// Deletes the capture routes and the DNS service: only what capture_install made.
+pub fn capture_remove(c: &Capture) -> io::Result<()> {
+    let mut r = Ok(());
+    for net in capture_routes() {
+        r = r.and(route(false, net, &c.tun).or_else(|e| if gone(&c.tun) { Ok(()) } else { Err(e) }));
     }
+    r.and(scutil(&format!("remove {DNS_KEY}\nquit\n")))
+}
 
-    /// The `interface:` line of `route -n get`.
-    pub(super) fn interface(out: &str) -> Option<String> {
-        out.lines().find_map(|l| l.trim().strip_prefix("interface:")).map(|s| s.trim().to_owned())
+/// Whether interface `name` no longer exists, which takes its routes with it.
+fn gone(name: &str) -> bool {
+    ifreq(name, libc::SIOCGIFMTU).is_none()
+}
+
+/// What egress_enable changed, kept beside config.json so that a crash's leftovers can be undone
+/// (§5.4): the forwarding sysctls it found off and pf's enable token.
+fn egress_file() -> PathBuf {
+    Scope::System.paths().1.join("egress.state")
+}
+
+static EGRESS: Mutex<()> = Mutex::new(());
+
+/// net.inet.ip.forwarding and net.inet6.ip6.forwarding, pf NAT rules in the anchor
+/// com.apple/wirebond, `pfctl -E` and its reference released on disable (§6.2). Called again,
+/// it follows the uplink and enables pf once.
+pub fn egress_enable(e: &Egress) -> io::Result<EgressOn> {
+    let _one = EGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let uplink = default_interface(false)?;
+    // IPv6 leaves through the interface of the IPv6 default route, which may be another one.
+    let uplink6 = e.net6.and_then(|_| default_interface(true).ok());
+    let up6 = uplink6.is_some();
+    let mut state = fs::read_to_string(egress_file()).unwrap_or_default();
+    for (key, on) in [("net.inet.ip.forwarding", true), ("net.inet6.ip6.forwarding", up6)] {
+        let was = run("sysctl", &["-n", key]).map(|o| String::from_utf8_lossy(&o).trim() == "1")?;
+        if on && !was {
+            run("sysctl", &["-w", &format!("{key}=1")])?;
+            state.push_str(&format!("sysctl {key}\n"));
+        }
     }
-
-    /// Resolver #1 from `scutil --dns`, port 53 (§7).
-    pub fn upstream_resolver() -> io::Result<SocketAddr> {
-        let out = super::run("scutil", &["--dns"])?;
-        let ip = first_resolver(&String::from_utf8_lossy(&out));
-        ip.map(|ip| SocketAddr::new(ip, 53))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "resolver #1 has no nameserver"))
+    let (n4, b4) = (mask4(e.net4.0, e.net4.1), e.net4.1);
+    let mut rules = format!("nat on {uplink} inet from {n4}/{b4} to any -> ({uplink})\n");
+    if let (Some(up), Some((a, bits))) = (&uplink6, e.net6) {
+        let n6 = network(IpAddr::V6(a), bits);
+        rules.push_str(&format!("nat on {up} inet6 from {n6}/{bits} to any -> ({up})\n"));
     }
-
-    /// The first usable `nameserver[i]` of `resolver #1` in `scutil --dns` output; one with a scope
-    /// (fe80::1%en0) is skipped.
-    pub(super) fn first_resolver(out: &str) -> Option<IpAddr> {
-        let mut lines = out.lines().skip_while(|l| l.trim() != "resolver #1").skip(1);
-        lines
-            .by_ref()
-            .take_while(|l| !l.trim_start().starts_with("resolver #"))
-            .filter_map(|l| l.trim().strip_prefix("nameserver[")?.split_once(':').map(|(_, v)| v.trim().to_owned()))
-            .find_map(|v| v.parse().ok())
+    pfctl(&["-a", ANCHOR, "-f", "-"], Some(&rules))?;
+    if !state.contains("token ") {
+        let out = pfctl(&["-E"], None)?;
+        let token = token(&out).ok_or_else(|| io::Error::other(format!("pfctl -E gave no token: {out}")))?;
+        state.push_str(&format!("token {token}\n"));
     }
+    fs::write(egress_file(), &state)?;
+    let first = Ipv4Addr::from_bits(n4.to_bits() + 1);
+    Ok(EgressOn { v4: true, v6: up6, addr4: (first, e.net4.1), uplink: Some(uplink), why: None })
+}
 
-    /// Internet Sharing through com.apple.nat and its launchd job (§8), best effort: a refusal
-    /// carries the steps to do it by hand.
-    pub fn support_share(s: &Share) -> io::Result<()> {
-        let nat = format!(
-            "{{ Enabled = 1; PrimaryInterface = {{ Device = \"{}\"; Enabled = 1; }}; SharingDevices = ( \"{}\" ); }}",
+/// Flushes the anchor, releases pf's reference and turns forwarding back off where egress_enable
+/// turned it on.
+pub fn egress_disable(_e: &Egress) -> io::Result<()> {
+    let _one = EGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    undo_egress()
+}
+
+fn undo_egress() -> io::Result<()> {
+    let Ok(state) = fs::read_to_string(egress_file()) else { return Ok(()) };
+    let mut r = pfctl(&["-a", ANCHOR, "-F", "all"], None).map(|_| ());
+    for line in state.lines() {
+        match line.split_once(' ') {
+            Some(("token", t)) => r = r.and(pfctl(&["-X", t], None).map(|_| ())),
+            Some(("sysctl", key)) => r = r.and(run("sysctl", &["-w", &format!("{key}=0")]).map(|_| ())),
+            _ => {}
+        }
+    }
+    r.and_then(|()| fs::remove_file(egress_file()))
+}
+
+/// Runs pfctl with `input` on its standard input; returns its standard output and error together,
+/// where it prints the token.
+fn pfctl(args: &[&str], input: Option<&str>) -> io::Result<String> {
+    let out = output(Command::new("pfctl").args(args), Some(input.unwrap_or_default()))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        Ok(text)
+    } else {
+        Err(io::Error::other(format!("pfctl {}: {}", args.join(" "), text.trim())))
+    }
+}
+
+/// The reference `pfctl -E` prints: "Token : 123".
+fn token(out: &str) -> Option<&str> {
+    out.lines().find_map(|l| l.trim().strip_prefix("Token : ")).map(str::trim).filter(|t| !t.is_empty())
+}
+
+/// The interface of the default route (`route -n get default`).
+fn default_interface(v6: bool) -> io::Result<String> {
+    let args: &[&str] = if v6 { &["-n", "get", "-inet6", "default"] } else { &["-n", "get", "default"] };
+    let out = run("route", args)?;
+    interface(&String::from_utf8_lossy(&out)).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no default route"))
+}
+
+/// The `interface:` line of `route -n get`.
+fn interface(out: &str) -> Option<String> {
+    out.lines().find_map(|l| l.trim().strip_prefix("interface:")).map(|s| s.trim().to_owned())
+}
+
+/// Resolver #1 from `scutil --dns`, port 53 (§7).
+pub fn upstream_resolver() -> io::Result<SocketAddr> {
+    let out = run("scutil", &["--dns"])?;
+    let ip = first_resolver(&String::from_utf8_lossy(&out));
+    ip.map(|ip| SocketAddr::new(ip, 53))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "resolver #1 has no nameserver"))
+}
+
+/// The first usable `nameserver[i]` of `resolver #1` in `scutil --dns` output; one with a scope
+/// (fe80::1%en0) is skipped.
+fn first_resolver(out: &str) -> Option<IpAddr> {
+    let mut lines = out.lines().skip_while(|l| l.trim() != "resolver #1").skip(1);
+    lines
+        .by_ref()
+        .take_while(|l| !l.trim_start().starts_with("resolver #"))
+        .filter_map(|l| l.trim().strip_prefix("nameserver[")?.split_once(':').map(|(_, v)| v.trim().to_owned()))
+        .find_map(|v| v.parse().ok())
+}
+
+/// Internet Sharing through com.apple.nat and its launchd job (§8), best effort: a refusal
+/// carries the steps to do it by hand.
+pub fn support_share(s: &Share) -> io::Result<()> {
+    let nat = format!(
+        "{{ Enabled = 1; PrimaryInterface = {{ Device = \"{}\"; Enabled = 1; }}; SharingDevices = ( \"{}\" ); }}",
+        s.uplink, s.cable
+    );
+    let r = run("defaults", &["write", NAT_PLIST, "NAT", &nat]).and_then(|_| {
+        let _ = run("launchctl", &["enable", SHARING_JOB]);
+        run("launchctl", &["kickstart", "-k", SHARING_JOB])
+    });
+    r.map(|_| ()).map_err(|e| {
+        io::Error::other(format!(
+            "{e}. By hand: System Settings > General > Sharing > Internet Sharing: share your \
+             connection from {} to computers using {}, then turn Internet Sharing on",
             s.uplink, s.cable
-        );
-        let r = super::run("defaults", &["write", NAT_PLIST, "NAT", &nat]).and_then(|_| {
-            let _ = super::run("launchctl", &["enable", SHARING_JOB]);
-            super::run("launchctl", &["kickstart", "-k", SHARING_JOB])
-        });
-        r.map(|_| ()).map_err(|e| {
-            io::Error::other(format!(
-                "{e}. By hand: System Settings > General > Sharing > Internet Sharing: share your \
-                 connection from {} to computers using {}, then turn Internet Sharing on",
-                s.uplink, s.cable
-            ))
-        })
-    }
+        ))
+    })
+}
 
-    /// Turns Internet Sharing off if it shares `uplink` to `cable`, as support_share left it.
-    pub fn support_unshare(s: &Share) -> io::Result<()> {
-        let Ok(cur) = super::run("defaults", &["read", NAT_PLIST, "NAT"]) else { return Ok(()) };
-        let cur = String::from_utf8_lossy(&cur);
-        if !(cur.contains(&s.uplink) && cur.contains(&s.cable)) {
-            return Ok(());
-        }
-        super::run("defaults", &["write", NAT_PLIST, "NAT", "-dict-add", "Enabled", "-int", "0"])?;
-        super::run("launchctl", &["kickstart", "-k", SHARING_JOB]).map(|_| ())
+/// Turns Internet Sharing off if it shares `uplink` to `cable`, as support_share left it.
+pub fn support_unshare(s: &Share) -> io::Result<()> {
+    let Ok(cur) = run("defaults", &["read", NAT_PLIST, "NAT"]) else { return Ok(()) };
+    let cur = String::from_utf8_lossy(&cur);
+    if !(cur.contains(&s.uplink) && cur.contains(&s.cable)) {
+        return Ok(());
     }
+    run("defaults", &["write", NAT_PLIST, "NAT", "-dict-add", "Enabled", "-int", "0"])?;
+    run("launchctl", &["kickstart", "-k", SHARING_JOB]).map(|_| ())
+}
 
-    /// Deletes the DNS service and undoes the pf anchor, pf's reference and the forwarding a crash
-    /// left behind (§5.4). The utun, its addresses and its routes went with the crashed process.
-    pub fn cleanup_stale() -> io::Result<()> {
-        let _one = EGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let r = undo_egress();
-        r.and(
-            scutil(&format!("remove {DNS_KEY}\nquit\n"))
-                .or_else(|e| if e.to_string().contains("No such key") { Ok(()) } else { Err(e) }),
-        )
-    }
+/// Deletes the DNS service and undoes the pf anchor, pf's reference and the forwarding a crash
+/// left behind (§5.4). The utun, its addresses and its routes went with the crashed process.
+pub fn cleanup_stale() -> io::Result<()> {
+    let _one = EGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let r = undo_egress();
+    r.and(
+        scutil(&format!("remove {DNS_KEY}\nquit\n"))
+            .or_else(|e| if e.to_string().contains("No such key") { Ok(()) } else { Err(e) }),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::net::TunConfig;
-    use super::v2::{first_resolver, interface, token};
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 

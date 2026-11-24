@@ -292,7 +292,7 @@ pub(super) fn public(path: &Path) -> io::Result<()> {
 pub(super) fn halt(_: Scope) {}
 
 /// A running executable can be deleted.
-pub(super) fn drop(download: &Path) {
+pub(super) fn discard(download: &Path) {
     let _ = fs::remove_file(download);
 }
 

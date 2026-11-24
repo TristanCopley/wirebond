@@ -87,7 +87,7 @@ pub fn install(s: Scope) -> io::Result<bool> {
     }
     changed |= os::register(s, &exe, changed)?;
     if let Some(d) = download {
-        os::drop(&d);
+        os::discard(&d);
         // A download saved where the link goes, /usr/local/bin/wirebond, kept register from
         // linking; it is gone now.
         #[cfg(target_os = "macos")]

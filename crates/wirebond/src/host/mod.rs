@@ -26,7 +26,7 @@
 //! private() -> a guard that restores on drop  public(path: &Path) -> io::Result<()>
 //! register(Scope, exe: &Path, restart: bool) -> io::Result<bool>
 //! unregister(Scope, exe: &Path) -> io::Result<(bool, String)>
-//! halt(Scope)    drop(download: &Path)        remove_exe(exe: &Path) -> io::Result<bool>
+//! halt(Scope)    discard(download: &Path)     remove_exe(exe: &Path) -> io::Result<bool>
 //! run_service(impl FnOnce(Receiver<()>) -> io::Result<()>) -> io::Result<()>
 //! poll_fd(&socket) -> PollFd                  poll(&mut [PollFd], Duration) -> io::Result<()>
 //! wake_pair() -> io::Result<(WakeSock, WakeSock)>, nonblocking
