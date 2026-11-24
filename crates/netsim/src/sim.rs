@@ -322,8 +322,14 @@ pub trait Endpoint: Any {
     fn handle(&mut self, now: Mono, ev: Event<'_>, rids: &mut RidTable, out: &mut dyn Out);
     /// The earliest time `handle` wants an `Event::Tick`; `Mono::MAX` when nothing is due.
     fn next(&self) -> Mono;
-    /// The read-only view the checker and the metrics read.
+    /// The read-only view the metrics and the scenarios read.
     fn snapshot(&self) -> SessionStatus;
+    /// The part of it the checker reads after every call ([`Session::paths`]): the lanes' ids,
+    /// sockets, addresses and validation, and the bytes held. The whole view unless an endpoint
+    /// has a cheaper way.
+    fn paths(&self) -> SessionStatus {
+        self.snapshot()
+    }
     /// Frees the endpoint's receive ids.
     fn close(&mut self, rids: &mut RidTable);
 }
@@ -337,6 +343,9 @@ impl Endpoint for Session {
     }
     fn snapshot(&self) -> SessionStatus {
         Session::snapshot(self)
+    }
+    fn paths(&self) -> SessionStatus {
+        Session::paths(self)
     }
     fn close(&mut self, rids: &mut RidTable) {
         Session::close(self, rids)

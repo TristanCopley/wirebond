@@ -44,6 +44,12 @@ fn snapshot() {
         st.events,
         st.bytes
     );
+    // What a driver checks after every call is the snapshot's own, without the rest.
+    let path = |l: &crate::LaneStatus| (l.id, l.sock, l.peer, l.validated);
+    let cheap = p.s.s.paths();
+    assert_eq!(cheap.bytes, st.bytes);
+    assert_eq!(cheap.lanes.iter().map(path).collect::<Vec<_>>(), st.lanes.iter().map(path).collect::<Vec<_>>());
+    assert!(st.lanes.iter().any(|l| l.validated && l.peer.is_some()) && cheap.flows.is_empty());
 }
 
 /// R2-06: the client sends only small input, so none of its lanes is spread, although it has a

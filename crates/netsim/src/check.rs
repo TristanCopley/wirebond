@@ -134,7 +134,7 @@ impl World {
     /// reached, probes within VALIDATE_AMP to unvalidated unknown addresses, no reply larger than
     /// its trigger, keys, seals, and lane moves. Updates d's before-snapshot.
     pub(crate) fn check_after(&mut self, d: DevId, ev: &Event<'_>, p: Option<&Pkt>, acts: &[Action]) {
-        let after = self[d].snap();
+        let after = self[d].sess.as_ref().map(|s| s.paths()).unwrap_or_default();
         let before = std::mem::take(&mut self[d].last_snap);
         self.check_call(d, ev, p, acts, &before, &after);
         self[d].last_snap = after;

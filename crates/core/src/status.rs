@@ -4,7 +4,7 @@
 
 use crate::estimate::INF;
 use crate::flow::Flow;
-use crate::lane::LaneIx;
+use crate::lane::{Lane, LaneIx};
 use crate::{
     FlowStatus, LaneOut, LaneStatus, MIN, Mono, REORDER_LANES, SMALL_WINDOW, STATUS_EVENTS, Session, SessionStatus,
 };
@@ -33,6 +33,25 @@ impl Session {
             events: (self.nevents.saturating_sub(STATUS_EVENTS)..self.nevents)
                 .map(|i| self.events[i % STATUS_EVENTS].clone())
                 .collect(),
+        }
+    }
+
+    /// The part of [`Session::snapshot`] a driver checks after every call (netsim's checker): each
+    /// lane's id, socket, return address and whether it validated, and the bytes held. Every other
+    /// field is its default. The whole snapshot builds each label, statistic, flow and event
+    /// besides, which cost a quarter of a simulated run when taken per call.
+    pub fn paths(&self) -> SessionStatus {
+        let lane = |x: &Lane| LaneStatus {
+            id: x.id,
+            sock: x.sock,
+            peer: x.peer,
+            validated: x.validated,
+            ..LaneStatus::default()
+        };
+        SessionStatus {
+            lanes: self.lanes.iter().map(lane).collect(),
+            bytes: self.pool.held(),
+            ..SessionStatus::default()
         }
     }
 
