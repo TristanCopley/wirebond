@@ -5,6 +5,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::testkit::{FakeTun, ip};
 use super::*;
 
 /// What a test turns on the fake host while the daemon runs.
@@ -27,30 +28,6 @@ struct Knobs {
     /// Why the TUN device does not open, when it does not, and how often it opened.
     tun_err: Option<String>,
     tuns: usize,
-}
-
-/// A fake TUN device: what the test writes for the daemon to read, and what the daemon wrote.
-#[derive(Clone, Default)]
-struct FakeTun(Arc<Mutex<Queues>>);
-
-/// What the daemon will read, and what it wrote.
-type Queues = (VecDeque<Vec<u8>>, Vec<Vec<u8>>);
-
-impl TunDev for FakeTun {
-    fn name(&self) -> &str {
-        "fake0"
-    }
-
-    fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let p = self.0.lock().unwrap().0.pop_front().ok_or(io::ErrorKind::WouldBlock)?;
-        buf[..p.len()].copy_from_slice(&p);
-        Ok(p.len())
-    }
-
-    fn write(&self, packet: &[u8]) -> io::Result<()> {
-        self.0.lock().unwrap().1.push(packet.to_vec());
-        Ok(())
-    }
 }
 
 /// A fake host: its links, one mesh address, a fake TUN device, the knobs and a record of calls.
@@ -153,11 +130,6 @@ impl Node {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
-}
-
-/// 127.`net`.0.`host`.
-fn ip(net: u8, host: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(127, net, 0, host))
 }
 
 /// A node named `name` with links `links` (interface name, address) and mesh address `mesh`.
@@ -274,7 +246,7 @@ fn stun_mappings_reach_the_peer_and_the_bond_comes_up() {
     });
     // The anchor's public candidate is where the mesh's underlay would go (§5.3).
     let p = udp_to(SocketAddr::new(one_public(ip(51, 2)), 41641));
-    c.tun.0.lock().unwrap().0.push_back(p);
+    c.tun.inject(p);
     run(&mut [&mut a, &mut c], "mesh_captured", |n| n[1].d.mesh_captured.is_some());
     assert!(c.d.capture.is_none());
     assert!(c.d.status(false).problems.iter().any(|p| p.code == problem::MESH_CAPTURED));
@@ -357,10 +329,10 @@ fn a_wake_re_punches_and_asks_stun_again() {
     let mut next = Instant::now();
     run(&mut [&mut a, &mut c], "traffic after the wake", |n| {
         if Instant::now() >= next {
-            n[1].tun.0.lock().unwrap().0.push_back(p.clone());
+            n[1].tun.inject(p.clone());
             next = Instant::now() + Duration::from_millis(500);
         }
-        n[0].tun.0.lock().unwrap().1.contains(&p)
+        n[0].tun.written().contains(&p)
     });
     assert!(c.d.bonds[0].state == BondState::Up);
 }
@@ -396,10 +368,10 @@ fn mesh_traffic_in_the_tun_removes_capture_for_the_bond() {
     run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
     // An ordinary packet passes; one for the mesh's 100.64.0.0/10 ends capture (§5.3).
     let fine = udp_to("1.1.1.1:53".parse().unwrap());
-    c.tun.0.lock().unwrap().0.push_back(fine.clone());
-    run(&mut [&mut a, &mut c], "egress", |n| n[0].tun.0.lock().unwrap().1.contains(&fine));
+    c.tun.inject(fine.clone());
+    run(&mut [&mut a, &mut c], "egress", |n| n[0].tun.written().contains(&fine));
     assert!(c.d.mesh_captured.is_none());
-    c.tun.0.lock().unwrap().0.push_back(udp_to("100.101.102.103:41641".parse().unwrap()));
+    c.tun.inject(udp_to("100.101.102.103:41641".parse().unwrap()));
     run(&mut [&mut a, &mut c], "mesh_captured", |n| n[1].d.capture.is_none());
     assert_eq!(c.calls().last().map(String::as_str), Some("capture off"));
     let st = c.d.status(false);
@@ -546,9 +518,9 @@ fn status_lanes_name_links_by_label_and_say_what_they_carry_now() {
     for i in 0..20u8 {
         let mut p = udp_to("1.1.1.1:53".parse().unwrap());
         *p.last_mut().unwrap() = i;
-        c.tun.0.lock().unwrap().0.push_back(p);
+        c.tun.inject(p);
     }
-    run(&mut [&mut a, &mut c], "egress", |n| n[0].tun.0.lock().unwrap().1.len() >= 20);
+    run(&mut [&mut a, &mut c], "egress", |n| n[0].tun.written().len() >= 20);
     let (cl, al) = (c.d.status(false).bond.unwrap().lanes, a.d.status(false).anchor.unwrap().bonds[0].lanes.clone());
     let names = |ls: &[api::Lane]| ls.iter().find(|l| l.id != 0).map(|l| l.links.clone());
     let want = Some(vec!["Wi-Fi".to_string(), "Ethernet".to_string()]);

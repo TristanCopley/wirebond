@@ -29,6 +29,8 @@ pub mod proto;
 mod rates;
 mod support;
 #[cfg(test)]
+mod testkit;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_net;

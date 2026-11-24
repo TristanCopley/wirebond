@@ -2,11 +2,12 @@
 //! steps, the registration names the client's link, and the cable's OS counters are carried
 //! bytes. Run inside `unshare -n` with `lo` up.
 
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::super::plat::{Platform, TunDev};
+use super::super::testkit::ip;
 use super::super::{Daemon, Request};
 use super::*;
 use crate::host::Config;
@@ -63,10 +64,6 @@ impl Platform for Fake {
         self.bytes += 1000;
         Ok((self.bytes, self.bytes))
     }
-}
-
-fn ip(net: u8, host: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(127, net, 0, host))
 }
 
 /// A node named `name` whose one link `link_name` is at `link`, with mesh address `mesh`.

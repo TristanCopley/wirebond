@@ -3,43 +3,8 @@
 
 use std::sync::Mutex;
 
+use super::testkit::{FakeTun, ip};
 use super::*;
-
-/// A fake TUN device: what the test writes for the daemon to read, and what the daemon wrote.
-#[derive(Clone, Default)]
-struct FakeTun(Arc<Mutex<Queues>>);
-
-/// What the daemon will read, and what it wrote.
-type Queues = (VecDeque<Vec<u8>>, Vec<Vec<u8>>);
-
-impl FakeTun {
-    fn inject(&self, p: Vec<u8>) {
-        self.0.lock().unwrap().0.push_back(p);
-    }
-
-    fn written(&self) -> Vec<Vec<u8>> {
-        self.0.lock().unwrap().1.clone()
-    }
-}
-
-struct TunHandle(FakeTun);
-
-impl TunDev for TunHandle {
-    fn name(&self) -> &str {
-        "fake0"
-    }
-
-    fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let p = self.0.0.lock().unwrap().0.pop_front().ok_or(io::ErrorKind::WouldBlock)?;
-        buf[..p.len()].copy_from_slice(&p);
-        Ok(p.len())
-    }
-
-    fn write(&self, packet: &[u8]) -> io::Result<()> {
-        self.0.0.lock().unwrap().1.push(packet.to_vec());
-        Ok(())
-    }
-}
 
 /// A fake host: one link and one mesh address, a fake TUN device, and a record of the calls.
 struct Fake {
@@ -53,7 +18,7 @@ struct Fake {
 impl Platform for Fake {
     fn open_tun(&mut self, c: &host::TunConfig) -> io::Result<Box<dyn TunDev>> {
         self.calls.lock().unwrap().push(format!("tun {:?}", c.addr4));
-        Ok(Box::new(TunHandle(self.tun.clone())))
+        Ok(Box::new(self.tun.clone()))
     }
 
     fn capture_install(&mut self, c: &host::Capture) -> io::Result<()> {
@@ -131,11 +96,6 @@ fn node(name: &str, link: IpAddr, mesh: IpAddr, cfg: Config) -> (Daemon, FakeTun
     let mut d = Daemon::new("2.0.0", None, cfg, Box::new(fake)).unwrap();
     (d.loopback, d.captive_url) = (true, None);
     (d, tun, calls)
-}
-
-/// 127.`net`.0.`host`.
-fn ip(net: u8, host: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(127, net, 0, host))
 }
 
 /// An IPv4/UDP packet from `src` to `dst` carrying `data`.
