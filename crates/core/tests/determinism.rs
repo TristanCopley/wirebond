@@ -3,9 +3,7 @@
 //! in both modes, comparing every call either session makes and every next() it reports, from the
 //! first event on.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use wirebond_core::{MODE_BANDWIDTH, MODE_PERFORMANCE, MS, SessionStatus};
 
 /// The hotel under Moonlight at 10 Mbps for 3 s in `mode`, its Wi-Fi return path blackholed from

@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 description = "wirebond's engine: wire format, keys, lanes, scheduling. Pure: no I/O, no threads, no clock."
+# tests/main.rs is the one integration-test binary, with tests/*.rs as its modules; without this,
+# cargo would also build each of them as a binary of its own.
+autotests = false
 
 [dependencies]
 # zeroize: superseded and dropped keys are zeroed (§7.2), with the AES round keys and GHASH key, and
@@ -20,6 +23,10 @@ zeroize = { version = "1.9.1", default-features = false }
 # tests/vectors.rs reads the vectors the Go implementation wrote and writes Msg as node does.
 # float_roundtrip: read every float Go writes as the double Go wrote (notes/rust.md).
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+
+[[test]]
+name = "integration"
+path = "tests/main.rs"
 
 # The engine on the scenarios of the Go implementation's benchmark (notes/rust.md, "Engine benchmarks").
 [[bench]]

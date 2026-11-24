@@ -2,9 +2,7 @@
 //! checks, driven by a fake engine so that they hold whatever state the real engine is in.
 //! Reference values come from Go's core/pair_test.go driver, which this one ports draw for draw.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use std::net::SocketAddr;
 use wirebond_core::{Event, FlowId, MS, Mono, Msg, Out, RidTable, SEC, SockId};
 

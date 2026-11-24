@@ -222,8 +222,9 @@ impl Recorder {
     }
 }
 
-/// Counting allocations inside the engine's calls. Only tests/alloc.rs installs the counting
-/// allocator that calls [`meter::note`]; elsewhere the meter stays at zero.
+/// Counting allocations inside the engine's calls. tests/alloc.rs installs the counting allocator
+/// that calls [`meter::note`] for the whole test binary; it counts only on a thread whose test has
+/// armed the meter.
 pub mod meter {
     use std::cell::Cell;
 

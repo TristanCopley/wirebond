@@ -14,11 +14,9 @@
 //!
 //! notes/rust.md lists what the public API cannot express.
 
-mod common;
-
+use crate::common::*;
 use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
-use common::*;
 use std::net::SocketAddr;
 use wirebond_core::{
     BOND_BYTES, DATA_LEN, EPOCH_BITS, Event, FlowId, HEADER_LEN, MAX_PACKET, MIN, MODE_BANDWIDTH, MS, Mono, Msg,

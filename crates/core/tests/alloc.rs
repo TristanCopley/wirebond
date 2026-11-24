@@ -8,9 +8,7 @@
 //! armed common::meter, which it does only inside Session::handle, and not inside the harness's
 //! own Out, which copies what it records.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
 use std::hint::black_box;
