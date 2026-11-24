@@ -16,8 +16,8 @@ use crate::lane::{Arrival, LaneIx, Lanes, PENDING_COPIES, State};
 use crate::wire::{Echo, Probe, Window, be};
 use crate::{
     DATA_LEN, FlowId, HEADER_LEN, IDLE_AFTER, Link, LinkInfo, LogEvent, MAX_CANDS, MAX_ECHOES, MAX_LINKS, MAX_PACKET,
-    MODE_BANDWIDTH, MODE_PERFORMANCE, MeshLane, Mono, Msg, Out, REORDER_SLOTS, REPLAY_WINDOW, Rand, Role, SMALL_BIT,
-    STATUS_EVENTS, SockId, TYPE_DATA, TYPE_PROBE, packet_rid,
+    MODE_BANDWIDTH, MODE_PERFORMANCE, MeshLane, Mono, Msg, Out, REPLAY_WINDOW, Rand, Role, SMALL_BIT, STATUS_EVENTS,
+    SockId, TYPE_DATA, TYPE_PROBE, packet_rid,
 };
 
 /// No time: a timer that is not set, a run that has not started. Go: `never`.
@@ -315,14 +315,7 @@ impl Session {
             if !self.flows[f].used {
                 continue;
             }
-            // Held seqs lie within REORDER_SLOTS of next, so this many steps deliver them all; the
-            // bound only keeps a broken count from spinning (Go looped while f.n > 0).
-            for _ in 0..REORDER_SLOTS {
-                if self.flows[f].n == 0 {
-                    break;
-                }
-                self.step(out, f);
-            }
+            self.flush_held(out, f);
             // The old session's gap given up teaches nothing about the new one's (R2-13, C5).
             let fl = &mut self.flows[f];
             (fl.next, fl.fill, fl.gap_n, fl.lanes) = (1, 0, 0, Default::default());

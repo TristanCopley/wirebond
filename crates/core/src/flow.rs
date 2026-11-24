@@ -464,13 +464,11 @@ impl Session {
 
     /// Acts on one authenticated data payload, `self.rxbuf[..n]`, that arrived on a lane (None:
     /// no lane has its address; delivered, but it moves nothing, §7.5): small packets at once,
-    /// bulk through the reorder buffer (§10.3). The lane is not used here: `packet` records it
-    /// through `Flow::carried` for every copy (notes/core.md 19).
+    /// bulk through the reorder buffer (§10.3). `packet` drops a payload shorter than DATA_LEN.
+    /// The lane is not used here: `packet` records it through `Flow::carried` for every copy
+    /// (notes/core.md 19).
     pub(crate) fn data(&mut self, out: &mut dyn Out, now: Mono, l: Option<LaneIx>, typ: u8, n: usize) {
         let lane = l.map(|l| self.lanes[l].id);
-        if n < DATA_LEN {
-            return; // packet drops these; never slice past one
-        }
         let (id, seq) = (FlowId(be(&self.rxbuf[..2]) as u16), be(&self.rxbuf[2..DATA_LEN]) as u32);
         let Some(f) = self.flow(id, true) else { return };
         self.touch(now);
@@ -499,14 +497,8 @@ impl Session {
         // review fixes: flow-half-range).
         if !after(fl.next, seq) && seq.wrapping_sub(fl.next) as usize >= REORDER_SLOTS {
             // Too far ahead to hold: deliver what is held, then jump (notes/core.md 30). No gap was
-            // timed: nothing to learn (R2-13). Held seqs lie within REORDER_SLOTS past `next`, so
-            // this many steps deliver them all; the bound only keeps a broken count from spinning.
-            for _ in 0..REORDER_SLOTS {
-                if self.flows[f].n == 0 {
-                    break;
-                }
-                self.step(out, f);
-            }
+            // timed: nothing to learn (R2-13).
+            self.flush_held(out, f);
             (self.flows[f].next, self.flows[f].gap_n) = (seq, 0);
             self.unrecovered += 1;
         }
@@ -606,6 +598,18 @@ impl Session {
         self.pool.put(b);
         self.waited(on.checked_sub(1), self.now.saturating_sub(at));
         false
+    }
+
+    /// Delivers every datagram flow slot `f` holds, in order, stepping past its gaps. Held seqs lie
+    /// within REORDER_SLOTS past `next`, so this many steps deliver them all; the bound only keeps
+    /// a broken count from spinning (Go looped while f.n > 0).
+    pub(crate) fn flush_held(&mut self, out: &mut dyn Out, f: usize) {
+        for _ in 0..REORDER_SLOTS {
+            if self.flows[f].n == 0 {
+                break;
+            }
+            self.step(out, f);
+        }
     }
 
     /// Delivers flow slot `f`'s held datagrams in order; a gap waits until it fills, until every
