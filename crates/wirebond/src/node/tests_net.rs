@@ -182,8 +182,10 @@ fn run(nodes: &mut [&mut Node], what: &str, mut done: impl FnMut(&[&mut Node]) -
     let mut polls: Vec<host::Poll> = nodes.iter().map(|_| host::Poll::default()).collect();
     let t = Instant::now();
     while !done(nodes) {
-        let st: Vec<_> = nodes.iter().map(|n| n.d.status(false)).collect();
-        assert!(t.elapsed() < Duration::from_secs(15), "{what}: timed out\n{st:#?}");
+        if t.elapsed() >= Duration::from_secs(15) {
+            let st: Vec<_> = nodes.iter().map(|n| n.d.status(false)).collect();
+            panic!("{what}: timed out\n{st:#?}");
+        }
         for (n, p) in nodes.iter_mut().zip(&mut polls) {
             n.d.step(p, Duration::from_millis(2)).unwrap();
         }
