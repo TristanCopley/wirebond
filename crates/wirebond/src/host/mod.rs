@@ -50,6 +50,9 @@ mod net;
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
 #[cfg_attr(windows, path = "windows.rs")]
 mod os;
+// macOS's and Windows' layers against the runner's own kernel: ignored, run by ci.yml's rust-os job.
+#[cfg(all(test, any(target_os = "macos", windows)))]
+mod real;
 #[cfg(test)]
 mod tests;
 #[cfg(unix)]
