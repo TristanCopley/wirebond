@@ -1322,9 +1322,7 @@ impl Daemon {
                 if self.cfg.role == Role::Anchor
                     && let Some(bi) = self.bonds.iter().position(|b| b.chan == Some(id))
                 {
-                    self.bonds[bi].mode = mode;
-                    let m = core::Msg { t: "mode".into(), mode: mode.as_str().into(), ..core::Msg::default() };
-                    self.handle_bond(bi, core::Event::Control(&m));
+                    self.set_mode(bi, mode);
                 }
             }
             Msg::Support(s) => self.support_registered(id, s),
@@ -1404,19 +1402,57 @@ impl Daemon {
         })
     }
 
+    /// Whether the peer on channel `id` may open a bond here (§3.2 step 2): its hello, its address
+    /// and its allow-list entry, or None once it is refused. `refused` words the log line from the
+    /// peer's name and address.
+    fn admit(
+        &mut self,
+        id: u64,
+        refused: impl FnOnce(&str, IpAddr) -> String,
+    ) -> Option<(proto::Hello, IpAddr, String)> {
+        let p = self.chans.get(&id)?;
+        let h = p.hello.clone()?;
+        let peer = p.chan.peer.ip().to_canonical();
+        if self.cfg.role != Role::Anchor {
+            self.refuse(id, ErrorCode::NotAllowed, "not an anchor");
+            return None;
+        }
+        let Some(device) = self.allowed(peer) else {
+            self.log(refused(&link::clean(&h.name, link::LABEL_MAX), peer));
+            self.refuse(id, ErrorCode::NotAllowed, "not on the allow-list");
+            return None;
+        };
+        Some((h, peer, device))
+    }
+
+    /// The anchor's `bond ok` on channel `id` for bond `bi`, with the bond's addresses and egress
+    /// (§3.2 step 3), and then its session in `mode`. `what` names the bond in the log.
+    fn answer_open(&mut self, id: u64, bi: usize, mode: Mode, fresh: bool, what: &str) {
+        let dns = self.anchor_nets().0.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1)));
+        let b = &self.bonds[bi];
+        let ok = proto::Bond::Ok { addr4: b.addr4, addr6: b.addr6, mtu: TUN_MTU as u16, dns, egress: b.egress };
+        let line = format!("{what} open from {} ({}), {}", b.peer, b.peer_addr, mode.as_str());
+        self.send_chan(id, &Msg::Bond(ok));
+        self.log(line);
+        self.set_mode(bi, mode);
+        self.open_session(bi, core::Role::Anchor, fresh);
+    }
+
+    /// What this anchor's egress carries, as `bond ok` and status say it.
+    fn egress_kind(&self) -> Egress {
+        match self.egress.as_ref().and_then(|(_, on)| on.as_ref()) {
+            Some(on) if on.v4 && on.v6 => Egress::Both,
+            Some(on) if on.v4 => Egress::V4,
+            Some(on) if on.v6 => Egress::V6,
+            _ => Egress::None,
+        }
+    }
+
     /// An anchor's answer to `bond open` (§3.2 steps 2–4).
     fn bond_open(&mut self, id: u64, mode: Mode) {
         let now = self.now();
-        let Some(p) = self.chans.get(&id) else { return };
-        let Some(h) = p.hello.clone() else { return };
-        let peer = p.chan.peer.ip().to_canonical();
-        if self.cfg.role != Role::Anchor {
-            return self.refuse(id, ErrorCode::NotAllowed, "not an anchor");
-        }
-        let Some(device) = self.allowed(peer) else {
-            self.log(format!("{} ({peer}) is not on the allow-list", link::clean(&h.name, link::LABEL_MAX)));
-            return self.refuse(id, ErrorCode::NotAllowed, "not on the allow-list");
-        };
+        let refused = |name: &str, peer| format!("{name} ({peer}) is not on the allow-list");
+        let Some((h, peer, device)) = self.admit(id, refused) else { return };
         if self.tun.is_none() {
             // Every packet of the bond would be dropped: the client redials, and by then the
             // device may have opened (`anchor_on`).
@@ -1429,18 +1465,13 @@ impl Daemon {
         let Some(n) = self.pool.assign(&device) else {
             return self.refuse(id, ErrorCode::TooManyBonds, "no bond address left");
         };
-        let (own, nets) = self.anchor_nets();
+        let (_, nets) = self.anchor_nets();
         let addr = |v6: bool| nets.iter().find(|(a, _)| a.is_ipv6() == v6).map(|&(a, _)| host_in(a, n));
         let (addr4, addr6) = (
             addr(false).and_then(|a| if let IpAddr::V4(a) = a { Some(a) } else { None }),
             addr(true).and_then(|a| if let IpAddr::V6(a) = a { Some(a) } else { None }),
         );
-        let egress = match &self.egress {
-            Some((_, Some(on))) if on.v4 && on.v6 => Egress::Both,
-            Some((_, Some(on))) if on.v4 => Egress::V4,
-            Some((_, Some(on))) if on.v6 => Egress::V6,
-            _ => Egress::None,
-        };
+        let egress = self.egress_kind();
         let bi = match existing {
             Some(i) if self.bonds[i].inst == h.inst => i,
             other => {
@@ -1458,12 +1489,7 @@ impl Daemon {
         if b.state == BondState::Connecting {
             b.set_state(BondState::Punching, now);
         }
-        let dns = own.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1)));
-        let ok = proto::Bond::Ok { addr4, addr6, mtu: TUN_MTU as u16, dns, egress };
-        self.send_chan(id, &Msg::Bond(ok));
-        self.log(format!("bond open from {} ({peer}), {}", self.bonds[bi].peer, mode.as_str()));
-        self.set_mode(bi, mode);
-        self.open_session(bi, core::Role::Anchor, fresh);
+        self.answer_open(id, bi, mode, fresh, "bond");
     }
 
     /// A client's `bond ok` (§3.2 step 3): the TUN device with its bond addresses, the session.
@@ -2535,12 +2561,7 @@ impl Daemon {
                 })
                 .collect(),
             uplink: self.egress.as_ref().and_then(|(_, on)| on.as_ref()).and_then(|on| on.uplink.clone()),
-            egress: match self.egress.as_ref().and_then(|(_, on)| on.as_ref()) {
-                Some(on) if on.v4 && on.v6 => Egress::Both,
-                Some(on) if on.v4 => Egress::V4,
-                Some(on) if on.v6 => Egress::V6,
-                _ => Egress::None,
-            },
+            egress: self.egress_kind(),
             allow: self.cfg.allow.clone(),
         });
         let support = self.cfg.support.as_ref().filter(|_| self.cfg.role == Role::Support).map(|s| api::SupportView {

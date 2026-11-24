@@ -13,13 +13,13 @@
 //! and its egress, measured meanwhile) at the end of the window.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use wirebond_core::{self as core, MS, Mode, Mono, PICK_BULK_BYTES, PROBE_ACTIVE, RATE_WINDOW, SEC, TUN_MTU};
+use wirebond_core::{self as core, MS, Mode, Mono, PICK_BULK_BYTES, PROBE_ACTIVE, RATE_WINDOW, SEC};
 
 use super::proto::{self, MeasureLane};
-use super::{Bond, BondState, Daemon, Egress, ErrorCode, Msg, PICK, Role, bond, ctl, link};
+use super::{Bond, BondState, Daemon, Egress, Msg, PICK, bond, ctl, link};
 use crate::api::PickRow;
 
 /// One candidate's measurements.
@@ -357,16 +357,8 @@ impl Daemon {
     /// its channel. A newer one from the same device replaces it.
     pub(super) fn measure_open(&mut self, id: u64, mode: Mode) {
         let now = self.now();
-        let Some(p) = self.chans.get(&id) else { return };
-        let Some(h) = p.hello.clone() else { return };
-        let peer = p.chan.peer.ip().to_canonical();
-        if self.cfg.role != Role::Anchor {
-            return self.refuse(id, ErrorCode::NotAllowed, "not an anchor");
-        }
-        if self.allowed(peer).is_none() {
-            self.log(format!("pick from {} ({peer}): not on the allow-list", link::clean(&h.name, link::LABEL_MAX)));
-            return self.refuse(id, ErrorCode::NotAllowed, "not on the allow-list");
-        }
+        let refused = |name: &str, peer| format!("pick from {name} ({peer}): not on the allow-list");
+        let Some((h, peer, _)) = self.admit(id, refused) else { return };
         if let Some(old) = self.bonds.iter().position(|b| b.measure && b.peer_addr == peer) {
             self.end_bond(old, true);
         }
@@ -375,13 +367,7 @@ impl Daemon {
         b.set_state(BondState::Punching, now);
         self.bonds.push(b);
         let bi = self.bonds.len() - 1;
-        let (own, _) = self.anchor_nets();
-        let dns = own.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1)));
-        let ok = proto::Bond::Ok { addr4: None, addr6: None, mtu: TUN_MTU as u16, dns, egress: Egress::None };
-        self.send_chan(id, &Msg::Bond(ok));
-        self.log(format!("pick bond open from {} ({peer}), {}", self.bonds[bi].peer, mode.as_str()));
-        self.set_mode(bi, mode);
-        self.open_session(bi, core::Role::Anchor, true);
+        self.answer_open(id, bi, mode, true, "pick bond");
     }
 
     /// `measure start` on channel `id` (§18): the bond on it measures for `seconds`, pushing at
