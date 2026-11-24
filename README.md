@@ -209,7 +209,7 @@ codes: 0 ok, 1 failed, 2 usage, 3 no daemon, 4 needs administrator rights, 5 ref
 ```sh
 cargo build --release -p wirebond             # the daemon and CLI
 cargo test --workspace --exclude wirebond-netsim
-cargo test -p wirebond-netsim --release       # the simulator's acceptance set (SPEC §23)
+cargo test -p wirebond-netsim --profile sim   # the simulator's acceptance set (SPEC §23)
 sudo tests/system/run.sh                      # the system harness in network namespaces (Linux)
 ```
 

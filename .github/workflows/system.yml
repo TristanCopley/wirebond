@@ -69,11 +69,6 @@ jobs:
           sudo apt-get install -y -qq nftables jq
           sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" || echo "no linux-modules-extra: netem may be skipped"
           sudo modprobe -a sch_netem sch_tbf tun || true
-      - name: The daemon is static and stripped (SPEC §22.5)
-        run: |
-          echo "linux x86_64: $(stat -c %s "$WIREBOND_BIN") bytes"
-          kind=$(file -b "$WIREBOND_BIN") && echo "$kind"
-          grep -q 'static.*, stripped$' <<< "$kind" || { echo "not a static, stripped executable"; exit 1; }
       # functional: the namespaces and the load tool with no daemon, then A7 to A10. perf: A12, and
       # the shaped and netem runs against the mesh-lane baseline.
       - name: run.sh ${{ matrix.targets }}
@@ -94,6 +89,14 @@ jobs:
             echo '```'
             exit "$code"
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      # After the harness, and whether it passed or not: a daemon that is not static still runs,
+      # and what the harness measured of it is worth having beside this failure.
+      - name: The daemon is static and stripped (SPEC §22.5)
+        if: success() || failure()
+        run: |
+          echo "linux x86_64: $(stat -c %s "$WIREBOND_BIN") bytes"
+          kind=$(file -b "$WIREBOND_BIN") && echo "$kind"
+          grep -q 'static.*, stripped$' <<< "$kind" || { echo "not a static, stripped executable"; exit 1; }
       - if: failure()
         run: sudo chmod -R a+rX "$TMPDIR"
       - if: failure()

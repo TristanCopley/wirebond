@@ -16,7 +16,13 @@ on:
     paths-ignore: ['site/**', '.github/workflows/site.yml']
   schedule:
     - cron: '23 9 * * *'
+  # By hand, on any branch; with long, the full set too, as release.yml asks for a pushed tag.
   workflow_dispatch:
+    inputs:
+      long:
+        description: Also run netsim's full acceptance set
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       long:
@@ -166,8 +172,8 @@ jobs:
             fi
           }
           # list ARGS: what cargo test lists with those arguments, a test per line, sorted.
-          list() { cargo test -p wirebond-netsim --release --locked $1 --list | sed -n 's/: test$//p' | sort; }
-          cargo test -p wirebond-netsim --release --locked --no-run
+          list() { cargo test -p wirebond-netsim --profile sim --locked $1 --list | sed -n 's/: test$//p' | sort; }
+          cargo test -p wirebond-netsim --profile sim --locked --no-run
           all=$(list --)
           named=$(for l in "${lines[@]}"; do read -r _ tests <<< "$l" && printf '%s\n' $tests; done | sort -u)
           gone=$(comm -23 <(echo "$named") <(echo "$all"))
@@ -183,7 +189,7 @@ jobs:
           echo "ARGS=$(args "$INDEX")" >> "$GITHUB_ENV"
       # --no-fail-fast: a failure in the lib's tests does not stop cargo before rest's sim binary.
       - name: This shard of the full set
-        run: cargo test -p wirebond-netsim --release --locked --no-fail-fast $ARGS
+        run: cargo test -p wirebond-netsim --profile sim --locked --no-fail-fast $ARGS
 
   rust-targets:
     runs-on: ubuntu-latest

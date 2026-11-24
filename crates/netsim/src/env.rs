@@ -93,7 +93,9 @@ pub fn sim_time() -> Dur {
 /// (tests/sim/`module`.rs) on seed.
 pub fn repro(module: &str, test: &str, seed: u64) -> String {
     let long = if long() { "WIREBOND_LONG=1 " } else { "" };
-    format!("{long}WIREBOND_SEED={seed} cargo test -p wirebond-netsim --release --test sim -- --exact {module}::{test}")
+    format!(
+        "{long}WIREBOND_SEED={seed} cargo test -p wirebond-netsim --profile sim --test sim -- --exact {module}::{test}"
+    )
 }
 
 /// Real core Sessions, or the fake in direct mode with WIREBOND_FAKE.
@@ -681,7 +683,7 @@ mod tests {
         assert_eq!(ms(Dur::MAX), "+Inf");
         assert_eq!(ms(1 << 62), "+Inf");
         assert!(repro("accept", "a9_paused", 3).ends_with(
-            "WIREBOND_SEED=3 cargo test -p wirebond-netsim --release --test sim -- --exact accept::a9_paused"
+            "WIREBOND_SEED=3 cargo test -p wirebond-netsim --profile sim --test sim -- --exact accept::a9_paused"
         ));
         assert!(is_bulk(&[TYPE_DATA, 0]) && !is_bulk(&[TYPE_DATA | 0x80]) && !is_bulk(&[]));
     }

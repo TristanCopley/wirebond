@@ -23,14 +23,14 @@ zeroize = { version = "1.9.1", default-features = false }
 
 [dev-dependencies]
 # tests/vectors.rs reads the vectors the Go implementation wrote and writes Msg as node does.
-# float_roundtrip: read every float Go writes as the double Go wrote (notes/rust.md).
+# float_roundtrip: read every float Go wrote as the double it was.
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 
 [[test]]
 name = "integration"
 path = "tests/main.rs"
 
-# The engine on the scenarios of the Go implementation's benchmark (notes/rust.md, "Engine benchmarks").
+# The engine on the scenarios of the 1.x implementation's benchmark.
 [[bench]]
 name = "engine"
 harness = false

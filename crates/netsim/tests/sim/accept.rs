@@ -1,7 +1,7 @@
 //! SPEC §23.3's acceptance scenarios that run in netsim: A1–A6, A11 and A13 (A7–A10 and A12 run
 //! in the system harness, tier 3). Each test runs the seed set through [`accept`]: `cargo test
-//! -p wirebond-netsim --release --test sim -- accept::` (PR set: seeds 1–3, 60 simulated seconds);
-//! `WIREBOND_LONG=1` for 20 seeds × 5 minutes; `WIREBOND_SEED=N` for one seed;
+//! -p wirebond-netsim --profile sim --test sim -- accept::` (PR set: seeds 1–3, 60 simulated
+//! seconds); `WIREBOND_LONG=1` for 20 seeds × 5 minutes; `WIREBOND_SEED=N` for one seed;
 //! `WIREBOND_HASHES=1` prints each run's event-log hash. A scenario's stated duration wins over
 //! the run length.
 //!

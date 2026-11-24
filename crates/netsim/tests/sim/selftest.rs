@@ -38,7 +38,7 @@ fn fake(direct: bool) -> Maker {
 
 /// The command that reproduces a failure of test.
 fn repro(test: &str) -> String {
-    format!("cargo test -p wirebond-netsim --release --test sim -- --exact selftest::{test}")
+    format!("cargo test -p wirebond-netsim --profile sim --test sim -- --exact selftest::{test}")
 }
 
 /// Fails test at once on a safety failure.
