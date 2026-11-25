@@ -676,6 +676,7 @@ fn a_bond_ended_untold_takes_the_new_terms_if_its_channel_returns_first() {
         n[1].d.bonds[0].state == BondState::Up
             && n[1].d.capture.as_ref().is_some_and(|cap| cap.routes == host::Routes::BondOnly)
     });
+    assert!(!c.d.logs.iter().any(|l| l.ends_with(": fail open")), "the channel returned first: {:?}", c.d.logs);
     assert_eq!(c.d.bonds[0].owner, owners.1, "the client's own bond and session");
     assert_ne!(a.d.bonds[0].owner, owners.0, "the anchor's new ones");
     assert_eq!(c.calls(), ["capture on", "capture off", "capture on"], "never without the bond's routes for long");
