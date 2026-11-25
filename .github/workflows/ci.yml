@@ -124,7 +124,6 @@ jobs:
   # so a new test runs there without a change here. The first step fails the shard unless the
   # shards' own filters list each test of the crate exactly once.
   netsim-long:
-    name: netsim long ${{ matrix.shard }}
     if: github.event_name == 'schedule' || inputs.long
     runs-on: ubuntu-latest
     strategy:
