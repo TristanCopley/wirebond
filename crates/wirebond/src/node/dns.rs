@@ -290,11 +290,23 @@ mod tests {
 
     use super::*;
 
+    /// A relay on `addrs` whose IPv4 addresses listen on UDP and on TCP, and what it skipped. The
+    /// relay binds UDP port 0, then TCP on the port UDP got, which Windows may refuse (CI's runner,
+    /// at times: the number is taken, or lies in a range TCP keeps excluded): then that address
+    /// serves UDP alone and is reported skipped, and this makes another relay, on another port.
+    fn relay(addrs: &[&str], upstream: SocketAddr) -> (Relay, Vec<(IpAddr, io::Error)>) {
+        let addrs: Vec<IpAddr> = addrs.iter().map(|a| a.parse().unwrap()).collect();
+        (0..50)
+            .map(|_| Relay::new(&addrs, 0, upstream).unwrap())
+            .find(|(_, skipped)| skipped.iter().all(|(a, _)| a.is_ipv6()))
+            .expect("a relay whose IPv4 address listens on UDP and on TCP")
+    }
+
     #[test]
     fn relays_queries_verbatim_and_answers_to_the_asker() {
         let resolver = UdpSocket::bind("127.0.40.53:0").unwrap();
         resolver.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let (mut r, skipped) = Relay::new(&["127.0.40.1".parse().unwrap()], 0, resolver.local_addr().unwrap()).unwrap();
+        let (mut r, skipped) = relay(&["127.0.40.1"], resolver.local_addr().unwrap());
         assert!(skipped.is_empty());
         let at = r.socks[0].local_addr().unwrap();
         let client = UdpSocket::bind("127.0.40.2:0").unwrap();
@@ -336,11 +348,7 @@ mod tests {
                 }
             }
         });
-        // The relay binds UDP port 0, then TCP on the port UDP got, which something else on the
-        // machine may hold (CI's Windows runner, once): then it serves UDP alone, and the test
-        // makes another relay, on another port.
-        let relay = || Relay::new(&["127.0.41.1".parse().unwrap()], 0, up).unwrap().0;
-        let mut r = (0..50).map(|_| relay()).find(|r| !r.tcp.is_empty()).expect("a relay listening on TCP too");
+        let (mut r, _) = relay(&["127.0.41.1"], up);
         let at = r.tcp[0];
         let me: IpAddr = "127.0.41.2".parse().unwrap();
         r.pump(0, &[me]);
@@ -376,12 +384,7 @@ mod tests {
     fn a_family_the_host_lacks_is_skipped() {
         // Inside `unshare -n`, ::1 exists only if IPv6 is up; a v6 address no interface has fails
         // with something other than EAFNOSUPPORT and is reported; IPv4 still serves.
-        let (r, skipped) = Relay::new(
-            &["127.0.42.1".parse().unwrap(), "2001:db8::1".parse().unwrap()],
-            0,
-            "127.0.0.53:53".parse().unwrap(),
-        )
-        .unwrap();
+        let (r, skipped) = relay(&["127.0.42.1", "2001:db8::1"], "127.0.0.53:53".parse().unwrap());
         assert_eq!(r.socks.len(), 1, "IPv4 serves");
         assert!(skipped.iter().all(|(a, _)| a.is_ipv6()), "{skipped:?}");
         assert!(Relay::new(&["2001:db8::1".parse().unwrap()], 0, "127.0.0.53:53".parse().unwrap()).is_err());

@@ -20,6 +20,11 @@ struct Knobs {
     /// Why enabling egress fails, when it does, and why it enables none, when it does that.
     egress_err: Option<String>,
     egress_why: Option<String>,
+    /// The anchor's address that enabling egress reports, where it is not 10.77.0.1/24 (Windows'
+    /// sharing moves it to 192.168.137.1/24, §6.2).
+    egress_addr4: Option<(Ipv4Addr, u8)>,
+    /// Egress without IPv6, as Windows' sharing gives it.
+    egress_v4_only: bool,
     /// Why capture cannot be installed, when it cannot, and how often it was tried.
     capture_err: Option<String>,
     captures: usize,
@@ -70,12 +75,13 @@ impl Platform for Host {
         if let Some(e) = self.knobs.lock().unwrap().egress_err.clone() {
             return Err(io::Error::other(e));
         }
-        let addr4 = (Ipv4Addr::new(10, 77, 0, 1), 24);
+        let addr4 = self.knobs.lock().unwrap().egress_addr4.unwrap_or((Ipv4Addr::new(10, 77, 0, 1), 24));
         if let Some(why) = self.knobs.lock().unwrap().egress_why.clone() {
             return Ok(host::EgressOn { v4: false, v6: false, addr4, uplink: None, why: Some(why) });
         }
         self.calls.lock().unwrap().push(format!("egress on {uplink}"));
-        Ok(host::EgressOn { v4: true, v6: true, addr4, uplink: Some(uplink), why: None })
+        let v6 = !self.knobs.lock().unwrap().egress_v4_only;
+        Ok(host::EgressOn { v4: true, v6, addr4, uplink: Some(uplink), why: None })
     }
 
     fn egress_disable(&mut self, _: &host::Egress) -> io::Result<()> {
@@ -414,6 +420,384 @@ fn a_client_of_an_anchor_without_egress_leaves_dns_alone() {
     let st = c.d.status(false);
     assert!(st.problems.iter().any(|p| p.code == problem::NO_EGRESS), "{st:?}");
     assert!(st.problems.iter().all(|p| p.code != problem::DNS_LOCAL), "{st:?}");
+}
+
+/// §3.2, §6.2: a bond's terms are given when it opens. An anchor whose egress comes up later (its
+/// sharing worked on a later try) closes the bonds opened without it, so each reopens with the
+/// new terms: the client that had the bond's subnets only and its own DNS now captures everything
+/// and asks the anchor's relay. Bonds whose terms did not change are left alone.
+#[test]
+fn egress_that_appears_later_reopens_the_bonds_with_it() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(75, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(75, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(75, 2))], ip(75, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(75, 1))], ip(75, 10), ccfg);
+    a.knobs.lock().unwrap().egress_err = Some("sharing is off".into());
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    assert_eq!(c.d.capture.as_ref().map(|cap| cap.routes), Some(host::Routes::BondOnly));
+    assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::None, Egress::None));
+    // Egress tried again with nothing new: the bond stays as it is.
+    let (owner, oks) = (c.d.bonds[0].owner, |n: &Node| n.d.logs.iter().filter(|l| l.contains(": bond ok: ")).count());
+    a.d.anchor_on();
+    let until = Instant::now() + Duration::from_millis(300);
+    run(&mut [&mut a, &mut c], "a moment", |_| Instant::now() >= until);
+    assert_eq!((c.d.bonds[0].owner, oks(&c), a.d.bonds.len()), (owner, 1, 1), "nothing changed, nothing closed");
+    // Sharing works on the next try.
+    a.knobs.lock().unwrap().egress_err = None;
+    a.d.anchor_on();
+    run(&mut [&mut a, &mut c], "the bond reopens", |n| oks(n[1]) == 2 && n[1].d.capture.is_some());
+    let cap = c.d.capture.clone().unwrap();
+    assert_eq!((cap.routes, cap.dns), (host::Routes::All, Some("10.77.0.1".parse().unwrap())));
+    assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::Both, Egress::Both));
+    assert!(told_and_new(&c, owner), "the anchor's `bond close` ended the old bond: {:?}", c.d.logs);
+    let st = c.d.status(false);
+    assert!(st.problems.iter().all(|p| p.code != problem::NO_EGRESS), "{st:?}");
+    let calls = c.calls();
+    assert_eq!(calls, ["capture on", "capture off", "capture on"], "the old capture went before the new one");
+}
+
+/// Whether client `c` was told by the anchor's `bond close` (§17), which is what a client of an
+/// older release acts on too, and has since opened a new bond, not the one of session `owner`.
+fn told_and_new(c: &Node, owner: u64) -> bool {
+    c.d.logs.iter().any(|l| l.ends_with(" closed the bond")) && c.d.bonds.first().is_some_and(|b| b.owner != owner)
+}
+
+/// §3.2 step 3, §5.2: an anchor whose egress goes (its sharing failed on a later try) closes the
+/// bonds opened with it, so each reopens without egress: its client routes only the bond's
+/// subnets again, keeps its own DNS, and status says `no_egress`.
+#[test]
+fn egress_that_goes_reopens_the_bonds_without_it() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(79, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(79, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(79, 2))], ip(79, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(79, 1))], ip(79, 10), ccfg);
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    assert_eq!(c.d.capture.as_ref().map(|cap| cap.routes), Some(host::Routes::All));
+    let (owner, oks) = (c.d.bonds[0].owner, |n: &Node| n.d.logs.iter().filter(|l| l.contains(": bond ok: ")).count());
+    a.knobs.lock().unwrap().egress_err = Some("sharing stopped".into());
+    a.d.anchor_on();
+    run(&mut [&mut a, &mut c], "the bond reopens", |n| oks(n[1]) == 2 && n[1].d.capture.is_some());
+    assert!(told_and_new(&c, owner), "the anchor's `bond close` ended the old bond: {:?}", c.d.logs);
+    let cap = c.d.capture.clone().unwrap();
+    assert_eq!((cap.routes, cap.dns), (host::Routes::BondOnly, None), "the bond's subnets only, DNS left alone");
+    assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::None, Egress::None));
+    assert_eq!(c.d.bonds[0].addr4, Some(Ipv4Addr::new(10, 77, 0, 2)), "the subnet did not move");
+    let st = c.d.status(false);
+    assert!(st.problems.iter().any(|p| p.code == problem::NO_EGRESS), "{st:?}");
+    assert_eq!(c.calls(), ["capture on", "capture off", "capture on"], "the old capture went before the new one");
+}
+
+/// §3.2 step 3, §6.2, §17: Windows' sharing moves the bond subnet when it starts, from
+/// 10.77.0.0/24 to 192.168.137.0/24. The bond opened in the old subnet without egress closes and
+/// reopens in the new one, and the client follows: its bond address keeps its host number in the
+/// new subnet, it routes everything, it asks the anchor's new address for DNS, and status gives
+/// that address for Moonlight.
+#[test]
+fn sharing_that_moves_the_subnet_reopens_the_bond_there() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(76, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(76, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(76, 2))], ip(76, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(76, 1))], ip(76, 10), ccfg);
+    a.knobs.lock().unwrap().egress_why = Some("sharing is refused".into());
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    let (owner, cap) = (c.d.bonds[0].owner, c.d.capture.clone().unwrap());
+    assert_eq!(c.d.bonds[0].addr4, Some(Ipv4Addr::new(10, 77, 0, 2)));
+    let old = (host::Routes::BondOnly, Some((Ipv4Addr::new(10, 77, 0, 0), 24)), None);
+    assert_eq!((cap.routes, cap.bond4, cap.dns), old);
+    sharing_starts(&a);
+    a.d.anchor_on();
+    let moved = Some(Ipv4Addr::new(192, 168, 137, 2));
+    run(&mut [&mut a, &mut c], "the bond reopens in the new subnet", |n| {
+        n[1].d.capture.is_some() && n[1].d.bonds.first().is_some_and(|b| b.addr4 == moved)
+    });
+    let cap = c.d.capture.clone().unwrap();
+    let new = (host::Routes::All, Some((Ipv4Addr::new(192, 168, 137, 0), 24)), Some("192.168.137.1".parse().unwrap()));
+    assert_eq!((cap.routes, cap.bond4, cap.dns), new);
+    assert_eq!((a.d.bonds.len(), a.d.bonds[0].addr4, a.d.bonds[0].egress), (1, moved, Egress::V4));
+    assert!(told_and_new(&c, owner), "the anchor's `bond close` ended the old bond: {:?}", c.d.logs);
+    let st = c.d.status(false);
+    assert_eq!(st.bond.and_then(|b| b.anchor_addr4).as_deref(), Some("192.168.137.1"), "Moonlight's host");
+    assert_eq!(c.calls(), ["capture on", "capture off", "capture on"], "the old capture went before the new one");
+}
+
+/// Sends a packet each way through the bond of anchor `a` and client `c` (in 10.77.0.0/24), and
+/// holds that the client hears the anchor meanwhile: the two sessions open each other's packets.
+fn carries_both_ways(a: &mut Node, c: &mut Node) {
+    let heard = |c: &Node| c.d.bonds[0].session.as_ref().and_then(|s| bond::heard(&s.snapshot(), true));
+    let was = heard(c);
+    let up = udp_to("1.1.1.1:53".parse().unwrap());
+    c.tun.inject(up.clone());
+    run(&mut [&mut *a, &mut *c], "client to anchor", |n| n[0].tun.written().contains(&up));
+    let mut down = up.clone();
+    down[12..16].copy_from_slice(&[1, 1, 1, 1]);
+    down[16..20].copy_from_slice(&[10, 77, 0, 2]);
+    a.tun.inject(down.clone());
+    run(&mut [&mut *a, &mut *c], "anchor to client", |n| n[1].tun.written().contains(&down));
+    assert!(heard(c) > was, "the client hears the anchor");
+}
+
+/// Windows' sharing starts on anchor `a`'s next try (§6.2): IPv4 only, and the adapter moves to
+/// 192.168.137.1/24.
+fn sharing_starts(a: &Node) {
+    let mut k = a.knobs.lock().unwrap();
+    (k.egress_err, k.egress_why) = (None, None);
+    (k.egress_addr4, k.egress_v4_only) = (Some((Ipv4Addr::new(192, 168, 137, 1), 24)), true);
+}
+
+/// Steps an anchor `a` and its client `c` until `done` or 15 s, the client kept from redialing: a
+/// control channel that went down stays down (§17: mesh down, lanes up).
+fn run_without_redial(a: &mut Node, c: &mut Node, what: &str, mut done: impl FnMut(&Node, &Node) -> bool) {
+    let (mut pa, mut pc) = (host::Poll::default(), host::Poll::default());
+    let t = Instant::now();
+    while !done(a, c) {
+        assert!(t.elapsed() < Duration::from_secs(15), "{what}: timed out\n{:#?}", c.d.status(false));
+        c.d.redial_at = Mono::MAX;
+        c.d.step(&mut pc, Duration::from_millis(2)).unwrap();
+        a.d.step(&mut pa, Duration::from_millis(2)).unwrap();
+    }
+}
+
+/// Closes the control channel under the bond of `a` and `c`, and steps them until neither side's
+/// bond has one; the lanes carry on.
+fn channel_down(a: &mut Node, c: &mut Node) {
+    for p in c.d.chans.values() {
+        p.chan.close();
+    }
+    run_without_redial(a, c, "the channel goes down", |a, c| {
+        a.d.bonds.first().is_some_and(|b| b.chan.is_none()) && c.d.bonds.first().is_some_and(|b| b.chan.is_none())
+    });
+}
+
+/// §3.2 step 3, §17 (mesh down, lanes up): an anchor whose egress appears while a bond's channel
+/// is down cannot tell its client, so it keeps the bond, and the client keeps its capture over
+/// the direct lanes. When the channel returns, the anchor's answer to `bond open` gives the same
+/// bond the new egress: the client keeps the session and installs capture again by it, with all
+/// routes and the anchor's DNS.
+#[test]
+fn egress_that_appears_while_the_channel_is_down_comes_when_it_returns() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(77, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(77, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(77, 2))], ip(77, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(77, 1))], ip(77, 10), ccfg);
+    a.knobs.lock().unwrap().egress_err = Some("sharing is off".into());
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    let owners = |a: &Node, c: &Node| (a.d.bonds.first().map(|b| b.owner), c.d.bonds.first().map(|b| b.owner));
+    let before = owners(&a, &c);
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_err = None;
+    a.d.anchor_on();
+    assert_eq!(a.d.bonds.len(), 1, "the bond whose channel is down stays: {:?}", a.d.logs);
+    // A while without the channel: the bond carries on its lanes, by its old terms.
+    let until = Instant::now() + Duration::from_secs(2);
+    run_without_redial(&mut a, &mut c, "a while", |_, _| Instant::now() >= until);
+    assert_eq!(owners(&a, &c), before, "the same bond on both sides");
+    assert_eq!((c.d.bonds[0].state, a.d.bonds[0].egress), (BondState::Up, Egress::None));
+    assert_eq!(c.d.capture.as_ref().map(|cap| cap.routes), Some(host::Routes::BondOnly), "capture stays");
+    // The channel returns: the same bond, on the new terms.
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "capture by the new terms", |n| {
+        n[1].d.capture.as_ref().is_some_and(|cap| cap.routes == host::Routes::All)
+    });
+    assert_eq!(c.d.capture.as_ref().and_then(|cap| cap.dns), Some("10.77.0.1".parse().unwrap()));
+    assert_eq!(owners(&a, &c), before, "the same sessions");
+    assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::Both, Egress::Both));
+    assert_eq!(c.d.bonds[0].state, BondState::Up);
+    assert_eq!(c.calls(), ["capture on", "capture off", "capture on"], "the old capture went before the new one");
+}
+
+/// §6.2, §17: a bond whose channel is down when the bond subnet moves can be neither told nor
+/// kept, since the anchor's device no longer has the address its traffic goes to: the anchor
+/// ends it, and its client fails open as it does for any anchor it stops hearing.
+#[test]
+fn a_subnet_move_while_the_channel_is_down_ends_the_bond() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(78, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(78, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(78, 2))], ip(78, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(78, 1))], ip(78, 10), ccfg);
+    a.knobs.lock().unwrap().egress_why = Some("sharing is refused".into());
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    channel_down(&mut a, &mut c);
+    sharing_starts(&a);
+    a.d.anchor_on();
+    assert!(a.d.bonds.is_empty(), "{:?}", a.d.logs);
+    let said = "the bond subnet moved: ending the bond, whose channel is down";
+    assert!(a.d.logs.iter().any(|l| l.ends_with(said)), "{:?}", a.d.logs);
+}
+
+/// §5.2, §17: an anchor whose egress goes while a bond's channel is down cannot tell its client,
+/// which routes everything into the bond. Kept, that bond would take the client's traffic for the
+/// internet and send it nowhere, for as long as the mesh stays down. The anchor ends it: the
+/// client stops hearing the anchor and fails open.
+#[test]
+fn egress_that_goes_while_the_channel_is_down_ends_the_bond() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(82, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(82, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(82, 2))], ip(82, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(82, 1))], ip(82, 10), ccfg);
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    assert_eq!(c.d.capture.as_ref().map(|cap| cap.routes), Some(host::Routes::All));
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_err = Some("sharing stopped".into());
+    a.d.anchor_on();
+    assert!(a.d.bonds.is_empty(), "{:?}", a.d.logs);
+    let said = "egress is now None: ending the bond, whose channel is down";
+    assert!(a.d.logs.iter().any(|l| l.ends_with(said)), "{:?}", a.d.logs);
+    run_without_redial(&mut a, &mut c, "the client fails open", |_, c| c.d.capture.is_none());
+    assert_eq!(c.d.bonds[0].state, BondState::Down);
+    assert_eq!(c.calls(), ["capture on", "capture off"]);
+    // The mesh returns: the client's old bond meets the anchor's new one, on the new terms.
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "a bond again, without egress", |n| {
+        n[1].d.bonds[0].state == BondState::Up
+            && n[1].d.capture.as_ref().is_some_and(|cap| cap.routes == host::Routes::BondOnly)
+    });
+    assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::None, Egress::None));
+    carries_both_ways(&mut a, &mut c);
+}
+
+/// §17: the channel of a bond the anchor ended untold may return before its client has failed
+/// open. The client then takes the anchor's `bond ok` for its own bond, keeps its session and
+/// installs capture again by the new terms, and that session and the anchor's new one carry
+/// packets both ways.
+#[test]
+fn a_bond_ended_untold_takes_the_new_terms_if_its_channel_returns_first() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(85, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(85, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(85, 2))], ip(85, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(85, 1))], ip(85, 10), ccfg);
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    let owners = (a.d.bonds[0].owner, c.d.bonds[0].owner);
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_err = Some("sharing stopped".into());
+    a.d.anchor_on();
+    assert!(a.d.bonds.is_empty(), "{:?}", a.d.logs);
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "the new terms", |n| {
+        n[1].d.bonds[0].state == BondState::Up
+            && n[1].d.capture.as_ref().is_some_and(|cap| cap.routes == host::Routes::BondOnly)
+    });
+    assert!(!c.d.logs.iter().any(|l| l.ends_with(": fail open")), "the channel returned first: {:?}", c.d.logs);
+    assert_eq!(c.d.bonds[0].owner, owners.1, "the client's own bond and session");
+    assert_ne!(a.d.bonds[0].owner, owners.0, "the anchor's new ones");
+    assert_eq!(c.calls(), ["capture on", "capture off", "capture on"], "never without the bond's routes for long");
+    carries_both_ways(&mut a, &mut c);
+}
+
+/// §5.5, §17: egress that comes with one family while a bond's channel is down keeps the bond;
+/// when the channel returns the same bond takes it, and its client captures everything.
+#[test]
+fn egress_of_one_family_that_appears_while_the_channel_is_down_comes_when_it_returns() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(84, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(84, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(84, 2))], ip(84, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(84, 1))], ip(84, 10), ccfg);
+    {
+        let mut k = a.knobs.lock().unwrap();
+        (k.egress_err, k.egress_v4_only) = (Some("no default route".into()), true);
+    }
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    let owner = c.d.bonds[0].owner;
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_err = None;
+    a.d.anchor_on();
+    let said = "egress is now V4: the bond takes it when its channel returns";
+    assert!(a.d.bonds.len() == 1 && a.d.logs.iter().any(|l| l.ends_with(said)), "{:?}", a.d.logs);
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "capture by the new terms", |n| {
+        n[1].d.capture.as_ref().is_some_and(|cap| cap.routes == host::Routes::All)
+    });
+    assert_eq!((c.d.bonds[0].owner, c.d.bonds[0].egress, a.d.bonds[0].egress), (owner, Egress::V4, Egress::V4));
+    assert_eq!(c.calls(), ["capture on", "capture off", "capture on"]);
+}
+
+/// §5.5, §17: a bond whose channel is down stays while a family of its egress does. An anchor
+/// that gains IPv6 keeps the bond, and so does one that loses IPv6 and keeps IPv4, whose client
+/// would lose a working bond for the sake of one family. Either way the bond takes the new egress
+/// when its channel returns, with the capture it has: the routes and the DNS are the same.
+#[test]
+fn a_family_of_egress_that_goes_or_comes_while_the_channel_is_down() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(83, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(83, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(83, 2))], ip(83, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(83, 1))], ip(83, 10), ccfg);
+    a.knobs.lock().unwrap().egress_v4_only = true;
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::V4, Egress::V4));
+    // IPv6 comes: the bond stays, and its client's capture too.
+    let owner = c.d.bonds[0].owner;
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_v4_only = false;
+    a.d.anchor_on();
+    let said = "egress is now Both: the bond takes it when its channel returns";
+    assert!(a.d.bonds.len() == 1 && a.d.logs.iter().any(|l| l.ends_with(said)), "{:?}", a.d.logs);
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "the channel returns", |n| n[1].d.bonds[0].egress == Egress::Both);
+    assert_eq!((c.d.bonds[0].owner, c.calls()), (owner, vec!["capture on".to_string()]), "the same bond and capture");
+    // IPv6 goes: the bond stays too, for the IPv4 it still carries.
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_v4_only = true;
+    a.d.anchor_on();
+    let said = "egress is now V4: the bond takes it when its channel returns";
+    assert!(a.d.bonds.len() == 1 && a.d.logs.iter().any(|l| l.ends_with(said)), "{:?}", a.d.logs);
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "the channel returns", |n| n[1].d.bonds[0].egress == Egress::V4);
+    assert_eq!((c.d.bonds[0].owner, c.calls()), (owner, vec!["capture on".to_string()]), "the same bond and capture");
+    carries_both_ways(&mut a, &mut c);
+}
+
+/// §5.3, §17: a bond whose capture is off for `mesh_captured` keeps it off when new terms come
+/// with its returning channel, and stays up: no `lanes_blocked`.
+#[test]
+fn mesh_captured_stays_off_when_new_terms_come_back() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(81, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(81, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(81, 2))], ip(81, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(81, 1))], ip(81, 10), ccfg);
+    a.knobs.lock().unwrap().egress_err = Some("sharing is off".into());
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    c.tun.inject(udp_to("100.101.102.103:41641".parse().unwrap()));
+    run(&mut [&mut a, &mut c], "mesh_captured", |n| n[1].d.capture.is_none());
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_err = None;
+    a.d.anchor_on();
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "the channel returns", |n| n[1].d.bonds[0].egress == Egress::Both);
+    let until = Instant::now() + Duration::from_secs(4);
+    run(&mut [&mut a, &mut c], "a while", |_| Instant::now() >= until);
+    assert!(c.d.capture.is_none());
+    assert_eq!(c.d.bonds[0].state, BondState::Up);
+    let st = c.d.status(false);
+    assert!(st.problems.iter().all(|p| p.code != problem::LANES_BLOCKED), "{st:?}");
+}
+
+/// §3.2 step 3, §18: the anchor closes only bonds whose terms changed. `pick`'s temporary bond
+/// carries no egress and no addresses whatever the anchor's are, and a bond without a session
+/// is one `bond_open` never leaves, so that skip only guards: both stay when egress appears and
+/// the subnet moves. The state is built by hand, the anchor alone, with a bond of each kind on
+/// channels that do not exist.
+#[test]
+fn a_pick_bond_and_one_without_a_session_stay_when_the_terms_change() {
+    let allow = vec![ip(80, 10).to_string(), ip(80, 11).to_string()];
+    let acfg = Config { role: Role::Anchor, allow, ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(80, 2))], ip(80, 20), acfg);
+    a.knobs.lock().unwrap().egress_err = Some("sharing is off".into());
+    a.d.anchor_on();
+    let now = a.d.now();
+    let mut pick = Bond::new("mac".into(), ip(80, 10), 1, Mode::Performance, now);
+    (pick.chan, pick.measure) = (Some(u64::MAX), true);
+    a.d.bonds.push(pick);
+    a.d.open_session(0, core::Role::Anchor, true);
+    let mut opening = Bond::new("pc".into(), ip(80, 11), 2, Mode::Performance, now);
+    (opening.chan, opening.addr4) = (Some(u64::MAX - 1), Some(Ipv4Addr::new(10, 77, 0, 3)));
+    a.d.bonds.push(opening);
+    {
+        let mut k = a.knobs.lock().unwrap();
+        (k.egress_err, k.egress_addr4) = (None, Some((Ipv4Addr::new(192, 168, 137, 1), 24)));
+    }
+    a.d.anchor_on();
+    assert_eq!(a.d.egress_kind(), Egress::Both);
+    let kept: Vec<_> = a.d.bonds.iter().map(|b| (b.peer.as_str(), b.measure, b.session.is_some())).collect();
+    assert_eq!(kept, [("mac", true, true), ("pc", false, false)], "{:?}", a.d.logs);
 }
 
 #[test]
