@@ -463,6 +463,7 @@ fn an_idle_bond_outlives_its_channel() {
     c.redial_at = 0;
     run(&mut a, &mut c, "the channel returns", |a, c| a.bonds[0].chan.is_some() && c.bonds[0].chan.is_some());
     assert_eq!((a.bonds[0].owner, c.bonds[0].owner), (owner, session), "the same sessions");
+    assert!(!ccalls.lock().unwrap().contains(&"capture off".to_string()), "on the same terms, the same capture");
 }
 
 /// §17: the anchor alone sees the channel go (its own Tailscale restarting), while the idle

@@ -1516,6 +1516,15 @@ impl Daemon {
                 }
             }
         }
+        if self.capture.is_some() && (self.bonds[0].egress == Egress::None) != (egress == Egress::None) {
+            // The same bond (a new one has no capture yet) on new terms: the anchor's egress came
+            // or went while the channel was down (§17). Capture goes, and the lifecycle installs
+            // it again by the new routes and DNS with the first validated lane, as for a new
+            // bond; the session, its lanes and its keys stay. Another family of an egress that
+            // stays changes neither routes nor DNS.
+            self.capture_off();
+            self.bonds[0].set_state(BondState::Punching, now);
+        }
         let b = &mut self.bonds[0];
         (b.chan, b.chan_down, b.egress, b.peer_addr) = (Some(id), None, egress, peer);
         if b.state == BondState::Connecting {
@@ -1934,22 +1943,39 @@ impl Daemon {
 
     /// A bond gets its terms when it opens (§3.2 step 3): the client's bond addresses and the
     /// anchor's egress, by which the client chooses its routes and DNS (§5.2). When an anchor's
-    /// egress comes later (its sharing worked on a later try), goes, or moves the bond subnet
-    /// (ICS, §6.2), the bonds open then would keep the old terms until they reconnected: a client
-    /// with bond-only routes beside an anchor that now forwards. The anchor closes them: each
-    /// client removes capture and redials (§17), and the bond that reopens has the new terms.
+    /// egress comes later (its sharing worked on a later try), goes, or changes, or the bond subnet
+    /// moves (Windows' sharing, §6.2), the bonds open then would keep the old terms until they
+    /// reconnected: a client with bond-only routes beside an anchor that now forwards. The anchor
+    /// closes them: each client removes capture and redials (§17), and the bond that reopens has
+    /// the new terms.
+    ///
+    /// A bond whose channel is down cannot be told. It is left alone while the new egress carries
+    /// every family the old one did: when the channel returns, `bond_open` keeps it and gives it
+    /// the new egress, and the client's `bond_ok` captures again by it. It ends where its client
+    /// would go on sending into nothing: a family of its egress is gone, or its addresses left
+    /// the subnet, so that the anchor's device no longer has the address its traffic goes to.
+    /// That client stops hearing the anchor and fails open (§17).
     fn terms_changed(&mut self) {
         let egress = self.egress_kind();
+        let keeps = |was: Egress| was == egress || was == Egress::None || egress == Egress::Both;
         let mut bi = 0;
         while bi < self.bonds.len() {
             let b = &self.bonds[bi];
             let addrs = [b.addr4.map(IpAddr::V4), b.addr6.map(IpAddr::V6)];
             let moved = addrs.into_iter().flatten().any(|a| !host::in_ranges(a, &self.nets.1));
-            if b.measure || b.session.is_none() || (b.egress == egress && !moved) {
+            if b.measure || b.session.is_none() || !(moved || b.egress != egress) {
                 bi += 1;
                 continue;
             }
-            self.log(format!("{}: egress is now {egress:?}: closing the bond to reopen it", b.peer));
+            let why = if moved { "the bond subnet moved".to_string() } else { format!("egress is now {egress:?}") };
+            let told = b.chan.is_some();
+            if !told && !moved && keeps(b.egress) {
+                self.log(format!("{}: {why}: the bond takes it when its channel returns", b.peer));
+                bi += 1;
+                continue;
+            }
+            let how = if told { "closing the bond to reopen it" } else { "ending the bond, whose channel is down" };
+            self.log(format!("{}: {why}: {how}", b.peer));
             self.end_bond(bi, true);
         }
     }
