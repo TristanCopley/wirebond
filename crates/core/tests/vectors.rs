@@ -390,7 +390,7 @@ impl Driver {
                 keys.len() == 1 && keys[0].e == k.e && keys[0].k.len() == 32,
                 "{}",
                 ctx(format!(
-                    "Go answered with one key message for epoch {}, a 32-byte key (§7.1, §7.2); \
+                    "Go answered with one key message for epoch {}, a 32-byte key (§16, §10.2); \
                      the session sent {keys:?}",
                     k.e
                 ))
@@ -406,7 +406,7 @@ impl Driver {
                 out.sends.is_empty() && out.delivers.is_empty() && out.controls.is_empty(),
                 "{}",
                 ctx(format!(
-                    "Go drops this packet without a trace (§7.5, §7.6 rule 1); the session sent {} \
+                    "Go drops this packet without a trace (§10.4, §10.5 rule 1); the session sent {} \
                      packets and {} control messages",
                     out.sends.len(),
                     out.controls.len()
@@ -476,9 +476,9 @@ fn seal() {
     assert!(
         !data.is_empty(),
         "vectors.json, seal: the session sent no data packet for the datagram; Go sends a small \
-         flow's datagram at once, on every validated lane while none is confirmed (§8.1, §10.1)"
+         flow's datagram at once, on every validated lane while none is confirmed (§13)"
     );
-    assert!(data.iter().all(|b| *b == data[0]), "a packet is sealed once (§7.3), but the lanes got different bytes");
+    assert!(data.iter().all(|b| *b == data[0]), "a packet is sealed once (§10.3), but the lanes got different bytes");
     let pkt = data[0];
     let counter = u64::from_be_bytes(pkt[3..HEADER_LEN].try_into().expect("8 bytes"));
     let Some(want) = v.seal.packets.get(counter as usize) else {

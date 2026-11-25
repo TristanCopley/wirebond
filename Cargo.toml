@@ -18,7 +18,7 @@ debug = false
 
 # netsim's tests: release's opt-level and assertions, so the simulated results are the same, without
 # its fat LTO and single codegen unit (SPEC §22.5 sets those for the shipped daemon), which made a
-# rebuild after an edit in core or netsim take 30 s instead of 10. The short set costs some 6% more
+# rebuild after an edit in core or netsim take 30 s instead of 10. The short set costs some 7% more
 # processor time for it. `cargo test -p wirebond-netsim --profile sim`.
 [profile.sim]
 inherits = "release"

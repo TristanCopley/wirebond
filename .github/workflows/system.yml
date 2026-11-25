@@ -90,9 +90,10 @@ jobs:
             exit "$code"
           } | tee -a "$GITHUB_STEP_SUMMARY"
       # After the harness, and whether it passed or not: a daemon that is not static still runs,
-      # and what the harness measured of it is worth having beside this failure.
+      # and what the harness measured of it is worth having beside this failure. Not when the
+      # build itself failed, which leaves no daemon to look at.
       - name: The daemon is static and stripped (SPEC §22.5)
-        if: success() || failure()
+        if: (success() || failure()) && env.WIREBOND_BIN != ''
         run: |
           echo "linux x86_64: $(stat -c %s "$WIREBOND_BIN") bytes"
           kind=$(file -b "$WIREBOND_BIN") && echo "$kind"
