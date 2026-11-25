@@ -783,7 +783,7 @@ mod on_linux {
         assert_eq!(fs::read_to_string(&unit).unwrap(), os::unit(&exe));
         let link = fs::read_link(wants.join("wirebond.service")).unwrap();
         assert_eq!(link, Path::new("/etc/systemd/system/wirebond.service"));
-        assert_eq!((install::has(Scope::System), need(false), need(true)), (true, Scope::System, Scope::System));
+        assert!(install::has(Scope::System), "not installed after the install");
         assert!(!on_path(Scope::System), "a temporary root is on PATH");
         Config { anchors: vec!["xanth".into()], ..c }.save(&dir).unwrap();
         step(&fake.src, "the same build again", "build 1", false, &["start wirebond"]);

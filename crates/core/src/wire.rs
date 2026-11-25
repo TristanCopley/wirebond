@@ -1,18 +1,18 @@
-//! The replay window and the probe codec (§7.5, §8.2; Go: core/wire.go).
+//! The replay window and the probe codec (§10.4, §11.2).
 //!
-//! Owner: C1. Integers are big-endian on the wire.
+//! Integers are big-endian on the wire.
 //!
-//! R2-03 (notes/open.md): path validation needs an unpredictable challenge. It travels in the
-//! echo's 18-byte Observed slot (bytes 35–52 of an echo), which core never read, so ProbeLen,
-//! EchoLen and MaxEchoes are unchanged:
+//! R2-03: path validation needs an unpredictable challenge. It travels in bytes 35–52 of an echo,
+//! the 18 bytes an earlier layout gave the observed address, which the engine never read, so
+//! PROBE_LEN, ECHO_LEN and MAX_ECHOES keep their sizes:
 //!
 //! - bytes 35–42 `token`: the challenge of the newest probe received on the echoed lane, returned;
 //! - bytes 43–50 `chal`: on the echo of the probe's own lane, that probe's own challenge; 0 in
 //!   every other echo;
-//! - bytes 51–52: written 0, ignored on read (a Go peer writes the observed port there).
+//! - bytes 51–52: written 0, ignored on read.
 //!
-//! A Go peer still writes an address in the slot, so its echoes never validate a Rust peer's path
-//! until Go takes the same change (notes/rust.md).
+//! An echo that carries anything else in the slot, such as an observed address, returns no
+//! matching token, so it never validates a path.
 
 use crate::{ECHO_LEN, PROBE_LEN, REPLAY_WINDOW};
 
@@ -20,9 +20,9 @@ use crate::{ECHO_LEN, PROBE_LEN, REPLAY_WINDOW};
 const WORDS: u64 = REPLAY_WINDOW / 64;
 
 /// A replay window over REPLAY_WINDOW counters in the style of RFC 6479: a 1 KB bitmap that slides
-/// by 64-bit words (§7.5 steps 3 and 4). Go: `window`, whose `any` flag is not needed here: the
-/// default, top 0 with no bit set, takes counter 0 as new, and sliding it from there clears only
-/// words that are 0 already.
+/// by 64-bit words (§10.4 steps 3 and 4). It needs no flag for an empty window: the default, top
+/// 0 with no bit set, takes counter 0 as new, and sliding it from there clears only words that are
+/// 0 already.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Window {
     /// The highest counter recorded; 0 before any.
@@ -39,7 +39,7 @@ impl Default for Window {
 impl Window {
     /// Records counter `c` and reports whether it was new and inside the window. A counter above
     /// the top slides the window, clearing the words it passes; a counter WORDS or more words below
-    /// the top's word is outside, so the window spans 8,129 to 8,192 counters (note 3).
+    /// the top's word is outside, so the window spans 8,129 to 8,192 counters.
     pub(crate) fn check(&mut self, c: u64) -> bool {
         if c > self.top {
             for i in self.top / 64 + 1..=(c / 64).min(self.top / 64 + WORDS) {
@@ -63,9 +63,8 @@ impl Window {
     }
 }
 
-/// The sealed payload of a TYPE_PROBE packet (§8.2), fixed-width. Go: `probe`. The echoes live
-/// beside it in an `[Echo; MAX_ECHOES]` buffer (Go's `echoes []echo` pointed into one), so a
-/// probe holds only their count.
+/// The sealed payload of a TYPE_PROBE packet (§11.2), fixed-width. The echoes live beside it in an
+/// `[Echo; MAX_ECHOES]` buffer, so a probe holds only their count.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Probe {
     /// Client link id << 8 | server link id; 0 is the Tailscale lane.
@@ -80,12 +79,12 @@ pub(crate) struct Probe {
     pub(crate) n: usize,
 }
 
-/// What a probe's sender received on one lane from the peer (§8.2). Go: `echo`, with `observed`
-/// replaced by `token` and `chal` (R2-03, module doc).
+/// What a probe's sender received on one lane from the peer (§11.2). `token` and `chal` carry the
+/// challenge (R2-03, module doc).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Echo {
     pub(crate) lane: u16,
-    /// Bit 0: lagging (§8.4).
+    /// Bit 0: lagging (§11.4).
     pub(crate) flags: u8,
     /// The newest probe received on the lane.
     pub(crate) seq: u32,
@@ -175,7 +174,7 @@ pub(crate) const fn probe_len(n: usize) -> usize {
 }
 
 /// Whether probe or flow Seq `a` comes after `b` in serial order (RFC 1982), so comparisons survive
-/// the wrap (R2-24; Go compared with `>`).
+/// the wrap (R2-24), where a plain `>` would not.
 pub(crate) fn after(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }

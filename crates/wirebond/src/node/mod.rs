@@ -2,7 +2,7 @@
 //! the control sockets and the local API, with a timeout from the engines' next deadline
 //! (`Session::next`), then drains each source without blocking (§4.3). Owner: node daemon.
 //!
-//! Per packet (§4.3): a TUN read goes to the bond's session (`Session::send_packet`); a lane
+//! Per packet (§4.3): a TUN read goes to the bond's session (`Event::Send`); a lane
 //! datagram goes to the session its receive id names (`wirebond_core::packet_rid`, `RidTable`);
 //! what a session delivers (`Out::deliver`) is checked (§10.5 rule 6) and written to the TUN
 //! device.
@@ -28,6 +28,8 @@ mod plat;
 pub mod proto;
 mod rates;
 mod support;
+#[cfg(test)]
+mod testkit;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -116,7 +118,7 @@ fn append_log(dir: &Path, line: &str) {
 /// The daemon. `wirebond run` calls it inside host::run_service; `version` is the build's. It
 /// returns when `stop` fires (Windows' service stop; SIGTERM and SIGINT elsewhere).
 pub fn run(version: &str, stop: Receiver<()>) -> io::Result<()> {
-    let scope = host::need(false);
+    let scope = host::Scope::System;
     let (_exe, dir) = scope.paths();
     let (cfg, bad) = match Config::load(&dir) {
         Ok(cfg) => (cfg, None),
@@ -248,8 +250,6 @@ pub struct Daemon {
     name: String,
     /// Random per process (§16 hello).
     inst: u64,
-    /// The control port: PORT.
-    port: u16,
     /// Tests: loopback candidates count as usable.
     loopback: bool,
     /// Receive ids across every session (core's RidTable).
@@ -334,10 +334,11 @@ pub struct Daemon {
     support: support::State,
     /// The update's schedule (§22.3).
     updater: crate::update::Schedule,
-    /// `anchor_nets`, and the role, egress and bond subnets it was computed from: the address
-    /// checks of every delivered packet read it (`refresh_nets`).
+    /// `anchor_nets`, which the address checks of every delivered packet read. It is computed
+    /// again where what it reads changes: the egress, only ever written by `anchor_on` and
+    /// `anchor_off`, which `reconcile` reaches as soon as the role changes. The bond subnets
+    /// change only with a restart.
     nets: (Vec<IpAddr>, Vec<(IpAddr, u8)>),
-    nets_from: Option<NetsFrom>,
     /// The lane pump's receive buffers: BATCH datagrams of DGRAM bytes.
     rx_bufs: Vec<[u8; plat::DGRAM]>,
     /// The lane sends of the current loop turn.
@@ -345,9 +346,6 @@ pub struct Daemon {
     /// When the DNS relay's state is next tidied without a query or answer to read.
     next_dns: Mono,
 }
-
-/// What `anchor_nets` reads: the role, the egress's IPv4 subnet and the configured bond subnets.
-type NetsFrom = (Role, Option<(Ipv4Addr, u8)>, String, String);
 
 /// What the loop's wait found readable. Without a poll (Windows' event loop) everything is read.
 #[derive(Clone, Copy)]
@@ -416,7 +414,7 @@ struct Io<'a> {
     /// Within a loop turn, lane sends queue here (`TxQueue`).
     txq: &'a mut TxQueue,
     tun: Option<&'a dyn TunDev>,
-    bond: &'a mut Bond,
+    check: bond::Check,
     /// On an anchor: its own bond addresses and the bond subnets.
     anchor: Option<Nets<'a>>,
     ctl: Vec<core::Msg>,
@@ -446,14 +444,14 @@ impl core::Out for Io<'_> {
 
     fn deliver(&mut self, p: &[u8]) {
         let ok = match self.anchor {
-            None => self.bond.client_accepts(p),
-            Some((own, nets)) => match self.bond.anchor_accepts(p, own, nets) {
+            None => self.check.client_accepts(p),
+            Some((own, nets)) => match self.check.anchor_accepts(p, own, nets) {
                 Some(true) => {
-                    self.bond.local += p.len() as u64;
+                    self.check.local += p.len() as u64;
                     true
                 }
                 Some(false) => {
-                    self.bond.egressed += p.len() as u64;
+                    self.check.egressed += p.len() as u64;
                     true
                 }
                 None => false,
@@ -464,7 +462,7 @@ impl core::Out for Io<'_> {
                 let _ = t.write(p);
                 self.delivered += 1;
             }
-            _ => self.bond.dropped += 1,
+            _ => self.check.dropped += 1,
         }
     }
 
@@ -526,7 +524,7 @@ impl Daemon {
     pub fn new(version: &str, dir: Option<PathBuf>, cfg: Config, plat: Box<dyn Platform>) -> io::Result<Daemon> {
         let (ev_tx, ev_rx) = mpsc::channel();
         let name = plat.hostname();
-        Ok(Daemon {
+        let mut d = Daemon {
             version: version.into(),
             dir,
             cfg,
@@ -535,7 +533,6 @@ impl Daemon {
             plat,
             name,
             inst: getrandom::u64().unwrap_or(1),
-            port: PORT,
             loopback: false,
             rids: RidTable::new(),
             bonds: Vec::new(),
@@ -586,11 +583,12 @@ impl Daemon {
             support: support::State::default(),
             updater: crate::update::Schedule::new(0, getrandom::u64().unwrap_or(1)),
             nets: (Vec::new(), Vec::new()),
-            nets_from: None,
             rx_bufs: vec![[0; plat::DGRAM]; plat::BATCH],
             txq: TxQueue::default(),
             next_dns: 0,
-        })
+        };
+        d.nets = d.anchor_nets();
+        Ok(d)
     }
 
     /// Monotonic now, ns since the daemon started.
@@ -732,7 +730,7 @@ impl Daemon {
         let next = self
             .bonds
             .iter()
-            .chain(self.pick.as_ref().and_then(|p| p.bond.as_ref()))
+            .chain(self.pick_bond())
             .filter_map(|b| b.session.as_ref())
             .map(|s| s.next())
             .fold(self.next_scan.min(self.next_life), Mono::min);
@@ -756,47 +754,26 @@ impl Daemon {
         (nets.iter().map(|&(n, _)| host_in(n, 1)).collect(), nets)
     }
 
-    /// `anchor_nets` again when the role, the egress or the bond subnets changed.
-    fn refresh_nets(&mut self) {
-        let egress4 = self.egress.as_ref().and_then(|(_, on)| on.as_ref()).map(|on| on.addr4);
-        let cfg = &self.cfg;
-        let same = self.nets_from.as_ref().is_some_and(|(role, e4, n4, n6)| {
-            (*role, *e4) == (cfg.role, egress4) && *n4 == cfg.bond_net4 && *n6 == cfg.bond_net6
-        });
-        if !same {
-            self.nets = self.anchor_nets();
-            let cfg = &self.cfg;
-            self.nets_from = Some((cfg.role, egress4, cfg.bond_net4.clone(), cfg.bond_net6.clone()));
-        }
-    }
-
     /// Hands `ev` to bond `bi`'s session and sends what it asks over the control channel.
     fn handle_bond(&mut self, bi: usize, ev: core::Event<'_>) {
         let now = self.now();
         let anchor = self.cfg.role == Role::Anchor;
-        if anchor {
-            self.refresh_nets();
-        }
         let b = if bi == PICK { self.pick.as_mut().and_then(|p| p.bond.as_mut()) } else { self.bonds.get_mut(bi) };
         let Some(b) = b else { return };
-        // §10.5 rule 6 checks deliveries on a stand-in with the bond's addresses and counters, so
-        // the engine works on the session in place: taking it out of the bond and putting it back
-        // copied all of it twice a packet.
-        let mut check = Bond::new(String::new(), b.peer_addr, b.inst, b.mode, now);
-        (check.addr4, check.addr6) = (b.addr4, b.addr6);
+        let check = b.check();
         let Some(s) = b.session.as_mut() else { return };
         let mut io = Io {
             socks: &self.socks,
             txq: &mut self.txq,
             tun: self.tun.as_deref(),
-            bond: &mut check,
+            check,
             anchor: anchor.then_some((&self.nets.0[..], &self.nets.1[..])),
             ctl: Vec::new(),
             tx: 0,
             delivered: 0,
         };
         s.handle(now, ev, &mut self.rids, &mut io);
-        let (ctl, tx, delivered, chan) = (io.ctl, io.tx, io.delivered, b.chan);
+        let (ctl, tx, delivered, chan, check) = (io.ctl, io.tx, io.delivered, b.chan, io.check);
         b.local += check.local;
         b.egressed += check.egressed;
         b.dropped += check.dropped;
@@ -816,13 +793,27 @@ impl Daemon {
 
     /// The bond whose control channel is `id`: an index into `bonds`, or [`PICK`].
     fn bond_on(&self, id: u64) -> Option<usize> {
-        let pick = self.pick.as_ref().and_then(|p| p.bond.as_ref()).filter(|b| b.chan == Some(id)).map(|_| PICK);
-        self.bonds.iter().position(|b| b.chan == Some(id)).or(pick)
+        self.find_bond(|b| b.chan == Some(id))
+    }
+
+    /// The first bond for which `f` holds: an index into `bonds`, or [`PICK`].
+    fn find_bond(&self, f: impl Fn(&Bond) -> bool) -> Option<usize> {
+        self.bonds.iter().position(&f).or_else(|| self.pick_bond().filter(|b| f(b)).map(|_| PICK))
+    }
+
+    /// `pick`'s temporary bond, while it has one.
+    fn pick_bond(&self) -> Option<&Bond> {
+        self.pick.as_ref().and_then(|p| p.bond.as_ref())
     }
 
     /// Bond `bi`, or `pick`'s temporary bond for [`PICK`].
     fn bond_ref(&self, bi: usize) -> Option<&Bond> {
-        if bi == PICK { self.pick.as_ref().and_then(|p| p.bond.as_ref()) } else { self.bonds.get(bi) }
+        if bi == PICK { self.pick_bond() } else { self.bonds.get(bi) }
+    }
+
+    /// Every bond's index, [`PICK`] last while `pick` has a temporary bond.
+    fn bond_indices(&self) -> impl Iterator<Item = usize> + use<> {
+        (0..self.bonds.len()).chain(self.pick_bond().map(|_| PICK))
     }
 
     /// Sends `m` on bond `bi`'s control channel, if it is up.
@@ -866,7 +857,7 @@ impl Daemon {
             }
             let bi = if self.cfg.role == Role::Anchor {
                 let dst = bond::addrs(p).map(|(_, d)| d);
-                self.bonds.iter().position(|b| dst.is_some_and(|d| b.is_addr(d)))
+                self.bonds.iter().position(|b| dst.is_some_and(|d| b.check().is_addr(d)))
             } else {
                 (!self.bonds.is_empty()).then_some(0)
             };
@@ -930,8 +921,7 @@ impl Daemon {
             return;
         }
         let Some(owner) = core::packet_rid(data).and_then(|rid| self.rids.lookup(rid)) else { return };
-        let pick = self.pick.as_ref().and_then(|p| p.bond.as_ref()).filter(|b| b.owner == owner).map(|_| PICK);
-        let Some(bi) = self.bonds.iter().position(|b| b.owner == owner).or(pick) else { return };
+        let Some(bi) = self.find_bond(|b| b.owner == owner) else { return };
         self.handle_bond(bi, core::Event::Packet { sock: (si + 1) as SockId, from, data });
     }
 
@@ -1074,13 +1064,10 @@ impl Daemon {
         }
         self.gateways = self.plat.gateways();
         self.next_scan = now;
-        for bi in 0..self.bonds.len() {
-            if self.bonds[bi].session.is_some() {
+        for bi in self.bond_indices() {
+            if self.bond_ref(bi).is_some_and(|b| b.session.is_some()) {
                 self.handle_bond(bi, core::Event::Wake);
             }
-        }
-        if self.pick.as_ref().and_then(|p| p.bond.as_ref()).is_some_and(|b| b.session.is_some()) {
-            self.handle_bond(PICK, core::Event::Wake);
         }
     }
 
@@ -1109,11 +1096,10 @@ impl Daemon {
     /// Relays the DNS queries of live bonds' client addresses (§7).
     fn dns_pump(&mut self) {
         let now = self.now();
+        let Some(r) = &mut self.dns_relay else { return };
         let live: Vec<IpAddr> =
             self.bonds.iter().flat_map(|b| [b.addr4.map(IpAddr::V4), b.addr6.map(IpAddr::V6)]).flatten().collect();
-        if let Some(r) = &mut self.dns_relay {
-            r.pump(now, &live);
-        }
+        r.pump(now, &live);
     }
 
     /// One event from the channel threads.
@@ -1315,9 +1301,7 @@ impl Daemon {
                 if self.cfg.role == Role::Anchor
                     && let Some(bi) = self.bonds.iter().position(|b| b.chan == Some(id))
                 {
-                    self.bonds[bi].mode = mode;
-                    let m = core::Msg { t: "mode".into(), mode: mode.as_str().into(), ..core::Msg::default() };
-                    self.handle_bond(bi, core::Event::Control(&m));
+                    self.set_mode(bi, mode);
                 }
             }
             Msg::Support(s) => self.support_registered(id, s),
@@ -1397,19 +1381,57 @@ impl Daemon {
         })
     }
 
+    /// Whether the peer on channel `id` may open a bond here (§3.2 step 2): its hello, its address
+    /// and its allow-list entry, or None once it is refused. `refused` words the log line from the
+    /// peer's name and address.
+    fn admit(
+        &mut self,
+        id: u64,
+        refused: impl FnOnce(&str, IpAddr) -> String,
+    ) -> Option<(proto::Hello, IpAddr, String)> {
+        let p = self.chans.get(&id)?;
+        let h = p.hello.clone()?;
+        let peer = p.chan.peer.ip().to_canonical();
+        if self.cfg.role != Role::Anchor {
+            self.refuse(id, ErrorCode::NotAllowed, "not an anchor");
+            return None;
+        }
+        let Some(device) = self.allowed(peer) else {
+            self.log(refused(&link::clean(&h.name, link::LABEL_MAX), peer));
+            self.refuse(id, ErrorCode::NotAllowed, "not on the allow-list");
+            return None;
+        };
+        Some((h, peer, device))
+    }
+
+    /// The anchor's `bond ok` on channel `id` for bond `bi`, with the bond's addresses and egress
+    /// (§3.2 step 3), and then its session in `mode`. `what` names the bond in the log.
+    fn answer_open(&mut self, id: u64, bi: usize, mode: Mode, fresh: bool, what: &str) {
+        let dns = self.nets.0.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1)));
+        let b = &self.bonds[bi];
+        let ok = proto::Bond::Ok { addr4: b.addr4, addr6: b.addr6, mtu: TUN_MTU as u16, dns, egress: b.egress };
+        let line = format!("{what} open from {} ({}), {}", b.peer, b.peer_addr, mode.as_str());
+        self.send_chan(id, &Msg::Bond(ok));
+        self.log(line);
+        self.set_mode(bi, mode);
+        self.open_session(bi, core::Role::Anchor, fresh);
+    }
+
+    /// What this anchor's egress carries, as `bond ok` and status say it.
+    fn egress_kind(&self) -> Egress {
+        match self.egress.as_ref().and_then(|(_, on)| on.as_ref()) {
+            Some(on) if on.v4 && on.v6 => Egress::Both,
+            Some(on) if on.v4 => Egress::V4,
+            Some(on) if on.v6 => Egress::V6,
+            _ => Egress::None,
+        }
+    }
+
     /// An anchor's answer to `bond open` (§3.2 steps 2–4).
     fn bond_open(&mut self, id: u64, mode: Mode) {
         let now = self.now();
-        let Some(p) = self.chans.get(&id) else { return };
-        let Some(h) = p.hello.clone() else { return };
-        let peer = p.chan.peer.ip().to_canonical();
-        if self.cfg.role != Role::Anchor {
-            return self.refuse(id, ErrorCode::NotAllowed, "not an anchor");
-        }
-        let Some(device) = self.allowed(peer) else {
-            self.log(format!("{} ({peer}) is not on the allow-list", link::clean(&h.name, link::LABEL_MAX)));
-            return self.refuse(id, ErrorCode::NotAllowed, "not on the allow-list");
-        };
+        let refused = |name: &str, peer| format!("{name} ({peer}) is not on the allow-list");
+        let Some((h, peer, device)) = self.admit(id, refused) else { return };
         if self.tun.is_none() {
             // Every packet of the bond would be dropped: the client redials, and by then the
             // device may have opened (`anchor_on`).
@@ -1422,18 +1444,12 @@ impl Daemon {
         let Some(n) = self.pool.assign(&device) else {
             return self.refuse(id, ErrorCode::TooManyBonds, "no bond address left");
         };
-        let (own, nets) = self.anchor_nets();
-        let addr = |v6: bool| nets.iter().find(|(a, _)| a.is_ipv6() == v6).map(|&(a, _)| host_in(a, n));
+        let addr = |v6: bool| self.nets.1.iter().find(|(a, _)| a.is_ipv6() == v6).map(|&(a, _)| host_in(a, n));
         let (addr4, addr6) = (
             addr(false).and_then(|a| if let IpAddr::V4(a) = a { Some(a) } else { None }),
             addr(true).and_then(|a| if let IpAddr::V6(a) = a { Some(a) } else { None }),
         );
-        let egress = match &self.egress {
-            Some((_, Some(on))) if on.v4 && on.v6 => Egress::Both,
-            Some((_, Some(on))) if on.v4 => Egress::V4,
-            Some((_, Some(on))) if on.v6 => Egress::V6,
-            _ => Egress::None,
-        };
+        let egress = self.egress_kind();
         let bi = match existing {
             Some(i) if self.bonds[i].inst == h.inst => i,
             other => {
@@ -1451,12 +1467,7 @@ impl Daemon {
         if b.state == BondState::Connecting {
             b.set_state(BondState::Punching, now);
         }
-        let dns = own.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1)));
-        let ok = proto::Bond::Ok { addr4, addr6, mtu: TUN_MTU as u16, dns, egress };
-        self.send_chan(id, &Msg::Bond(ok));
-        self.log(format!("bond open from {} ({peer}), {}", self.bonds[bi].peer, mode.as_str()));
-        self.set_mode(bi, mode);
-        self.open_session(bi, core::Role::Anchor, fresh);
+        self.answer_open(id, bi, mode, fresh, "bond");
     }
 
     /// A client's `bond ok` (§3.2 step 3): the TUN device with its bond addresses, the session.
@@ -1575,11 +1586,7 @@ impl Daemon {
             .collect();
         let Some(peer) = self.bond_ref(bi).map(|b| b.peer_addr) else { return };
         let mesh = self.socks.iter().position(|s| s.id == 0 && s.link.addr.is_ipv4() == peer.is_ipv4()).map(|i| {
-            core::MeshLane {
-                sock: (i + 1) as SockId,
-                local: self.socks[i].local,
-                peer: SocketAddr::new(peer, self.port),
-            }
+            core::MeshLane { sock: (i + 1) as SockId, local: self.socks[i].local, peer: SocketAddr::new(peer, PORT) }
         });
         self.handle_bond(bi, core::Event::Links { links: &links, mesh });
     }
@@ -1628,7 +1635,7 @@ impl Daemon {
         let label = |o: &proto::LinkOffer| {
             let lead = l.links.iter().filter(|x| group(x) == group(o)).min_by_key(|x| x.id).unwrap_or(o);
             let name = lead.support.clone();
-            name.unwrap_or_else(|| format!("{}{}", format!("{:?}", lead.kind).to_lowercase(), lead.id))
+            name.unwrap_or_else(|| format!("{}{}", lead.kind.as_str(), lead.id))
         };
         let links = l
             .links
@@ -1700,7 +1707,7 @@ impl Daemon {
                 Err(e) => self.log(format!("{} {}: {e}", l.name, l.addr)),
             }
             if *m && !self.listening.contains(&l.addr) {
-                match ctl::listen(SocketAddr::new(l.addr, self.port), self.ev_tx.clone(), self.waker.clone()) {
+                match ctl::listen(SocketAddr::new(l.addr, PORT), self.ev_tx.clone(), self.waker.clone()) {
                     Ok(()) => self.listening.push(l.addr),
                     Err(e) => self.log(format!("control on {}: {e}", l.addr)),
                 }
@@ -1789,19 +1796,10 @@ impl Daemon {
                 }
             }
         }
-        for bi in 0..self.bonds.len() {
-            if self.bonds[bi].session.as_ref().is_some_and(|s| now >= s.next()) {
+        for bi in self.bond_indices() {
+            if self.bond_ref(bi).and_then(|b| b.session.as_ref()).is_some_and(|s| now >= s.next()) {
                 self.handle_bond(bi, core::Event::Tick);
             }
-        }
-        if self
-            .pick
-            .as_ref()
-            .and_then(|p| p.bond.as_ref())
-            .and_then(|b| b.session.as_ref())
-            .is_some_and(|s| now >= s.next())
-        {
-            self.handle_bond(PICK, core::Event::Tick);
         }
         self.pick_tick(now);
         self.chan_tick();
@@ -1823,23 +1821,23 @@ impl Daemon {
         let now = self.now();
         let role = self.cfg.role;
         // A client's bond to another anchor than the configured one, or no longer a client.
-        let target = (role == Role::Client).then(|| self.cfg.anchor.clone()).flatten();
-        if role != Role::Anchor
-            && (!self.bonds.is_empty() && target.as_deref() != self.bonds.first().map(|b| b.peer.as_str()))
-        {
+        let target = self.cfg.anchor.as_deref().filter(|_| role == Role::Client);
+        if role != Role::Anchor && (!self.bonds.is_empty() && target != self.bonds.first().map(|b| b.peer.as_str())) {
             self.client_close(true);
         }
         if role != Role::Client {
             self.close_dialed_bond();
             self.unreachable = None;
         }
-        if let Some(anchor) = target {
+        if role == Role::Client
+            && let Some(anchor) = &self.cfg.anchor
+        {
             let chan_up = self.chans.values().any(|p| matches!(p.purpose, Some(Purpose::Bond)));
             if !chan_up && self.dialing.is_none() && now >= self.redial_at {
                 let id = ctl::next_id();
                 self.dialing = Some(id);
                 self.redial_at = now + self.backoff;
-                ctl::dial(anchor, self.port, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
+                ctl::dial(anchor.clone(), PORT, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
             }
             if let Some(b) = self.bonds.first()
                 && b.mode != self.cfg.mode
@@ -1891,6 +1889,7 @@ impl Daemon {
                 self.host_failed("TUN device", &err);
             }
             (self.anchor_fault, self.egress) = (fault, Some((e, None)));
+            self.nets = self.anchor_nets();
             return;
         }
         let mut faults = Vec::new();
@@ -1910,11 +1909,11 @@ impl Daemon {
         let what = if first { "anchor on" } else { "anchor on again" };
         self.log(format!("{what}: egress {:?}", on.as_ref().map(|o| (o.v4, o.v6, &o.uplink))));
         self.egress = Some((e, on));
+        self.nets = self.anchor_nets();
         // The relay listens where there is egress, and asks the uplink's resolver: anew each time.
         self.dns_relay = None;
-        let (own, _) = self.anchor_nets();
         let on = self.egress.as_ref().and_then(|(_, on)| on.as_ref()).map_or((false, false), |on| (on.v4, on.v6));
-        let own: Vec<IpAddr> = own.into_iter().filter(|a| if a.is_ipv4() { on.0 } else { on.1 }).collect();
+        let own: Vec<IpAddr> = self.nets.0.iter().copied().filter(|a| if a.is_ipv4() { on.0 } else { on.1 }).collect();
         // No egress, no relay: the clients keep their own resolvers (§5.2).
         if !own.is_empty() {
             match self.plat.upstream_resolver().and_then(|up| dns::Relay::new(&own, 53, up)) {
@@ -1942,6 +1941,7 @@ impl Daemon {
         {
             self.log(format!("egress off: {err}"));
         }
+        self.nets = self.anchor_nets();
         (self.dns_relay, self.tun, self.anchor_fault) = (None, None, None);
         self.log("anchor off".into());
     }
@@ -2143,14 +2143,14 @@ impl Daemon {
     /// Starts measuring the next candidate, or selects when every one is measured (§18).
     fn pick_next(&mut self) {
         let now = self.now();
-        let (mesh, tx, waker, port) = (self.mesh_addr(), self.ev_tx.clone(), self.waker.clone(), self.port);
+        let (mesh, tx, waker) = (self.mesh_addr(), self.ev_tx.clone(), self.waker.clone());
         let Some(p) = self.pick.as_mut() else { return };
         if p.i >= p.cands.len() {
             return self.pick_finish();
         }
         let id = ctl::next_id();
         (p.dialing, p.chan, p.bond, p.started, p.result) = (Some(id), None, None, now, None);
-        ctl::dial(p.cands[p.i].clone(), port, mesh, id, tx, waker);
+        ctl::dial(p.cands[p.i].clone(), PORT, mesh, id, tx, waker);
     }
 
     /// Ends the temporary bond and records `m` for the current candidate.
@@ -2209,7 +2209,7 @@ impl Daemon {
             Request::Status { device: Some(d) } => {
                 let id = ctl::next_id();
                 self.view_waiting.insert(id, reply);
-                ctl::dial(d, self.port, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
+                ctl::dial(d, PORT, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
             }
             Request::Pick { devices, mode, seconds, dry_run } => {
                 if self.pick.is_some() {
@@ -2541,12 +2541,7 @@ impl Daemon {
                 })
                 .collect(),
             uplink: self.egress.as_ref().and_then(|(_, on)| on.as_ref()).and_then(|on| on.uplink.clone()),
-            egress: match self.egress.as_ref().and_then(|(_, on)| on.as_ref()) {
-                Some(on) if on.v4 && on.v6 => Egress::Both,
-                Some(on) if on.v4 => Egress::V4,
-                Some(on) if on.v6 => Egress::V6,
-                _ => Egress::None,
-            },
+            egress: self.egress_kind(),
             allow: self.cfg.allow.clone(),
         });
         let support = self.cfg.support.as_ref().filter(|_| self.cfg.role == Role::Support).map(|s| api::SupportView {

@@ -149,9 +149,7 @@ pub fn listen(addr: SocketAddr, tx: Sender<Ev>, waker: Arc<Waker>) -> io::Result
     let ln = TcpListener::bind(addr)?;
     thread::spawn(move || {
         while let Ok((s, _)) = ln.accept() {
-            if start(s, next_id(), false, &tx, &waker).is_err() {
-                continue;
-            }
+            let _ = start(s, next_id(), false, &tx, &waker);
         }
     });
     Ok(())
@@ -178,18 +176,11 @@ pub fn dial(host: String, port: u16, from: Option<IpAddr>, id: u64, tx: Sender<E
                 }
             }
             Err(last)
-        })();
-        match res {
-            Ok(s) => {
-                if let Err(e) = start(s, id, true, &tx, &waker) {
-                    let _ = tx.send(Ev::DialFailed { id, err: e.to_string() });
-                    waker.wake();
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(Ev::DialFailed { id, err: e.to_string() });
-                waker.wake();
-            }
+        })()
+        .and_then(|s| start(s, id, true, &tx, &waker));
+        if let Err(e) = res {
+            let _ = tx.send(Ev::DialFailed { id, err: e.to_string() });
+            waker.wake();
         }
     });
 }

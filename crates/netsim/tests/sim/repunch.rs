@@ -1,13 +1,14 @@
-//! A path that opens after its punch round (Rust only): the phone is blackholed, both ways, from
-//! the start until OPEN, past the punch rounds of the hello and of the stream's first datagram,
-//! while video flows on the hotel. The pairs over the phone never validated, so no lane of theirs
-//! has a return address and only a punch round probes them (§11.1). Rounds once began only on a
-//! link or candidate change, a wake, a new control channel or the first datagram after idle, so
-//! with data flowing the phone's lanes stayed punching for good. Runs the PR seeds, or
-//! WIREBOND_SEED's, in both modes.
+//! A path that opens after its punch round: the phone is blackholed, both ways, from the start
+//! until OPEN, past the punch rounds of the hello and of the stream's first datagram, while video
+//! flows on the hotel. The pairs over the phone never validated, so no lane of theirs has a return
+//! address and only a punch round probes them (§9.4). Rounds once began only on a link or candidate
+//! change, a wake, a new control channel or the first datagram after idle, so with data flowing the
+//! phone's lanes stayed punching for good. Runs the PR seeds, or WIREBOND_SEED's, in both modes.
 
-use wirebond_core::{MODE_BANDWIDTH, MODE_PERFORMANCE, PUNCH_GAP};
-use wirebond_netsim::env::{Env, START, defaults, hole, lane_up, maker, ms, par_runs, repro, seeds};
+use wirebond_core::PUNCH_GAP;
+use wirebond_netsim::env::{
+    Env, START, defaults, each_run, first_when, hole, lane_up, maker, ms, repro, seeds_in_both_modes,
+};
 use wirebond_netsim::{DevId, Dur, SEC};
 
 /// The phone opens at OPEN; the stream and the run end at END.
@@ -30,14 +31,7 @@ fn run(seed: u64, mode: &'static str) -> Option<String> {
     let before = std::rc::Rc::new(std::cell::Cell::new(false));
     let b = std::rc::Rc::clone(&before);
     e.w.at(OPEN, move |w| b.set(up(w)));
-    let at = std::rc::Rc::new(std::cell::Cell::new(None::<Dur>));
-    let a = std::rc::Rc::clone(&at);
-    e.w.every(OPEN, SEC / 100, move |w| {
-        if a.get().is_none() && up(w) {
-            a.set(Some(w.now()));
-        }
-        a.get().is_none()
-    });
+    let at = first_when(&mut e.w, OPEN, SEC / 100, up);
     if let Err(err) = e.run(END) {
         return Some(err);
     }
@@ -64,8 +58,5 @@ fn run(seed: u64, mode: &'static str) -> Option<String> {
 
 #[test]
 fn a_path_that_opens_late_is_punched_again() {
-    let jobs: Vec<(u64, &'static str)> =
-        seeds().into_iter().flat_map(|s| [(s, MODE_PERFORMANCE), (s, MODE_BANDWIDTH)]).collect();
-    let bad: Vec<String> = par_runs(&jobs, |&(seed, mode)| run(seed, mode)).into_iter().flatten().collect();
-    assert!(bad.is_empty(), "{} of {} runs failed:\n{}", bad.len(), jobs.len(), bad.join("\n"));
+    each_run(&seeds_in_both_modes(), |&(seed, mode)| run(seed, mode));
 }

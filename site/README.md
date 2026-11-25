@@ -18,12 +18,14 @@ Node 22.17 or later. `npm run dev` serves it with reloads while you edit. CI
 to build and test for any host that serves the site below its root. Pages are written as
 `download.html` and so on, which most hosts serve at `/download`.
 
-**Publishing.** The site publishes itself to GitHub Pages once the owner turns Pages on: Settings,
-Pages, Source: GitHub Actions. From then on every push to `main` that changes the site, README.md
-or SPEC.md deploys it to <https://tristancopley.github.io/wirebond/>, and running the `site`
-workflow by hand (Actions, site, Run workflow) deploys at once. Until Pages is on, the deploy step
-says so in its log and summary and succeeds. A custom domain is the owner's choice to make, since
-it costs money; none is set up, and the workflow follows one if it is added in the same settings.
+**Publishing.** The site publishes itself to GitHub Pages once Pages' source is GitHub Actions:
+Settings, Pages, Build and deployment, Source. From then on every push to `main` that changes the
+site, README.md or SPEC.md deploys it to <https://tristancopley.github.io/wirebond/>, and running
+the `site` workflow by hand on `main` (Actions, site, Run workflow) deploys at once. Until then
+the workflow's `pages` job says why nothing is deployed (Pages off, or publishing from a branch)
+in its log and summary, and the run succeeds. A custom domain is the owner's choice to make,
+since it costs money; none is set up, and the workflow follows one if it is added in the same
+settings.
 
 **One source of truth.** The site holds no copy of README.md or SPEC.md. `src/lib/server/markdown.ts`
 imports both from the repository root when the site is built and renders them. The landing page
@@ -45,7 +47,9 @@ GitHub's anonymous limit. In the browser it asks once more, so a release publish
 shows; that request to `api.github.com` is the only one any page makes beyond the site itself, and
 the other pages ship no JavaScript at all. A content security policy written into each page
 enforces that; it allows inline style attributes (`style-src-attr`), which SvelteKit's route
-announcer needs, and nothing else inline. No cookies, no analytics, no fonts from elsewhere.
+announcer needs, and, by its hash, the site's one stylesheet, which each page carries inline so
+that no request holds up its first paint. Nothing else inline. No cookies, no analytics, no fonts
+from elsewhere.
 Prerendering also writes a `__data.json` beside each page; only the download page reads its own,
 and the others are dead weight on the host, accepted rather than restructure the loads.
 

@@ -1,13 +1,18 @@
 # wirebond's system harness (SPEC §23.1 tier 3): the daemon as released, as client and anchor, in
 # network namespaces, as root, with real TUN devices, nftables NAT, tc's tbf and netem; driven by
-# crates/load. tests/system/run.sh does it all; this job builds what it runs and installs the tools.
+# crates/load. tests/system/run.sh does it all; each job builds what it runs, checks the daemon is
+# static and stripped (for ci.yml too), and installs the tools.
 # release.yml calls this workflow before it publishes.
 name: system
 
 on:
+  # As in ci.yml: a branch's pushes are checked as its pull request, tags run release.yml, and a
+  # change to the website alone runs site.yml only.
   push:
-    branches: ['**'] # tags run release.yml, which calls this workflow
+    branches: [main]
+    paths-ignore: ['site/**', '.github/workflows/site.yml']
   pull_request:
+    paths-ignore: ['site/**', '.github/workflows/site.yml']
   schedule:
     - cron: '41 10 * * *'
   workflow_dispatch:
@@ -35,9 +40,19 @@ defaults:
     shell: bash
 
 jobs:
+  # The harness's targets in two halves side by side, each on a runner of its own, so a run takes
+  # the longer half's time, not both: each scenario makes and removes its own namespaces, so the
+  # halves are independent, and on two machines neither can disturb the other's measurements.
   rust:
+    name: rust ${{ matrix.part }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {part: functional, targets: net a7 a8 a9 a10}
+          - {part: perf, targets: a12 shaped netem}
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
@@ -54,10 +69,11 @@ jobs:
           sudo apt-get install -y -qq nftables jq
           sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" || echo "no linux-modules-extra: netem may be skipped"
           sudo modprobe -a sch_netem sch_tbf tun || true
-      - name: The namespaces and the load tool, with no daemon
-        run: sudo env PATH="$PATH" TMPDIR="$TMPDIR" LOAD_BIN="$LOAD_BIN" tests/system/run.sh net
-      - name: A7, A8, A9, A10, A12, and the shaped and netem runs against the mesh-lane baseline
+      # functional: the namespaces and the load tool with no daemon, then A7 to A10. perf: A12, and
+      # the shaped and netem runs against the mesh-lane baseline.
+      - name: run.sh ${{ matrix.targets }}
         env:
+          TARGETS: ${{ matrix.targets }}
           # A12's budget is 25% of one core per daemon on the device (SPEC §23.3). A runner is a few
           # shared virtual cores, and the harness bills each daemon for the kernel's work along the
           # whole simulated path, so here the same check guards against a regression: runners
@@ -69,14 +85,23 @@ jobs:
             echo '```'
             code=0
             sudo env PATH="$PATH" TMPDIR="$TMPDIR" WIREBOND_BIN="$WIREBOND_BIN" LOAD_BIN="$LOAD_BIN" \
-              WIREBOND_A12_CPU="$WIREBOND_A12_CPU" tests/system/run.sh daemons || code=$?
+              WIREBOND_A12_CPU="$WIREBOND_A12_CPU" tests/system/run.sh $TARGETS || code=$?
             echo '```'
             exit "$code"
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      # After the harness, and whether it passed or not: a daemon that is not static still runs,
+      # and what the harness measured of it is worth having beside this failure. Not when the
+      # build step stopped before it had a daemon to name (WIREBOND_BIN): there is none to look at.
+      - name: The daemon is static and stripped (SPEC §22.5)
+        if: (success() || failure()) && env.WIREBOND_BIN != ''
+        run: |
+          echo "linux x86_64: $(stat -c %s "$WIREBOND_BIN") bytes"
+          kind=$(file -b "$WIREBOND_BIN") && echo "$kind"
+          grep -q 'static.*, stripped$' <<< "$kind" || { echo "not a static, stripped executable"; exit 1; }
       - if: failure()
         run: sudo chmod -R a+rX "$TMPDIR"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: system
+          name: system-${{ matrix.part }}
           path: ${{ runner.temp }}/system

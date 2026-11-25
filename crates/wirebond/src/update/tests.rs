@@ -405,7 +405,8 @@ fn stage_smoke_failures_remove_the_stage() {
     ] {
         let (e, files) = stage_fails(case, release("v0.4.1", &bin));
         assert!(e.starts_with("smoke test: "), "{case}: {e}");
-        assert!(e.contains("wirebond.new version --json must print v0.4.1 within 10s: "), "{case}: {e}");
+        let within = format!("wirebond.new version --json must print v0.4.1 within {}s: ", SMOKE.as_secs());
+        assert!(e.contains(&within), "{case}: {e}");
         assert!(e.contains(want), "{case}: {e}");
         assert_eq!(files, "v0.3.0 | - | -", "{case}");
     }
@@ -418,9 +419,11 @@ fn stage_kills_a_smoke_test_that_hangs() {
     let start = Instant::now();
     let (e, files) = stage_fails("hangs", release("v0.4.1", "#!/bin/sh\nexec sleep 30\n"));
     let took = start.elapsed();
-    assert!(e.contains("must print v0.4.1 within 10s: signal: 9 (SIGKILL)"), "{e}");
+    assert!(e.contains(&format!("must print v0.4.1 within {}s: signal: 9 (SIGKILL)", SMOKE.as_secs())), "{e}");
     assert!(took >= SMOKE && took < SMOKE + Duration::from_secs(5), "took {took:?}");
     assert_eq!(files, "v0.3.0 | - | -");
+    // A test build waits less; the shipped build waits §22.3's 10 s.
+    assert_eq!(SHIPPED_SMOKE, Duration::from_secs(10));
 }
 
 #[cfg(unix)]

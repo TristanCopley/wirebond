@@ -1,24 +1,19 @@
 //! wirebond-core through its public API alone: two sessions back to back through the in-memory
 //! network of tests/common, driven the way node drives them. Each test ports a session-level test
-//! of the Go reference (core/pair_test.go, stable_test.go, combine_test.go, lane_test.go,
-//! status_test.go, wire_test.go) with its scenario and numbers, and asserts what the Go test
-//! asserts as far as the public API shows it:
+//! of the 1.x reference with its scenario and numbers, and asserts what that test asserts as far
+//! as the public API shows it:
 //!
 //! - which lane carries bulk: the role the sender's snapshot gives each lane ("spread",
-//!   "copies", "standby"), where Go read the scheduler's fields;
+//!   "copies", "standby"), since the scheduler's own fields are not public;
 //! - lane states, validation, return addresses, fits, counters and events: the snapshot;
 //! - keys: the key messages a session sends, its RidTable, and the packets on the wire, which
-//!   must carry the peer's rid and open under the key their sender announced (§7.3);
+//!   must carry the peer's rid and open under the key their sender announced (§10.3);
 //! - "a bad packet changed nothing": no call on Out, the same snapshot and next(), and then the
 //!   same behaviour as an identical session that never saw it.
-//!
-//! notes/rust.md lists what the public API cannot express.
 
-mod common;
-
+use crate::common::*;
 use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
-use common::*;
 use std::net::SocketAddr;
 use wirebond_core::{
     BOND_BYTES, DATA_LEN, EPOCH_BITS, Event, FlowId, HEADER_LEN, MAX_PACKET, MIN, MODE_BANDWIDTH, MS, Mono, Msg,
@@ -26,7 +21,7 @@ use wirebond_core::{
     TYPE_DATA, TYPE_PROBE, VALIDATE_AMP, packet_rid,
 };
 
-/// Opens a lane packet with `key` as §7.3 seals it: AES-256-GCM, nonce 0 ‖ rid ‖ counter, the
+/// Opens a lane packet with `key` as §10.3 seals it: AES-256-GCM, nonce 0 ‖ rid ‖ counter, the
 /// 11-byte header as additional data.
 fn open(key: &[u8], pkt: &[u8]) -> Option<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key).ok()?;
@@ -35,7 +30,7 @@ fn open(key: &[u8], pkt: &[u8]) -> Option<Vec<u8>> {
     cipher.decrypt(&nonce.into(), Payload { msg: &pkt[HEADER_LEN..], aad: &pkt[..HEADER_LEN] }).ok()
 }
 
-/// A data packet for receive id `rid` with counter `ctr` and an arbitrary body (Go's forge).
+/// A data packet for receive id `rid` with counter `ctr` and an arbitrary body.
 fn forge(rid: u16, ctr: u64) -> Vec<u8> {
     let mut b = vec![0; HEADER_LEN + DATA_LEN + 20 + TAG_LEN];
     b[0] = TYPE_DATA;
@@ -65,10 +60,10 @@ fn inject(p: &mut Pair, side: Side, sock: SockId, from: SocketAddr, data: &[u8])
 // ---------------------------------------------------------------------------------------------
 // Keys
 
-/// Go's TestPairKeyExchange. Each side answers the peer's hello with one key message: a receive
-/// id, which its RidTable holds for node's owner key, and a 32-byte send key for epoch 0. The keys
-/// are exchanged when every packet a side sends carries the peer's rid and opens under the key it
-/// announced, and the peer delivers it (§7.2–§7.4).
+/// Each side answers the peer's hello with one key message: a receive id, which its RidTable holds
+/// for node's owner key, and a 32-byte send key for epoch 0. The keys are exchanged when every
+/// packet a side sends carries the peer's rid and opens under the key it announced, and the peer
+/// delivers it (§10.2–§10.3).
 #[test]
 fn keys_are_exchanged_through_hello_and_key() {
     let mut p = Pair::new(20 * MS);
@@ -95,7 +90,7 @@ fn keys_are_exchanged_through_hello_and_key() {
         assert_eq!(packet_rid(&sent.data), Some(rid), "a packet from the {:?} carries the peer's rid", sent.by);
         let pt = open(&by.key().expect("checked").k, &sent.data).unwrap_or_else(|| {
             panic!(
-                "a packet from the {:?} does not open under the key it announced (§7.3): {:02x?}",
+                "a packet from the {:?} does not open under the key it announced (§10.3): {:02x?}",
                 sent.by, sent.data
             )
         });
@@ -111,10 +106,9 @@ fn keys_are_exchanged_through_hello_and_key() {
     assert!(data > 0, "the client's datagram crossed no lane; wire: {} packets", p.wire.len());
 }
 
-/// Go's TestPeerNewKey, through the pair: the client's session ended while the server's lived on
-/// (its SessionLinger ran out), and its next session between the same two processes sends a new
-/// key whose counters start again. The new session's packets are delivered both ways; the old
-/// one's, replayed, are not (§7.2).
+/// The client's session ended while the server's lived on (its SessionLinger ran out), and its
+/// next session between the same two processes sends a new key whose counters start again. The
+/// new session's packets are delivered both ways; the old one's, replayed, are not (§10.2).
 #[test]
 fn a_peer_s_new_session_is_heard_and_its_old_packets_are_not() {
     let mut p = Pair::new(10 * MS);
@@ -155,9 +149,10 @@ fn a_peer_s_new_session_is_heard_and_its_old_packets_are_not() {
     assert_eq!(p.s.got(f).len(), got, "an old packet was delivered");
 }
 
-/// A restarted device (§7.2, A14): a new process has a new inst, so both sides start new sessions
-/// with new keys, and the restarted side's RidTable starts afresh, so it may hand out the old rid
-/// again. No packet of the old sessions, in either direction, gets anything from the new ones.
+/// A restarted device (§10.5 rule 7): a new process has a new inst, so both sides start new
+/// sessions with new keys, and the restarted side's RidTable starts afresh, so it may hand out the
+/// old rid again. No packet of the old sessions, in either direction, gets anything from the new
+/// ones.
 #[test]
 fn a_restarted_device_accepts_no_old_packet() {
     let mut p = Pair::new(10 * MS);
@@ -174,7 +169,7 @@ fn a_restarted_device_accepts_no_old_packet() {
     let (old_c, old_s) = (p.c.key().expect("checked").k.clone(), p.s.key().expect("checked").k.clone());
 
     // xanth restarted: a new process with a new table. The Mac ends its old session at once
-    // (§7.6 rule 8) and starts another in its own table.
+    // (§10.5 rule 7) and starts another in its own table.
     p.c.engine.close(&mut p.c.rids);
     p.c.engine = Session::new(Role::Client, 3, rand(13));
     p.s.engine = Session::new(Role::Anchor, S_OWNER, rand(14));
@@ -203,9 +198,9 @@ fn a_restarted_device_accepts_no_old_packet() {
     assert!(p.s.got(f).is_empty() && p.c.got(f).is_empty(), "an old packet was delivered");
 }
 
-/// Go's TestSealOpen: a sealed datagram is OVERHEAD bytes longer; every single-bit flip, a cut and
-/// a grown packet are dropped with no call on Out and no change, before any packet authenticated;
-/// the genuine packet is delivered once and its replay dropped (§7.3, §7.5, §7.6 rule 1).
+/// A sealed datagram is OVERHEAD bytes longer; every single-bit flip, a cut and a grown packet are
+/// dropped with no call on Out and no change, before any packet authenticated; the genuine packet
+/// is delivered once and its replay dropped (§10.3, §10.4, §10.5 rule 1).
 #[test]
 fn a_packet_opens_only_as_sealed_and_only_once() {
     let mut k = Keyed::new(11, 12);
@@ -235,8 +230,8 @@ fn a_packet_opens_only_as_sealed_and_only_once() {
     assert!(rec.calls.is_empty(), "the replay got {:?}", rec.calls);
 }
 
-/// Go's TestForgedCounter: packets with the right rid and counters in any epoch, the next one
-/// included, change nothing and get nothing (§7.2, §7.5 step 1).
+/// Packets with the right rid and counters in any epoch, the next one included, change nothing and
+/// get nothing (§10.2, §10.4 step 1).
 #[test]
 fn forged_counters_in_any_epoch_change_nothing() {
     let mut k = Keyed::new(11, 12);
@@ -251,12 +246,11 @@ fn forged_counters_in_any_epoch_change_nothing() {
     assert_eq!(k.recv(&k.pkt.clone()).delivered().len(), 1, "the genuine packet still opens");
 }
 
-/// Go's TestPairForged and more: real packets replayed, or with a bit flipped in the type, the rid
-/// (a wrong rid), the counter, the payload or the tag; packets sealed for the other side; cut,
-/// grown and oversized packets; garbage with the right header; forged counters in every epoch.
-/// All are dropped with no reply and no call on Out, change neither the snapshot nor next(), and
-/// afterwards the session does exactly what an identical session that never saw them does
-/// (§7.5, §7.6 rules 1 and 3).
+/// Real packets replayed, or with a bit flipped in the type, the rid (a wrong rid), the counter,
+/// the payload or the tag; packets sealed for the other side; cut, grown and oversized packets;
+/// garbage with the right header; forged counters in every epoch. All are dropped with no reply
+/// and no call on Out, change neither the snapshot nor next(), and afterwards the session does
+/// exactly what an identical session that never saw them does (§10.4, §10.5 rules 1 and 3).
 #[test]
 fn forged_replayed_tampered_and_wrong_rid_packets_change_nothing() {
     let f = FlowId(1);
@@ -344,7 +338,7 @@ fn forged_replayed_tampered_and_wrong_rid_packets_change_nothing() {
 // ---------------------------------------------------------------------------------------------
 // Lanes
 
-/// Go's TestPairMeshFlow: with no links, a flow runs both ways over the Tailscale lane, in order.
+/// With no links, a flow runs both ways over the Tailscale lane, in order.
 #[test]
 fn a_flow_runs_both_ways_over_the_tailscale_lane() {
     let mut p = Pair::new(15 * MS);
@@ -369,10 +363,10 @@ fn a_flow_runs_both_ways_over_the_tailscale_lane() {
     );
 }
 
-/// Go's TestLanesUp: in the hotel every lane comes up and is validated on both sides; with no
-/// traffic both direct lanes take copies, one per bottleneck group, and the Tailscale lane, which
-/// shares the default link's group, does not; the server learned each lane's NAT mapping (§6.1,
-/// §6.3, §8.4, §10.1).
+/// In the hotel every lane comes up and is validated on both sides; with no traffic both direct
+/// lanes take copies, one per bottleneck group, and the Tailscale lane, which is in the group of
+/// the hotel Wi-Fi that carries it, does not; the server learned each lane's NAT mapping (§8, §9.4,
+/// §11.4, §14.1).
 #[test]
 fn the_hotel_s_lanes_come_up() {
     let mut p = Pair::hotel();
@@ -398,10 +392,10 @@ fn the_hotel_s_lanes_come_up() {
     assert_eq!((m.kind, &m.local[..], &m.remote[..], m.sock), ("mesh", "", "", MESH_SOCK));
 }
 
-/// Go's TestStall: a stall on the client's Wi-Fi lane is seen at the receiver as missing copies
-/// and reported at once, so the sender marks the lane suspect within about 100 ms (§8.4); it goes
-/// down after DOWN_AFTER, input survives on the iPhone lane, and the lane comes back up after
-/// UP_AFTER of clean echoes.
+/// A stall on the client's Wi-Fi lane is seen at the receiver as missing copies and reported at
+/// once, so the sender marks the lane suspect within about 100 ms (§11.4); it goes down after
+/// DOWN_AFTER, input survives on the iPhone lane, and the lane comes back up after UP_AFTER of
+/// clean echoes.
 #[test]
 fn a_stall_is_seen_within_about_a_round_trip() {
     let mut p = Pair::hotel();
@@ -426,8 +420,8 @@ fn a_stall_is_seen_within_about_a_round_trip() {
     assert_state(&p.snap(Side::Client), WIFI, "up", "1.5 s after the stall ended");
 }
 
-/// Go's TestRebind: a NAT rebinding moves the server's return address on the client's next probe,
-/// and the new address is validated within about one RTT (§7.6 rule 2, A7).
+/// A NAT rebinding moves the server's return address on the client's next probe, and the new
+/// address is validated within about one RTT (§10.5 rule 2).
 #[test]
 fn a_nat_rebinding_moves_the_return_address() {
     let mut p = Pair::hotel();
@@ -445,10 +439,10 @@ fn a_nat_rebinding_moves_the_return_address() {
     complete(&p.s, f, 130, 0);
 }
 
-/// Go's TestRelayedProbe, as far as the public API shows it: an on-path network relays a real
-/// probe from a victim's address before the real one arrives. The lane keeps its validated return
-/// address, the victim gets probes only, at most VALIDATE_AMP × the bytes received from it, and
-/// the flow carries on (§7.6 rule 2, A6). The claim on the victim's address is not visible.
+/// An on-path network relays a real probe from a victim's address before the real one arrives. As
+/// far as the public API shows it, the lane keeps its validated return address, the victim gets
+/// probes only, at most VALIDATE_AMP × the bytes received from it, and the flow carries on (§9.4,
+/// §10.5 rule 2). The claim on the victim's address is not visible.
 #[test]
 fn a_relayed_probe_gets_the_victim_probes_only() {
     let mut p = Pair::hotel();
@@ -489,10 +483,10 @@ fn a_relayed_probe_gets_the_victim_probes_only() {
     complete(&p.s, f, 200, 0);
 }
 
-/// Go's TestIdle: an idle session sends one probe every PROBE_IDLE on one unmetered direct lane and
-/// the server answers each; nothing goes on the metered lane, which is dormant; idle, the client
-/// asks for a tick for its next idle probe and the server for none; the first datagram after idle
-/// goes through and wakes every lane (§8.1, A8).
+/// An idle session sends one probe every PROBE_IDLE on one unmetered direct lane and the server
+/// answers each; nothing goes on the metered lane, which is dormant; idle, the client asks for a
+/// tick for its next idle probe and the server for none; the first datagram after idle goes through
+/// and wakes every lane (§11.1).
 #[test]
 fn an_idle_session_probes_one_unmetered_lane() {
     let mut p = Pair::hotel();
@@ -522,7 +516,7 @@ fn an_idle_session_probes_one_unmetered_lane() {
     assert_state(&p.snap(Side::Client), PHONE, "up", "after the session woke");
 }
 
-/// Go's TestWake: a wake re-probes every lane but turns none suspect on its own (§8.4).
+/// A wake re-probes every lane but turns none suspect on its own (§11.4).
 #[test]
 fn a_wake_turns_no_lane_suspect() {
     let mut p = Pair::hotel();
@@ -539,9 +533,9 @@ fn a_wake_turns_no_lane_suspect() {
     }
 }
 
-/// Go's TestLinkPull: a link that carries bulk disappears mid-stream (the Wi-Fi cable or radio);
-/// the other lane carries every packet already, nothing is lost, and when the link returns its
-/// lane is up again within seconds (§10.2, §17.5 field run 4).
+/// A link that carries bulk disappears mid-stream (the Wi-Fi cable or radio); the other lane
+/// carries every packet already, nothing is lost, and when the link returns its lane is up again
+/// within seconds (§14.1, §23.3 A5).
 #[test]
 fn a_pulled_link_loses_nothing() {
     let mut p = Pair::hotel();
@@ -568,9 +562,9 @@ fn a_pulled_link_loses_nothing() {
 // ---------------------------------------------------------------------------------------------
 // performance
 
-/// Go's TestStableDirect, in performance: bulk starts on the Tailscale lane, the only one, and
-/// moves to a direct lane as soon as one is up, losing nothing (§11.1: the Tailscale lane only
-/// for a group with no usable direct lane).
+/// In performance, bulk starts on the Tailscale lane, the only one, and moves to a direct lane as
+/// soon as one is up, losing nothing (§14.1: the Tailscale lane only for a group with no usable
+/// direct lane).
 #[test]
 fn a_direct_lane_takes_bulk_from_the_tailscale_lane() {
     let mut p = Pair::new(33 * MS);
@@ -596,7 +590,7 @@ fn a_direct_lane_takes_bulk_from_the_tailscale_lane() {
 
 /// The hotel Wi-Fi's return path blackholes under Moonlight at 10 Mbps. Every packet already goes
 /// on both groups' lanes, so nothing moves or rewinds, and neither video nor the copied flows lose
-/// a datagram (§11.1).
+/// a datagram (§14.1).
 #[test]
 fn a_stall_on_one_lane_loses_nothing() {
     let mut p = Pair::hotel();
@@ -616,7 +610,7 @@ fn a_stall_on_one_lane_loses_nothing() {
 }
 
 /// With 1% loss both ways on the hotel Wi-Fi, the iPhone lane's copy of every packet makes up for
-/// what the Wi-Fi loses: every datagram of every flow arrives, in order (§11.1, §10.1).
+/// what the Wi-Fi loses: every datagram of every flow arrives, in order (§14.1).
 #[test]
 fn random_loss_on_one_lane_loses_nothing() {
     let mut p = Pair::hotel();
@@ -635,9 +629,9 @@ fn random_loss_on_one_lane_loses_nothing() {
     in_order(&p.c, VIDEO, p.s.count(VIDEO), 0);
 }
 
-/// A lossy lane costs nothing (§10.1): with 2% loss both ways on the iPhone lane, every datagram
+/// A lossy lane costs nothing (§14.1): with 2% loss both ways on the iPhone lane, every datagram
 /// of every flow arrives, and each side measures about 2% loss on its sending over the iPhone
-/// lane (§8.3), as status shows it.
+/// lane (§11.3), as status shows it.
 #[test]
 fn a_lossy_lane_costs_nothing_and_shows_its_loss() {
     let mut p = Pair::hotel();
@@ -668,7 +662,7 @@ fn a_lossy_lane_costs_nothing_and_shows_its_loss() {
 
 /// A stream that outgrows the faster lane's shaper (the hotel's: 20 Mbps here, with a 180 ms
 /// buffer) stays on both lanes: the Wi-Fi drops its excess copies at its own pacer and holds
-/// nothing back, so the iPhone lane's copies deliver every datagram (§9, §11.1).
+/// nothing back, so the iPhone lane's copies deliver every datagram (§12, §14.1).
 #[test]
 #[ignore = "SPEC 14.1's known limitation, kept by the owner: the wait counts base OWDs only, so \
             a copy queued in the sender's pacer on the lane with the lower base OWD can arrive \
@@ -695,10 +689,11 @@ fn a_lane_too_small_holds_nothing_back() {
     assert_eq!(st.unrecovered, 0, "gaps the client gave up on; {}", describe(&st));
 }
 
-/// Go's TestBlind: every lane's return direction is blackholed for 2 s, so the sender sees no
-/// echo; it sends bulk on two lanes in different bottleneck groups until echoes return, then on
-/// one per group again, and video keeps arriving in order (§8.4, A20). The Tailscale lane shares
-/// the default link's group (§6.1), so the two are the iPhone's and Wi-Fi's or the Tailscale lane.
+/// Every lane's return direction is blackholed for 2 s, so the sender sees no echo; it sends bulk
+/// on two lanes in different bottleneck groups until echoes return, then on one per group again,
+/// and video keeps arriving in order (§11.4). The Tailscale lane is in the group of the link that
+/// carries it, the hotel's Wi-Fi (§8), so the two are the iPhone's and Wi-Fi's or the Tailscale
+/// lane.
 #[test]
 fn a_blind_sender_uses_two_lanes_in_different_groups() {
     let mut p = Pair::hotel();
@@ -728,9 +723,9 @@ fn a_blind_sender_uses_two_lanes_in_different_groups() {
     complete(&p.c, AUDIO, p.s.count(AUDIO), 0);
 }
 
-/// Go's TestSnapshot, in performance: status shows both groups' lanes carrying bulk and the
-/// Tailscale lane on standby, the flows' classes, the metered rate (every packet crosses the
-/// iPhone), no problem, and the bytes held within BOND_BYTES (§14.2–§14.4).
+/// In performance, status shows both groups' lanes carrying bulk and the Tailscale lane on
+/// standby, the flows' classes, the metered rate (every packet crosses the iPhone), no problem,
+/// and the bytes held within BOND_BYTES (§20.2).
 #[test]
 fn status_shows_bulk_on_every_group() {
     let mut p = Pair::hotel();
@@ -759,7 +754,6 @@ fn status_shows_bulk_on_every_group() {
     // 10 Mbps for 3 s and 30 Mbps for 3 s of the last minute on the iPhone is 2 Mbps over it:
     // 0.9 GB/h, and a little more with the packets' overhead and the copies.
     assert!((0.85..=1.2).contains(&st.metered_gb_per_hour), "metered {:.2} GB/h", st.metered_gb_per_hour);
-    assert!(st.problems.is_empty(), "problems {:?}", st.problems);
     assert!(
         st.events.len() <= STATUS_EVENTS && st.bytes > 0 && st.bytes <= BOND_BYTES,
         "events {}, bytes {}",
@@ -771,9 +765,8 @@ fn status_shows_bulk_on_every_group() {
 // ---------------------------------------------------------------------------------------------
 // bandwidth
 
-/// Go's TestCombine: bulk larger than either lane (45 Mbps over 20 and 40 Mbps shapers with 60 ms
-/// buffers) spreads over both, at about the sum of their rates, and reaches the receiver in
-/// order (§11.2, §10.3).
+/// Bulk larger than either lane (45 Mbps over 20 and 40 Mbps shapers with 60 ms buffers) spreads
+/// over both, at about the sum of their rates, and reaches the receiver in order (§14.2, §15).
 #[test]
 fn combine_spreads_bulk_over_two_lanes_and_keeps_its_order() {
     let mut p = Pair::hotel();
@@ -811,7 +804,7 @@ fn combine_spreads_bulk_over_two_lanes_and_keeps_its_order() {
     assert!(late <= steady.len() / 500, "{late} of {} delivered out of order in steady state", steady.len());
     let st = p.snap(Side::Server);
     for id in [WIFI, PHONE] {
-        let bytes = lane(&st, id).map_or(0, |l| l.out.sent_bytes);
+        let bytes = lane(&st, id).map_or(0, |l| l.tx_bytes);
         assert!(bytes >= 5_000_000, "lane {id:#06x} carried only {bytes} bytes; {}", describe(&st));
     }
     complete(&p.c, AUDIO, p.s.count(AUDIO), 0);

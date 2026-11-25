@@ -19,7 +19,7 @@ export const PLATFORMS = [
 
 export const SUMS = 'SHA256SUMS';
 
-export type Asset = { name: string; url: string; size: number };
+export type Asset = { url: string; size: number };
 export type Release = {
 	tag: string;
 	url: string;
@@ -43,7 +43,7 @@ function parse(json: unknown): Release | null {
 	const assets: Record<string, Asset> = {};
 	for (const a of Array.isArray(r.assets) ? r.assets : []) {
 		if (typeof a?.name === 'string' && typeof a?.browser_download_url === 'string') {
-			assets[a.name] = { name: a.name, url: a.browser_download_url, size: Number(a.size) || 0 };
+			assets[a.name] = { url: a.browser_download_url, size: Number(a.size) || 0 };
 		}
 	}
 	return {

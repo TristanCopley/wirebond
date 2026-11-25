@@ -16,6 +16,15 @@ panic = "abort"
 strip = true
 debug = false
 
+# netsim's tests: release's opt-level and assertions, so the simulated results are the same, without
+# its fat LTO and single codegen unit (SPEC §22.5 sets those for the shipped daemon), which made a
+# rebuild after an edit in core or netsim take 30 s instead of 10. The short set costs some 7% more
+# processor time for it. `cargo test -p wirebond-netsim --profile sim`.
+[profile.sim]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 [profile.bench]
 inherits = "release"
 debug = true
@@ -31,3 +40,9 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 debug = false
+
+# The daemon at opt-level 0: its tests wait on sockets and timers, not on the processor, and ran no
+# slower so (39 s either way), while a rebuild after an edit in it took a third of the time
+# (1.5 s against 5 s incremental, 6 s against 19 s without, as CI builds).
+[profile.dev.package.wirebond]
+opt-level = 0

@@ -12,7 +12,6 @@
 //! REWIND_WINDOW are re-sent across the lanes that stay (rewind.rs).
 
 use crate::lane::{Lane, LaneIx, State};
-use crate::performance::since;
 use crate::session::Mode;
 use crate::session::NEVER;
 use crate::{BANDWIDTH_FLOOR_HOLD, ECF_MARGIN, MAX_LINKS, MIN_WINDOW, Mono, Out, PACE_FLOOR, RATE_WINDOW, Session};
@@ -78,14 +77,14 @@ impl Session {
     /// A lane in overuse at PACE_FLOOR for BANDWIDTH_FLOOR_HOLD while it carries bulk, which is
     /// what a lane that drops full-size packets looks like, is barred (§14.2, leaving the spread).
     /// Its group then takes the mesh lane, whose packets Tailscale fragments inside WireGuard, so
-    /// they cross that hop (§5.4; notes/rust.md, review fixes: one-group-fragments).
+    /// they cross that hop.
     fn eligible(&mut self, now: Mono) -> Spread {
         let (mut best, mut mesh) = ([None; MAX_LINKS], None);
         for l in self.lanes.ixs() {
             let x = &self.lanes[l];
             let rtt = if x.rtt > 0 { x.rtt } else { RATE_WINDOW };
             let floor = x.state == State::Up
-                && since(now, x.last_over) < rtt.saturating_mul(2)
+                && now.saturating_sub(x.last_over) < rtt.saturating_mul(2)
                 && x.rate <= PACE_FLOOR
                 && self.carries(l);
             let x = &mut self.lanes[l];
@@ -93,7 +92,7 @@ impl Session {
                 x.floor_at = NEVER;
             } else if x.floor_at == NEVER {
                 x.floor_at = now;
-            } else if since(now, x.floor_at) >= BANDWIDTH_FLOOR_HOLD {
+            } else if now.saturating_sub(x.floor_at) >= BANDWIDTH_FLOOR_HOLD {
                 self.bar(now, l);
             }
             let x = &self.lanes[l];
@@ -114,8 +113,8 @@ impl Session {
         if let Some(m) = mesh {
             let g = self.lanes[m].group;
             // A usable direct lane is validated and still answers (up or suspect), barred or not:
-            // the mesh lane, which crosses its group's link, stays out while one is (§14.1,
-            // §14.2; notes/core.md 44a, A5, A6).
+            // the mesh lane, which crosses its group's link, stays out while one is (§14.1, §14.2;
+            // A5, A6).
             let live = self.lanes.iter().any(|x| !x.mesh && x.usable() && (g < 0 || x.group == g));
             if (-1..MAX_LINKS as i32).contains(&g) && !live {
                 best[g.max(0) as usize] = Some(m);
@@ -126,7 +125,7 @@ impl Session {
             // At least a tenth of the fastest lane's rate. A rate is known once the lane has
             // carried bulk within MIN_WINDOW and left startup; until then (a lane that joins
             // restarts at PACE_FLOOR, §12) it is not known to be too slow.
-            let known = |x: &Lane| !x.startup && since(now, x.bulk_at) < MIN_WINDOW && x.rate.is_finite();
+            let known = |x: &Lane| !x.startup && now.saturating_sub(x.bulk_at) < MIN_WINDOW && x.rate.is_finite();
             let fast = &self.lanes[ls[0]];
             if known(fast) {
                 let tenth = fast.rate / 10.0;

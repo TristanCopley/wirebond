@@ -1,10 +1,8 @@
 //! The test driver's own tests: the network model, the control channel, the run loop and the
 //! checks, driven by a fake engine so that they hold whatever state the real engine is in.
-//! Reference values come from Go's core/pair_test.go driver, which this one ports draw for draw.
+//! Reference values come from the 1.x driver, which this one ports draw for draw.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use std::net::SocketAddr;
 use wirebond_core::{Event, FlowId, MS, Mono, Msg, Out, RidTable, SEC, SockId};
 
@@ -208,7 +206,7 @@ fn nat_shows_the_mapping_and_hides_the_socket() {
     let infos = p.infos(Side::Client);
     assert_eq!(infos.len(), 1);
     assert_eq!((infos[0].id, &infos[0].label[..], infos[0].default), (1, "Wi-Fi", true));
-    assert_eq!(infos[0].cands, [C_WIFI, C_WIFI_NAT], "the local address, then the mapping (§6.3)");
+    assert_eq!(infos[0].cands, [C_WIFI, C_WIFI_NAT], "the local address, then the mapping (§9.3)");
     assert_eq!(p.infos(Side::Server)[0].cands, [S_ETH], "a public address has no mapping");
 
     p.c.engine.sock = 11;

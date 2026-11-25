@@ -1,12 +1,12 @@
 //! Estimates: deviation series, windowed minima, byte meters, and what an echo teaches about my
-//! direction of a lane (§8.3, §8.4; Go: core/estimate.go).
+//! direction of a lane (§11.3, §11.4).
 //!
-//! Owner: C4. Durations are nanoseconds in [`Mono`], as everywhere in core.
+//! Durations are nanoseconds in [`Mono`], as everywhere in core.
 //!
 //! Values an echo carries come from the peer: `owd`, `held` and the probe's SentAt are combined
-//! with wrapping arithmetic, as Go's silently wrapping integers did, so that no echo can make a
-//! debug build panic; packet and byte counters wrap by design. Probe Seqs compare in serial order,
-//! so a lane keeps working across the u32 wrap (R2-24); a stored Seq of 0 still means none.
+//! with wrapping arithmetic, so that no echo can make a debug build panic; packet and byte
+//! counters wrap by design. Probe Seqs compare in serial order, so a lane keeps working across the
+//! u32 wrap (R2-24); a stored Seq of 0 still means none.
 
 use std::cell::Cell;
 
@@ -18,14 +18,14 @@ use crate::{
     PROBE_ACTIVE, RATE_WINDOW, RTT_RING, SUSPECT_DEV, SUSPECT_MIN, Session, UP_AFTER,
 };
 
-/// An unlimited rate. Go: `inf`.
+/// An unlimited rate.
 pub(crate) const INF: f64 = f64::INFINITY;
 
-/// A minimum with no sample. Go: `noMin`.
+/// A minimum with no sample.
 pub(crate) const NO_MIN: Mono = Mono::MAX;
 
 /// Recent samples for a median absolute deviation over DEV_WINDOW, which a single spike cannot
-/// stretch the way a mean would (§8.3). Go: `series`.
+/// stretch the way a mean would (§11.3).
 ///
 /// `top` and `asked` are `max`'s cache, not part of the value: PartialEq compares the samples
 /// only, and Default (a lane's start, `wake`'s reset) clears it.
@@ -70,10 +70,9 @@ impl Series {
     }
 
     /// The median absolute deviation of the samples of the last DEV_WINDOW; 0 with none. Each
-    /// median is the element at k / 2 of the k values in order, the upper one of an even count
-    /// (Go's `x[len(x)/2]` after `slices.Sort`); `select_nth_unstable_by(f64::total_cmp)` finds it
-    /// in a local `[f64; MAD_SAMPLES]` without sorting the rest (Go sorted the session's scratch
-    /// twice): no allocation, deterministic.
+    /// median is the element at k / 2 of the k values in order, the upper one of an even count;
+    /// `select_nth_unstable_by(f64::total_cmp)` finds it in a local `[f64; MAD_SAMPLES]` without
+    /// sorting the rest: no allocation, deterministic.
     pub(crate) fn mad(&self, now: Mono) -> Mono {
         let mut x = [0.0; MAD_SAMPLES];
         let mut k = 0;
@@ -87,9 +86,9 @@ impl Series {
         if k == 0 {
             return 0;
         }
-        // The samples are whole nanoseconds, never NaN or -0.0, so total_cmp orders them as Go's
-        // `<` does. Only equal bits compare equal under it, so the element selection puts at k / 2
-        // is, bit for bit, the one a sort puts there, and the medians are Go's.
+        // The samples are whole nanoseconds, never NaN or -0.0, so total_cmp orders them as `<`
+        // does. Only equal bits compare equal under it, so the element selection puts at k / 2 is,
+        // bit for bit, the one a sort puts there, and the medians are those of a full sort.
         let x = &mut x[..k];
         let m = *x.select_nth_unstable_by(k / 2, f64::total_cmp).1;
         x.iter_mut().for_each(|v| *v = (*v - m).abs());
@@ -102,9 +101,8 @@ impl Series {
     /// so a scan keeps the slot of the largest sample it found (`top`), which `add` moves to any
     /// sample at least as large. While that sample is in the window and time has not gone back
     /// since the last query, it is the answer: the window only loses samples as time goes on, and
-    /// every one added since was compared with it. Otherwise the ring is scanned as Go's `max`
-    /// scanned it, and of equal largest samples the cache keeps the one that leaves the window
-    /// last.
+    /// every one added since was compared with it. Otherwise the ring is scanned, and of equal
+    /// largest samples the cache keeps the one that leaves the window last.
     pub(crate) fn max(&self, now: Mono) -> Option<Mono> {
         let last = self.asked.replace(now);
         if !self.top.get().is_some_and(|t| now >= last && now - self.at[t] <= DEV_WINDOW) {
@@ -124,8 +122,8 @@ impl Series {
     }
 }
 
-/// A minimum over the last MIN_WINDOW to 2 × MIN_WINDOW, kept in two halves (§8.3). Go:
-/// `winmin`. A new one must be [`Winmin::reset`] (Default is not "no sample").
+/// A minimum over the last MIN_WINDOW to 2 × MIN_WINDOW, kept in two halves (§11.3). A new one
+/// must be [`Winmin::reset`] (Default is not "no sample").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Winmin {
     pub(crate) at: Mono,
@@ -156,8 +154,8 @@ impl Winmin {
     }
 }
 
-/// A sliding-window byte counter of two buckets of width `w`. Go: `meter`. Copy: Go copied
-/// meters by value (`x.offered = old.offered`, `peek`).
+/// A sliding-window byte counter of two buckets of width `w`. Copy: a meter is copied by value,
+/// as `peek` does.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Meter {
     pub(crate) at: Mono,
@@ -192,7 +190,7 @@ impl Meter {
     }
 }
 
-/// One fresh echo of a lane, for loss and delivery over about RATE_WINDOW (§8.3). Go: `echoRec`.
+/// One fresh echo of a lane, for loss and delivery over about RATE_WINDOW (§11.3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct EchoRec {
     /// When I sent the echoed probe.
@@ -206,12 +204,12 @@ pub(crate) struct EchoRec {
 
 /// An EWMA_GAIN step from `old` toward `v`; the first sample (old 0) is taken whole.
 pub(crate) fn ewma(old: Mono, v: Mono) -> Mono {
-    // Wrapping as Go's: an OWD comes from the peer's clock and may be anything.
+    // Wrapping: an OWD comes from the peer's clock and may be anything.
     if old == 0 { v } else { old.wrapping_add((v.wrapping_sub(old) as f64 * EWMA_GAIN) as Mono) }
 }
 
 impl Session {
-    /// Applies what the peer reports receiving on one of my lanes (§8.3, §8.4): RTT, OWD, qd,
+    /// Applies what the peer reports receiving on one of my lanes (§11.3, §11.4): RTT, OWD, qd,
     /// loss, delivery, validation, liveness, then the rate controller (`adjust`). `carrier` is
     /// the lane the probe came on, None if it matched none; `sent_at` is that probe's SentAt
     /// (µs). The echo is passed by value: it lives in `self.ein`.
@@ -242,9 +240,9 @@ impl Session {
         let gap = now - ln.last_echo;
         (ln.echo_seq, ln.last_echo, ln.misses, ln.acked) = (e.seq, now, 0, e.last);
         self.last_echo = now;
-        // The echo of a probe sent to the current address, with that probe's challenge (§7.6 rule
-        // 2, R2-03; a challenge is never 0, which means "none" on the wire). The PRF runs only
-        // while it can change something.
+        // The echo of a probe sent to the current address, with that probe's challenge (§9.4,
+        // R2-03; a challenge is never 0, which means "none" on the wire). The PRF runs only while
+        // it can change something.
         let answers = |id| e.token != 0 && e.token == self.chal.token(id, sp.agen, e.seq);
         if sp.agen == ln.pgen {
             ln.validated = ln.validated || answers(ln.id);
@@ -254,12 +252,12 @@ impl Session {
         if ln.wait_seq != 0 && !after(ln.wait_seq, e.seq) {
             ln.wait_seq = ln.next_wait(e.seq);
         }
-        // OWD only from probes sent since the last wake (§8.3: a wake resets the minima). An echo
-        // of a probe sent before it carries an OWD on the clock relation the sleep stepped: the
-        // pause below every later sample when my clock paused. It refilled the minima the wake
+        // OWD only from probes sent since the last wake (§11.4: a wake resets the minima). An
+        // echo of a probe sent before it carries an OWD on the clock relation the sleep stepped:
+        // the pause below every later sample when my clock paused. It refilled the minima the wake
         // had reset for MIN_WINDOW to 2 × MIN_WINDOW, and bandwidth's skew filter then kept out of
-        // the spread every lane whose base OWD came from after the wake (notes/rust.md, harden:
-        // integration). Such an echo leaves the OWD estimates and qd alone.
+        // the spread every lane whose base OWD came from after the wake. Such an echo leaves the
+        // OWD estimates and qd alone.
         if sp.at >= self.woke {
             let owd = e.owd.wrapping_mul(1_000);
             ln.owds.add(now, owd);
@@ -324,7 +322,7 @@ impl Session {
         }
     }
 
-    /// How long a probe may go unechoed before its lane is suspect (§8.4): from the smoothed RTT
+    /// How long a probe may go unechoed before its lane is suspect (§11.4): from the smoothed RTT
     /// plus max(SUSPECT_MIN, SUSPECT_DEV × rttdev), at least the largest RTT of DEV_WINDOW, plus
     /// PROBE_ACTIVE; DOWN_AFTER until an RTT is known. Uses `self.now`.
     ///
@@ -332,7 +330,7 @@ impl Session {
     /// queue the rate controller tolerates is not a stall; at least the largest RTT of DEV_WINDOW,
     /// because a bounded jitter such as the cell's reaches its bound far more often than
     /// SUSPECT_DEV × rttdev allows; plus PROBE_ACTIVE, because the echo waits at the peer for its
-    /// next probe, which RTT leaves out as Held (notes/core.md 25, 34).
+    /// next probe, which RTT leaves out as Held.
     pub(crate) fn suspect_after(&self, l: LaneIx) -> Mono {
         let ln = &self.lanes[l];
         if ln.rtt <= 0 {

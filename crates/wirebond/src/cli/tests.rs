@@ -61,13 +61,10 @@ impl Fake {
 }
 
 impl Host for Fake {
-    fn scope(&self) -> Scope {
-        Scope::System
-    }
     fn admin(&self) -> bool {
         self.admin
     }
-    fn dial(&self, _: Scope, sock: &str) -> io::Result<Box<dyn LocalStream>> {
+    fn dial(&self, sock: &str) -> io::Result<Box<dyn LocalStream>> {
         self.socks.borrow_mut().push(sock.into());
         if !self.running.get() {
             return Err(io::ErrorKind::ConnectionRefused.into());
@@ -77,7 +74,7 @@ impl Host for Fake {
         }
         Ok(Box::new(Conn { wrote: Vec::new(), back: None, daemon: self.daemon.clone(), asked: self.asked.clone() }))
     }
-    fn install(&self, _: Scope) -> io::Result<bool> {
+    fn install(&self) -> io::Result<bool> {
         self.installs.set(self.installs.get() + 1);
         if let Some(e) = self.install_err {
             return Err(io::Error::other(e));
@@ -85,14 +82,14 @@ impl Host for Fake {
         self.running.set(self.starts);
         Ok(self.fresh)
     }
-    fn uninstall(&self, _: Scope) -> io::Result<(bool, String)> {
+    fn uninstall(&self) -> io::Result<(bool, String)> {
         self.uninstalls.set(self.uninstalls.get() + 1);
         Ok((true, String::new()))
     }
-    fn on_path(&self, _: Scope) -> bool {
+    fn on_path(&self) -> bool {
         self.on_path
     }
-    fn exe(&self, _: Scope) -> PathBuf {
+    fn exe(&self) -> PathBuf {
         "/usr/local/bin/wirebond".into()
     }
     fn current_exe(&self) -> PathBuf {

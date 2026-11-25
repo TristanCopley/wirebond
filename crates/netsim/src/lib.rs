@@ -1,14 +1,10 @@
 //! wirebond's deterministic network simulator. It drives two real wirebond_core::Sessions through
-//! simulated links in simulated time (SPEC §17.2). Tests only.
-//!
-//! Every Go type, field and function of Go's netsim/*.go (the test helpers included) has its Rust
-//! counterpart here. SKELETON.md (beside Cargo.toml) is the design: the Go-to-Rust name map and the
-//! ownership patterns. notes/rust.md records each departure from Go.
+//! simulated links in simulated time (SPEC §4.2). Tests only.
 //!
 //! The crate is one [`World`] that owns everything: two [`Device`]s (the node stand-in), every
 //! [`Link`] and its two [`Dir`]ections, the event queue, the datagram registry, the checker, the
 //! adversary and the traffic models. Everything else names a part of it by a small `Copy` id
-//! ([`DevId`], [`LinkId`], [`DirId`], [`StreamId`], [`MoonId`], [`FloodId`], [`BulkId`]) and
+//! ([`DevId`], [`LinkId`], [`DirId`], [`StreamId`], [`MoonId`], [`BulkId`]) and
 //! reads it through `world[id]`. Scheduled events are closures that receive `&mut World`.
 
 #![forbid(unsafe_code)]
@@ -25,8 +21,8 @@ pub mod sim;
 pub mod trace;
 
 pub use apps::{
-    AUDIO_SIZE, Bulk, BulkId, Echo, EchoId, Flood, FloodId, Frame, Hdr, INPUT_SIZE, MoonId, Moonlight, PING_EVERY,
-    PING_SIZE, PING_TIMEOUT, PORT_AUDIO, PORT_CONTROL, PORT_VIDEO, Sample, Stream, StreamId, VIDEO_SIZE,
+    AUDIO_SIZE, Bulk, BulkId, Echo, EchoId, Frame, Hdr, INPUT_SIZE, MoonId, Moonlight, PING_EVERY, PING_SIZE,
+    PING_TIMEOUT, PORT_AUDIO, PORT_CONTROL, PORT_VIDEO, Sample, Stream, StreamId, VIDEO_SIZE,
 };
 pub use check::{ADV_KINDS, Adv, Adversary};
 pub use env::{Check, Env, Eval, Opts};

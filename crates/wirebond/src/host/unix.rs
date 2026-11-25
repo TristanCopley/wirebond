@@ -8,7 +8,7 @@ use socket2::{Domain, Socket, Type};
 use std::ffi::CStr;
 use std::fs::{self, Permissions};
 use std::mem::MaybeUninit;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::prelude::*;
 use std::path::Path;
@@ -93,8 +93,24 @@ pub(super) fn setopt(s: &Socket, level: c_int, opt: c_int, v: &[u8]) -> io::Resu
     cvt(unsafe { libc::setsockopt(s.as_raw_fd(), level, opt, v.as_ptr().cast(), len) }).map(|_| ())
 }
 
+/// `a` with all but its first `bits` bits cleared: an IPv4 network, or with BROADCAST its netmask.
+pub(super) fn mask4(a: Ipv4Addr, bits: u8) -> Ipv4Addr {
+    Ipv4Addr::from_bits(a.to_bits() & u32::MAX.checked_shl(32 - u32::from(bits.min(32))).unwrap_or(0))
+}
+
+/// The network `a`/`bits` is in: `a` with its host bits cleared.
+pub(super) fn network(a: IpAddr, bits: u8) -> IpAddr {
+    match a {
+        IpAddr::V4(a) => IpAddr::V4(mask4(a, bits)),
+        IpAddr::V6(a) => {
+            let m = u128::MAX.checked_shl(128 - u32::from(bits.min(128))).unwrap_or(0);
+            IpAddr::V6(Ipv6Addr::from_bits(a.to_bits() & m))
+        }
+    }
+}
+
 /// A libc call's result: -1 is errno's error.
-fn cvt(r: c_int) -> io::Result<c_int> {
+pub(super) fn cvt(r: c_int) -> io::Result<c_int> {
     if r == -1 { Err(io::Error::last_os_error()) } else { Ok(r) }
 }
 
@@ -276,7 +292,7 @@ pub(super) fn public(path: &Path) -> io::Result<()> {
 pub(super) fn halt(_: Scope) {}
 
 /// A running executable can be deleted.
-pub(super) fn drop(download: &Path) {
+pub(super) fn discard(download: &Path) {
     let _ = fs::remove_file(download);
 }
 
@@ -326,6 +342,19 @@ pub(super) fn remove<P: AsRef<Path>>(paths: impl IntoIterator<Item = P>) -> io::
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         r => Ok(changed | r.is_ok()),
     })
+}
+
+/// Runs `c` with `input` on its stdin, or none, and returns what it wrote to stdout and stderr,
+/// however it ended. Nothing reaches the terminal, where the CLI may be printing JSON.
+pub(super) fn output(c: &mut std::process::Command, input: Option<&str>) -> io::Result<std::process::Output> {
+    use std::{io::Write as _, process::Stdio};
+    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    c.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
+    let mut child = c.spawn()?;
+    if let (Some(i), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin.write_all(i.as_bytes())?;
+    }
+    child.wait_with_output()
 }
 
 /// Runs a command without input and returns its output, or an error with its stderr unless it

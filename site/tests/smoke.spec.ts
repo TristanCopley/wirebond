@@ -46,10 +46,17 @@ test.beforeEach(async ({ page }) => {
 
 for (const { path, heading } of ROUTES) {
 	test(`${path} renders its main heading`, async ({ page }) => {
+		// The stylesheet is inline and allowed by its hash in the page's policy: a hash that did
+		// not match would leave the page unstyled, with this error on the console.
+		const csp: string[] = [];
+		page.on('console', (m) => {
+			if (m.type() === 'error' && /Content Security Policy/i.test(m.text())) csp.push(m.text());
+		});
 		await page.goto(at(path));
 		await expect(page.getByRole('heading', { level: 1 })).toHaveText(heading);
 		await expect(page.getByRole('main')).toBeVisible();
 		await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+		expect(csp).toEqual([]);
 	});
 
 	test(`${path} has no horizontal scroll at 320px`, async ({ page }) => {

@@ -9,13 +9,13 @@
 //!
 //! This file is the public API both drivers are written against (notes/2.0-build.md). In 2.0 a
 //! bond carries whole IP packets: the daemon hands the session each packet it read from the TUN
-//! device ([`Session::send_packet`], or [`Event::Send`]) and writes each packet the session
+//! device ([`Event::Send`]) and writes each packet the session
 //! delivers ([`Out::deliver`]) to the TUN device. The session keys flows itself ([`flow::Key`],
 //! §13) and numbers them per direction; a data payload is flow (2) + seq (4) + one inner packet
 //! (§10.3), 33 bytes of overhead.
 
-// No unsafe code; under test, only the counting allocator in pair.rs opts out, so the allocation
-// tests can count (TestSendAllocs, TestSteadyAllocs).
+// No unsafe code; under test, only the counting allocator in pair.rs opts out, so the tests that
+// count allocations can.
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![cfg_attr(test, deny(unsafe_code))]
 
@@ -76,7 +76,7 @@ pub type SockId = u16;
 pub struct FlowId(pub u16);
 
 // ---------------------------------------------------------------------------------------------
-// The wire (§7.3, §7.4): its constants (TYPE_DATA … OVERHEAD) are in consts.rs.
+// The wire (§10.3): its constants (TYPE_DATA … OVERHEAD) are in consts.rs.
 
 /// The receive id in a lane packet's header (bytes 1–2), or None if `b` is too short to be a lane
 /// packet. node uses it to pick the session before calling [`Session::handle`].
@@ -88,7 +88,7 @@ pub fn packet_rid(b: &[u8]) -> Option<u16> {
 // What node tells the engine
 
 /// The Tailscale lane as node sees it: its socket and the two mesh addresses, both on [`PORT`]
-/// (§6.1). `None` in [`Event::Links`] while the mesh is down.
+/// (§9.1). `None` in [`Event::Links`] while the mesh is down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MeshLane {
     pub sock: SockId,
@@ -96,17 +96,17 @@ pub struct MeshLane {
     pub peer: SocketAddr,
 }
 
-/// One local link as node sees it: one interface and one address family (§6.1, §6.2).
+/// One local link as node sees it: one interface and one address family (§9.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     /// 1–255; kept while the interface name and family stay the same.
     pub id: u8,
     /// "Wi-Fi", "Ethernet", "iPhone" or the OS's interface name; unique per interface, because
-    /// the engine groups lanes into bottleneck groups by label (§6.1).
+    /// the engine groups lanes into bottleneck groups by label.
     pub label: String,
-    /// The iPhone heuristic (§6.2).
+    /// The iPhone heuristic.
     pub metered: bool,
-    /// The client's default-route link (§6.1).
+    /// The client's default-route link.
     pub default: bool,
     /// The link's UDP socket, pinned to the interface.
     pub sock: SockId,
@@ -123,11 +123,11 @@ pub enum Event<'a> {
     /// (§4.3). The session keys its flow ([`flow::Key`]), classes it and seals it once. A packet
     /// that does not parse as IP, or is longer than [`MAX_INNER`], is dropped.
     Send { packet: &'a [u8] },
-    /// A datagram that arrived on a lane socket; node already removed STUN replies (§6.3).
+    /// A datagram that arrived on a lane socket; node already removed STUN replies (§9.2).
     Packet { sock: SockId, from: SocketAddr, data: &'a [u8] },
     /// The full current link list, replacing the previous one, and the Tailscale lane.
     Links { links: &'a [Link], mesh: Option<MeshLane> },
-    /// The device woke from sleep (§8.4).
+    /// The device woke from sleep (§11.4).
     Wake,
     /// One control message: the peer's hello, key, links or mode, or the client's own mode.
     Control(&'a Msg),
@@ -153,39 +153,23 @@ pub trait Out {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Control messages (§7.1). node encodes and decodes them as one JSON line each (at most MAX_MSG
+// Control messages (§16). node encodes and decodes them as one JSON line each (at most MAX_MSG
 // bytes). node composes and sends hello and links and answers view and error; the engine consumes
 // the peer's hello, key, links and mode, and the client's own mode, and emits key. node filters a
 // peer's candidates (loopback, unspecified, multicast, broadcast, link-local, mesh ranges; at most
 // MAX_LINKS links with MAX_CANDS each) before it passes hello or links to the engine.
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 fn zero<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
-/// Writes `f` as Go's encoding/json writes it, for the floats of [`LaneOut`], so a view message
-/// is the Go implementation's byte for byte (tests/vectors.rs). Go writes a whole number below
-/// 1e21 without a fraction or an exponent (95, not serde_json's 95.0; 1e20 in full, not 1e+20)
-/// and 1e21 and above as serde_json does (1e+21). Two differences remain, which no lane's
-/// measurement reaches: Go writes 0.000001 ≤ |f| < 0.00001 without the exponent serde_json uses,
-/// and −0 as -0 where this writes 0.
-fn gofloat<S: Serializer>(f: &f64, s: S) -> Result<S::Ok, S::Error> {
-    if f.fract() != 0.0 || f.abs() >= 1e21 {
-        s.serialize_f64(*f) // NaN and ±∞ too, which Go cannot write at all
-    } else if f.abs() < (1u64 << 53) as f64 {
-        s.serialize_i64(*f as i64) // below 2^53, every whole number is an i64 that converts exactly
-    } else {
-        // Go writes the shortest digits that read back as f, padded with zeros, as Display does.
-        s.serialize_i128(f.to_string().parse().map_err(serde::ser::Error::custom)?)
-    }
-}
-
-/// One control-channel message. The JSON is the Go implementation's, field for field.
+/// One control-channel message: hello, key, links or mode. The view and error messages are the
+/// daemon's own (node/proto.rs).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Msg {
-    /// "hello", "key", "links", "mode", "view" or "error".
+    /// "hello", "key", "links" or "mode".
     pub t: String,
     /// hello: protocol major ([`PROTOCOL`]).
     #[serde(default, skip_serializing_if = "zero")]
@@ -208,27 +192,18 @@ pub struct Msg {
     /// key: the epoch of `k`.
     #[serde(default, skip_serializing_if = "zero")]
     pub e: u64,
-    /// key: my send key toward the peer for epoch `e`, 32 bytes, base64 in JSON as Go writes it.
+    /// key: my send key toward the peer for epoch `e`, 32 bytes, standard base64 in JSON.
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "b64")]
     pub k: Vec<u8>,
     /// key: my next send counter when I sent it. A receiver that takes `k` as its first key, or as
     /// a key from outside the chain it holds, drops every packet sealed below `c`, so an earlier
     /// session's packets under the same key cannot replay into a new session on a reused rid
-    /// (R2-09, notes/open.md). A Go peer omits it: 0, no floor.
+    /// (R2-09). Omitted, it reads as 0: no floor.
     #[serde(default, skip_serializing_if = "zero")]
     pub c: u64,
-    /// view: the answer; a view without it asks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<View>,
-    /// error.
-    #[serde(default, skip_serializing_if = "zero")]
-    pub code: String,
-    /// error.
-    #[serde(default, skip_serializing_if = "zero")]
-    pub message: String,
 }
 
-/// One link as a peer offers it in hello and links (§6.3).
+/// One link as a peer offers it in hello and links (§9.3).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LinkInfo {
     pub id: u8,
@@ -241,42 +216,26 @@ pub struct LinkInfo {
     pub cands: Vec<SocketAddr>,
 }
 
-/// One side's measurements of its own sending on each lane, which the peer shows as that lane's
-/// "in" direction (§14.2).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct View {
-    #[serde(default)]
-    pub lanes: Vec<LaneOut>,
-}
-
-/// What one side measures about its own sending on one lane (§8.3, §14.3). Its floats are
-/// written as Go writes them: 0, not 0.0.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// What one side measures about its own sending on one lane (§11.3, §20.2).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LaneOut {
     pub id: u16,
     /// spread, copies or standby.
     pub role: String,
-    #[serde(rename = "rttMs", serialize_with = "gofloat")]
     pub rtt_ms: f64,
-    #[serde(rename = "owdRelMs", serialize_with = "gofloat")]
     pub owd_rel_ms: f64,
-    #[serde(rename = "queueMs", serialize_with = "gofloat")]
     pub queue_ms: f64,
     /// 0–1.
-    #[serde(serialize_with = "gofloat")]
     pub loss: f64,
     /// The controller's rate; 0 while unlimited.
-    #[serde(serialize_with = "gofloat")]
     pub rate_mbps: f64,
-    pub sent_bytes: u64,
     pub copy_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------------------------
 // What the engine tells node and netsim
 
-/// The read-only view of a session that status prints (§14) and netsim checks.
+/// The read-only view of a session that status prints (§20.2) and netsim checks.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionStatus {
     pub mode: String,
@@ -284,10 +243,10 @@ pub struct SessionStatus {
     pub flows: Vec<FlowStatus>,
     /// Bytes sent on metered lanes over the last minute, scaled to an hour.
     pub metered_gb_per_hour: f64,
-    /// Rewinds sent (§10.2).
+    /// Rewinds sent (§14.2).
     pub rewinds: u64,
-    /// Bulk sequence gaps the receiver gave up on: by §10.3 rules 2 and 3, or because a small
-    /// packet of the flow passed them while datagrams were held behind them.
+    /// Bulk sequence gaps the receiver gave up on: by §15's rules, or because a small packet of the
+    /// flow passed them while datagrams were held behind them.
     pub unrecovered: u64,
     /// Datagrams dropped because MAX_FLOWS flows were live.
     pub flows_dropped: u64,
@@ -295,7 +254,6 @@ pub struct SessionStatus {
     pub bytes: usize,
     /// Arrival of the newest authenticated packet; None if none yet.
     pub last_auth: Option<Mono>,
-    pub problems: Vec<Problem>,
     /// The last STATUS_EVENTS, oldest first.
     pub events: Vec<LogEvent>,
 }
@@ -313,11 +271,11 @@ pub struct LaneStatus {
     pub remote: String,
     /// Either end's link is metered.
     pub metered: bool,
-    /// punching, up, suspect, down or dormant (§8.4).
+    /// punching, up, suspect, down or dormant (§11.4).
     pub state: &'static str,
-    /// The peer address passed path validation (§7.6 rule 2).
+    /// The peer address passed path validation (§9.4).
     pub validated: bool,
-    /// Barred from bulk (§11.1 rule 2).
+    /// Barred from bulk (§14.2).
     pub barred: bool,
     pub sock: SockId,
     /// The current return address.
@@ -362,15 +320,6 @@ pub struct FlowStatus {
     pub lanes: Vec<u16>,
 }
 
-/// A condition the engine detects; node adds the fix and command (§14.4).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Problem {
-    /// bulk_on_slower_lane or bulk_exceeds_every_lane.
-    pub code: &'static str,
-    /// For a person, with the numbers.
-    pub message: String,
-}
-
 /// One entry of a session's event log, such as "47998 moved Wi-Fi → iPhone (Wi-Fi lagging
 /// 22 ms)". node turns `at` into wall-clock time for status.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -382,7 +331,7 @@ pub struct LogEvent {
 // ---------------------------------------------------------------------------------------------
 // Receive ids and sessions
 
-/// Maps receive ids to sessions, so ids are unique across every session on the device (§7.2).
+/// Maps receive ids to sessions, so ids are unique across every session on the device (§10.2).
 /// node owns one and passes it to every call that may allocate or free ids; a session is named
 /// in it by the opaque `owner` key node gave [`Session::new`].
 #[derive(Debug, Default)]
@@ -417,7 +366,7 @@ impl Session {
             Event::Send { packet } => self.send_inner(out, now, packet),
             // Timers run on any event but a lane packet, whose actions are only its deliveries
             // and its reply probe, so no reply is ever larger than the packet that caused it
-            // (§7.6 rule 3).
+            // (§10.5 rule 3).
             Event::Packet { sock, from, data } => return self.packet(out, now, sock, from, data),
             Event::Links { links, mesh } => {
                 (self.links, self.mesh) = (links.to_vec(), mesh);
@@ -434,19 +383,13 @@ impl Session {
         }
     }
 
-    /// Sends one whole IP packet read from the TUN device: shorthand for `handle` with
-    /// [`Event::Send`], the daemon's hot path (§4.3).
-    pub fn send_packet(&mut self, now: Mono, packet: &[u8], rids: &mut RidTable, out: &mut dyn Out) {
-        self.handle(now, Event::Send { packet }, rids, out);
-    }
-
     /// The earliest time `handle` wants an [`Event::Tick`]; `Mono::MAX` when nothing is due, as
     /// for an idle server. Ask after every `handle`.
     pub fn next(&self) -> Mono {
         self.next
     }
 
-    /// Frees the session's receive ids. node calls it when the session ends (§7.6 rule 8).
+    /// Frees the session's receive ids. node calls it when the session ends.
     pub fn close(&mut self, rids: &mut RidTable) {
         rids.free(self.rid, self.owner);
     }

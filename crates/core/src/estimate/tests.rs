@@ -1,9 +1,9 @@
-//! Tests of estimate.rs. Owner: C4. No Go unit tests (the pair tests exercise the estimates).
-//! Series::mad and max over DEV_WINDOW, Winmin's two halves, Meter's rate and that `peek` leaves
-//! the meter unchanged, ewma's first sample; echo processing (RTT, OWD, qd, target jitter, loss
-//! with LOSS_MIN, delivery, liveness, the suspect timeout); R2-03: an echo whose token does not
-//! match the echoed probe's challenge does not validate. New: no OWD sample from a probe sent
-//! before a wake (swarm seeds 39 and 85).
+//! Tests of estimate.rs (the pair tests exercise the estimates too): Series::mad and max over
+//! DEV_WINDOW, Winmin's two halves, Meter's rate and that `peek` leaves the meter unchanged, ewma's
+//! first sample; echo processing (RTT, OWD, qd, target jitter, loss with LOSS_MIN, delivery,
+//! liveness, the suspect timeout); R2-03: an echo whose token does not match the echoed probe's
+//! challenge does not validate; and no OWD sample from a probe sent before a wake (swarm seeds 39
+//! and 85).
 //!
 //! Echo processing calls into other modules. These tests keep off the paths that would change
 //! what they measure: lanes are up or have no probe of the peer (no `set_state`), `wait_seq` is 0
@@ -154,8 +154,8 @@ fn wake_clears_the_owd_series_and_their_caches() {
     assert_eq!((ln.owd_in.max(T0 + 20 * MS), ln.rtts.max(T0 + 20 * MS)), (None, Some(60 * MS)));
 }
 
-/// Go's `max`, the scan `Series::max` made on every query before it kept its largest sample: the
-/// reference for the cache.
+/// The scan `Series::max` made on every query before it kept its largest sample: the reference
+/// for the cache.
 fn max_scan(s: &Series, now: Mono) -> Option<Mono> {
     let mut m = None;
     for i in 0..s.n.min(MAD_SAMPLES) {
@@ -167,7 +167,7 @@ fn max_scan(s: &Series, now: Mono) -> Option<Mono> {
     m
 }
 
-/// Go's `mad`, as `Series::mad` was before selection: two full sorts. The reference.
+/// `Series::mad` as it was before selection: two full sorts. The reference.
 fn mad_sort(s: &Series, now: Mono) -> Mono {
     let mut x = [0.0; MAD_SAMPLES];
     let mut k = 0;
@@ -232,7 +232,7 @@ fn sample(g: &mut Draw, c: u64, n: usize) -> Mono {
     }
 }
 
-/// The cached `max` and `mad` by selection are Go's scan and sorts (`max_scan`, `mad_sort`) bit
+/// The cached `max` and `mad` by selection are the scan and sorts (`max_scan`, `mad_sort`) bit
 /// for bit, on 2,048 random sequences of adds, queries, wakes and clones, over a million queries
 /// of each: ties, values past 2^53 (distinct samples that tie as f64), the i64 extremes, samples
 /// at one instant or stepping back in time, queries back in time, on a sample's edge of the
@@ -394,11 +394,11 @@ fn echo_validates_only_with_the_probes_challenge() {
     let right = tok(&s, 1, 10);
     echo(&mut s, 10, 1, right);
     assert!(s.lanes[A].validated && s.confirmed);
-    assert_eq!(s.lanes[A].state, State::Punching); // up needs the peer's probe too (§6.3)
+    assert_eq!(s.lanes[A].state, State::Punching); // up needs the peer's probe too
     echo(&mut s, 11, 1, 0); // later echoes without a token do not undo it
     assert!(s.lanes[A].validated);
 
-    // A claim (§7.6 rule 2): probes to the candidate address, generation 2, validate it only with
+    // A claim (§9.4): probes to the candidate address, generation 2, validate it only with
     // their own challenge, and only while the claim is open.
     let right = tok(&s, 2, 12);
     echo(&mut s, 12, 2, right);
@@ -477,7 +477,7 @@ fn echo_measures_owd_and_queueing_delay() {
     assert_eq!(owd(&mut s, 3, T0 + 40 * MS, 40 * MS, 70 * MS).2, 0);
     assert_eq!(owd(&mut s, 4, T0 + 60 * MS, 52 * MS, 64 * MS).2, 12 * MS);
     assert_eq!(owd(&mut s, 5, T0 + 80 * MS, 70 * MS, 55 * MS).2, 5 * MS);
-    // A minimum that a reset left empty bounds nothing (notes/core.md 38).
+    // A minimum that a reset left empty bounds nothing.
     s.lanes[A].min_rtt.reset();
     s.lanes[A].min_owd.reset();
     assert_eq!(owd(&mut s, 6, T0 + 100 * MS, 0, 64 * MS).2, 0);
@@ -485,11 +485,10 @@ fn echo_measures_owd_and_queueing_delay() {
     assert_eq!(owd(&mut s, 7, T0 + 120 * MS, 0, -10 * MS).1, -10 * MS);
 }
 
-/// Swarm seeds 39 and 85 (notes/rust.md, harden: integration): a wake resets the minima (§8.3),
-/// but the echoes of probes sent before it still arrive, with OWDs on the clock relation that a
-/// paused clock left behind, the pause below every later one. Taken, such a sample held lane A's
-/// base OWD the pause below lane B's for MIN_WINDOW to 2 × MIN_WINDOW, and bandwidth's skew filter
-/// (§11.2 rule 2) kept B out of the spread. Go takes it (estimate.go `echo`).
+/// Swarm seeds 39 and 85: a wake resets the minima (§11.4), but the echoes of probes sent before
+/// it still arrive, with OWDs on the clock relation that a paused clock left behind, the pause
+/// below every later one. Taken, such a sample held lane A's base OWD the pause below lane B's for
+/// MIN_WINDOW to 2 × MIN_WINDOW, and bandwidth's skew filter (§14.2) kept B out of the spread.
 #[test]
 fn echo_takes_no_owd_from_a_probe_sent_before_the_wake() {
     let mut s = up(T0);
@@ -526,8 +525,8 @@ fn echo_takes_no_owd_from_a_probe_sent_before_the_wake() {
     let ln = &s.lanes[A];
     assert_eq!((ln.echo_seq, ln.last_echo, ln.min_rtt.get()), (7, woke + 20 * MS, NO_MIN));
     // Its OWD is on the old relation: no sample. qd stays 0, so A's queue, which the pause drained,
-    // is not a second qd over target in a row, an overuse (Go's first sample after the reset gives
-    // 0 too).
+    // is not a second qd over target in a row, an overuse (the first sample after the reset would
+    // give 0 too).
     assert_eq!((ln.min_owd.get(), ln.owds.n, ln.owd, ln.qd, ln.over_n), (NO_MIN, 0, 0, 0, 0));
     assert_eq!(ln.owd_now, 120 * MS, "the newest sample is still probe 6's");
     // Probes sent from the wake on (the wake's own punch sends at its instant) carry every OWD the

@@ -1,13 +1,13 @@
-//! Tests of flow.rs and rewind.rs. Owner: C5. Ports from core/rate_test.go: TestReorder (its
-//! lanes are pushed into `s.lanes.live` and named by LaneIx; each plaintext is copied into
-//! `s.rxbuf` before `data`). New (R2-12): FlowEnd returns a flow's held buffers to the pool and
-//! frees its slot, so flows ended one after another never exhaust MAX_FLOWS. Also new: the skew
-//! estimate learns only from the last gap given up and stays capped (R2-13), order across the
-//! seq wrap (R2-24), rule 2's lane list, classes, the byte cap, rewind, and the send side (small
-//! everywhere until confirmed, the copy set, bulk on the scheduler's lanes). And (harden: group
-//! C) a small packet that passes held bulk of its own flow, with §17.2's order invariant checked
-//! per call as netsim checks it, also against `reorder`'s model with the flow turning small. And
-//! (review fixes: flow-half-range) a seq exactly 2^31 ahead jumps, and no stepping loop spins.
+//! Tests of flow.rs and rewind.rs. `reorder` checks per-flow order against a model (its lanes are
+//! pushed into `s.lanes.live` and named by LaneIx; each plaintext is copied into `s.rxbuf` before
+//! `data`). R2-12: FlowEnd returns a flow's held buffers to the pool and frees its slot, so flows
+//! ended one after another never exhaust MAX_FLOWS. The others: the skew estimate learns only from
+//! the last gap given up and stays capped (R2-13), order across the seq wrap (R2-24), the lane
+//! rule's list, classes, the byte cap, rewind, and the send side (small everywhere until confirmed,
+//! the copy set, bulk on the scheduler's lanes); a small packet that passes held bulk of its own
+//! flow, with the order invariant checked per call as netsim checks it, also against `reorder`'s
+//! model with the flow turning small; and a seq exactly 2^31 ahead jumps, and no stepping loop
+//! spins.
 //!
 //! The tests drive a bare Session (no links, awake, with lanes pushed in), and run the reorder
 //! timers as `tick` does (`timers`), so they reach no other module's scheduling. The send-side
@@ -67,8 +67,8 @@ fn txf(s: &mut Session, id: FlowId, open: bool) -> Option<usize> {
     if open { s.tx_flow(k) } else { s.tx_flows.get(&k).copied() }
 }
 
-/// A bulk datagram arriving on lane `l`: §7.5 step 3 records the lane first (a flow not yet open
-/// is not recorded), then `data`.
+/// A bulk datagram arriving on lane `l`: §10.4 records the lane first (a flow not yet open is not
+/// recorded), then `data`.
 fn arrive(s: &mut Session, out: &mut Acts, now: Mono, l: LaneIx, id: FlowId, seq: u32) {
     if let Some(f) = s.flow(id, false) {
         s.flows[f].carried(l, now, seq);
@@ -95,9 +95,9 @@ fn seqs(out: &mut Acts, id: FlowId) -> Vec<u32> {
     got
 }
 
-/// TestReorder: per-flow order against a sorted-delivery model: bulk seqs spread over 2–4 FIFO
-/// lanes with different delays, some lost, some copied (§10.3). Every arrival is delivered once;
-/// those delivered in order are increasing; a late one is one whose gap was skipped.
+/// Per-flow order against a sorted-delivery model: bulk seqs spread over 2–4 FIFO lanes with
+/// different delays, some lost, some copied (§15). Every arrival is delivered once; those delivered
+/// in order are increasing; a late one is one whose gap was skipped.
 #[test]
 fn reorder() {
     for lanes in 2..=4usize {
@@ -130,7 +130,7 @@ fn reorder() {
                 got.extend(seqs(&mut out, id));
             }
             if let Some(f) = s.flow(id, false) {
-                s.flows[f].carried(ls[i], now, seq); // §7.5 step 3 records every copy on its lane
+                s.flows[f].carried(ls[i], now, seq); // §10.4 records every copy on its lane
             }
             if !seen.insert(seq) {
                 continue; // the replay window drops later copies before reordering
@@ -227,9 +227,9 @@ fn flow_idle_returns_held_buffers() {
     assert_eq!(s.flows_dropped, 0);
 }
 
-/// R2-13: a late datagram that no gap given up skipped teaches the reorder timer nothing. Here
-/// the flow turned small and its small packets passed the last bulk ones an hour into the
-/// session (Go set fill to the session clock: gapAt was 0).
+/// R2-13: a late datagram that no gap given up skipped teaches the reorder timer nothing. Here the
+/// flow turned small and its small packets passed the last bulk ones an hour into the session (with
+/// `gap_at` 0, the time the gap needed would read as the session clock).
 #[test]
 fn late_after_cheap_teaches_nothing() {
     let (mut s, mut out) = (session(), Acts::default());
@@ -243,9 +243,9 @@ fn late_after_cheap_teaches_nothing() {
     assert_eq!((s.flows[f].fill, s.flows[f].next, s.unrecovered), (0, 4, 0));
 }
 
-/// §17.2's order invariant, as netsim checks it after every Handle call: `calls` holds the seqs
-/// each call delivered. Within a call the reorder buffer releases in increasing order, past the
-/// newest seq delivered before the call; a late datagram after a skipped gap comes alone.
+/// The order invariant, as netsim checks it after every Handle call: `calls` holds the seqs each
+/// call delivered. Within a call the reorder buffer releases in increasing order, past the newest
+/// seq delivered before the call; a late datagram after a skipped gap comes alone.
 fn in_order(calls: &[Vec<u32>]) -> Result<(), String> {
     let mut top = 0;
     for (i, got) in calls.iter().enumerate() {
@@ -267,12 +267,11 @@ fn in_order(calls: &[Vec<u32>]) -> Result<(), String> {
     Ok(())
 }
 
-/// §10.3 and §17.2 (notes/rust.md, harden: integration, group C): a small packet that passes held
-/// bulk of its own flow, as when the flow's rate crosses SMALL_RATE and the sender turns it small,
-/// is still delivered at once; but the datagrams held before it go first, in order, giving up the
-/// gaps behind them, and the flow resumes after it. Go delivered the small packet alone and left
-/// the held ones to their gap's timer, which released two of them together behind it: the swarm's
-/// seed 96 in bandwidth.
+/// §15: a small packet that passes held bulk of its own flow, as when the flow's rate crosses
+/// SMALL_RATE and the sender turns it small, is still delivered at once; but the datagrams held
+/// before it go first, in order, giving up the gaps behind them, and the flow resumes after it.
+/// Delivered alone, the small packet left the held ones to their gap's timer, which released two of
+/// them together behind it: the swarm's seed 96 in bandwidth.
 #[test]
 fn small_passes_held_bulk_in_order() {
     for mode in [Mode::Performance, Mode::Bandwidth] {
@@ -290,8 +289,8 @@ fn small_passes_held_bulk_in_order() {
             calls.push(seqs(&mut out, id));
         }
         assert_eq!((s.flows[f].next, s.flows[f].n), (2, 5), "{mode:?}");
-        // The sender turned the flow small for 8: it comes at once, with the small bit (§7.5
-        // records no lane for a small packet: rule 2 counts bulk alone).
+        // The sender turned the flow small for 8: it comes at once, with the small bit (§10.4
+        // records no lane for a small packet: §15's lane rule counts bulk alone).
         let now = SEC + 6 * MS;
         rx(&mut s, &mut out, now, Some(fast), TYPE_DATA | SMALL_BIT, id, 8);
         calls.push(seqs(&mut out, id));
@@ -343,10 +342,10 @@ fn small_with_a_held_seq_keeps_the_buffer_exact() {
     assert_eq!(seqs(&mut out, id), [far]);
 }
 
-/// §10.3 and §17.2 against a model, as `reorder` with small packets: the flow turns small and
-/// bulk by turns; each bulk seq rides one of 2–4 FIFO lanes with different delays, each small seq
-/// is copied on every lane, and 1% of the packets are lost. Every arrival is delivered once and
-/// no call breaks the order invariant, in both modes.
+/// §15 against a model, as `reorder` with small packets: the flow turns small and bulk by turns;
+/// each bulk seq rides one of 2–4 FIFO lanes with different delays, each small seq is copied on
+/// every lane, and 1% of the packets are lost. Every arrival is delivered once and no call breaks
+/// the order invariant, in both modes.
 #[test]
 fn reorder_with_cheap_turns() {
     for (lanes, mode) in (2..=4usize).flat_map(|n| [(n, Mode::Performance), (n, Mode::Bandwidth)]) {
@@ -379,7 +378,7 @@ fn reorder_with_cheap_turns() {
                 }
             }
             if let Some(f) = s.flow(id, false).filter(|_| !small) {
-                s.flows[f].carried(ls[i], now, seq); // §7.5 records every bulk copy on its lane
+                s.flows[f].carried(ls[i], now, seq); // §10.4 records every bulk copy on its lane
             }
             if seen.insert(seq) {
                 let typ = if small { TYPE_DATA | SMALL_BIT } else { TYPE_DATA };
@@ -400,16 +399,16 @@ fn reorder_with_cheap_turns() {
     }
 }
 
-/// R2-13 and notes/core.md 27: a datagram of the last gap given up raises `fill` to what that
-/// gap needed, never past FILL_MAX (whose timer is REORDER_MAX); one outside that gap, one later
-/// than REORDER_RESCUE (a stall's leftover) or one the far-ahead jump passed changes nothing.
+/// R2-13: a datagram of the last gap given up raises `fill` to what that gap needed, never past
+/// FILL_MAX (whose timer is REORDER_MAX); one outside that gap, one later than REORDER_RESCUE (a
+/// stall's leftover) or one the far-ahead jump passed changes nothing.
 #[test]
 fn fill_learns_from_the_gap_given_up() {
     let (mut s, mut out) = (session(), Acts::default());
     let id = crate::FlowId(1);
     let f = s.flow(id, true).unwrap();
     let fill = |s: &Session| s.flows[f].fill;
-    // No lane carried the flow lately, so rule 2 gives a gap up at once.
+    // No lane carried the flow lately, so the lane rule (§15) gives a gap up at once.
     rx(&mut s, &mut out, SEC, None, TYPE_DATA, id, 1);
     rx(&mut s, &mut out, SEC, None, TYPE_DATA, id, 3);
     assert_eq!((s.unrecovered, s.flows[f].gap_seq, s.flows[f].gap_n), (1, 2, 1));
@@ -436,8 +435,8 @@ fn fill_learns_from_the_gap_given_up() {
     assert_eq!(seqs(&mut out, id), [1, 3, 2, 1, 5, 4, 7, 6, 10, far, 9, far - 1]);
 }
 
-/// notes/core.md 27, R2-13: a gap that fills while a carrying lane lags (REORDER_RESCUE) raises
-/// `fill` to at most FILL_MAX, and each later gap that fills decays it by 1/SKEW_DECAY.
+/// R2-13: a gap that fills while a carrying lane lags (REORDER_RESCUE) raises `fill` to at most
+/// FILL_MAX, and each later gap that fills decays it by 1/SKEW_DECAY.
 #[test]
 fn fill_from_gaps_that_filled() {
     let (mut s, mut out) = (session(), Acts::default());
@@ -462,7 +461,8 @@ fn fill_from_gaps_that_filled() {
 }
 
 /// R2-24: a flow keeps its order across the wrap of its u32 seq; a gap waits for the lane that
-/// still carries the seqs before it, as anywhere else (Go delivered seq 1 at once, as late).
+/// still carries the seqs before it, as anywhere else (by plain comparison, seq 1 would come at
+/// once, as late).
 #[test]
 fn order_across_the_wrap() {
     let (mut s, mut out) = (session(), Acts::default());
@@ -483,11 +483,10 @@ fn order_across_the_wrap() {
     assert_eq!((s.unrecovered, s.flows[f].next, s.flows[f].n), (0, 2, 0));
 }
 
-/// Review fix (notes/rust.md, review fixes: flow-half-range): a bulk seq exactly 2^31 past `next`,
-/// neither after nor before it in serial order, is the far-ahead jump, delivered at once. It was
-/// held, in `next`'s own slot outside the window, and then a jump or a small packet up to it
-/// stepped about 2^31 seqs (6 s of node's one loop per packet from an admitted peer). Now each
-/// returns at once and nothing is held.
+/// Review fix: a bulk seq exactly 2^31 past `next`, neither after nor before it in serial order, is
+/// the far-ahead jump, delivered at once. It was held, in `next`'s own slot outside the window, and
+/// then a jump or a small packet up to it stepped about 2^31 seqs (6 s of node's one loop per
+/// packet from an admitted peer). Now each returns at once and nothing is held.
 #[test]
 fn half_range_ahead_jumps() {
     let half = 1 << 31;
@@ -520,8 +519,8 @@ fn a_broken_count_never_spins() {
     }
 }
 
-/// Rule 2's lane list (notes/core.md 19): each lane's highest seq in serial order (R2-24), the
-/// oldest entry giving way to a new lane, which starts at the seq it brought.
+/// The lane rule's list: each lane's highest seq in serial order (R2-24), the oldest entry giving
+/// way to a new lane, which starts at the seq it brought.
 #[test]
 fn carried_lanes() {
     let l = LaneIx::at;
@@ -542,7 +541,7 @@ fn carried_lanes() {
     f.carried(l(7), 50, 3_000_000_000);
     assert_eq!(f.lanes[3], FlowLane { l: Some(l(7)), at: 50, seq: 3_000_000_000 }, "past 2^31 from 0");
     // Mono's origin is arbitrary: at or before 0, a recorded lane still keeps its entry while
-    // another is empty (Go compared `at` alone).
+    // another is empty (by `at` alone it would give way).
     let mut f = Flow::default();
     f.carried(l(0), -10, 1);
     f.carried(l(1), 0, 2);
@@ -550,7 +549,7 @@ fn carried_lanes() {
     assert_eq!(f.lanes[..2], want);
 }
 
-/// §10.1: cheapest first, each under SMALL_RATE, until the small flows total SMALL_COPY_BUDGET; equal
+/// §13: cheapest first, each under SMALL_RATE, until the small flows total SMALL_COPY_BUDGET; equal
 /// rates in slot order.
 #[test]
 fn classify_cheapest_first() {
@@ -566,7 +565,7 @@ fn classify_cheapest_first() {
     assert!((s.small_rate - 1.9e6).abs() < 1.0, "small rate {}", s.small_rate);
 }
 
-/// §7.6 rule 5: past REORDER_CAP of the session's buffers, a datagram behind a gap is delivered
+/// §10.5 rule 4: past REORDER_CAP of the session's buffers, a datagram behind a gap is delivered
 /// out of order rather than held; and one seq sent twice under two counters (a broken or hostile
 /// peer) holds one buffer, so the flow still drains.
 #[test]
@@ -613,9 +612,9 @@ fn queue(s: &Session, l: LaneIx) -> Vec<u64> {
 }
 
 /// §14.2: the ring's bulk after the peer's echoed LastCounter, sent within the rewind window
-/// (REWIND_WINDOW, or the suspect timeout + RTT), goes once each and in send order onto the lanes that take over, then the unsent
-/// queue behind it; small counters, older bulk and what was echoed are dropped. The takeover lane
-/// is not validated, so its pacer holds what it is given (§7.6 rule 2).
+/// (REWIND_WINDOW, or the suspect timeout + RTT), goes once each and in send order onto the lanes
+/// that take over, then the unsent queue behind it; small counters, older bulk and what was echoed
+/// are dropped. The takeover lane is not validated, so its pacer holds what it is given (§9.4).
 #[test]
 fn rewind_replays_unechoed_bulk() {
     let (mut s, mut out) = (session(), Acts::default());
@@ -644,8 +643,8 @@ fn rewind_replays_unechoed_bulk() {
     assert!(out.0.is_empty(), "an unvalidated lane sends nothing");
 }
 
-/// §10.2: with no lane to take over, a rewind drops the ring and the queue and frees every
-/// buffer; `shift` alone moves the queue in order and leaves the ring.
+/// §14.2: with no lane to take over, a rewind drops the ring and the queue and frees every buffer;
+/// `shift` alone moves the queue in order and leaves the ring.
 #[test]
 fn rewind_without_a_lane_frees_everything() {
     let (mut s, mut out) = (session(), Acts::default());
@@ -675,16 +674,16 @@ fn answering(s: &mut Session, l: LaneIx, to: SocketAddr, st: State) {
     (x.peer, x.validated, x.state) = (Some(to), true, st);
 }
 
-/// §7.3, §8.1 and notes/core.md 37: before the peer's key nothing is sent; a datagram over
-/// MAX_INNER never is. A small datagram, sealed once, goes on every validated lane while no
-/// lane is confirmed, and its buffer is free again at once.
+/// §10.3: before the peer's key nothing is sent; a datagram over MAX_INNER never is. A small
+/// datagram, sealed once, goes on every validated lane while no lane is confirmed, and its buffer
+/// is free again at once.
 #[test]
 fn small_goes_everywhere_until_confirmed() {
     let (mut s, mut out) = (session(), Acts::default());
     let ls = [lane(&mut s, 10 * MS, 0), lane(&mut s, 30 * MS, 0), lane(&mut s, 5 * MS, 0)];
     answering(&mut s, ls[0], S_ETH, State::Punching);
     answering(&mut s, ls[1], C_PHONE, State::Punching);
-    s.lanes[ls[2]].peer = Some(C_WIFI); // not validated: no data (§7.6 rule 2)
+    s.lanes[ls[2]].peer = Some(C_WIFI); // not validated: no data (§9.4)
     let id = crate::FlowId(1);
     s.app(&mut out, SEC, id, b"audio");
     assert!(out.0.is_empty() && txf(&mut s, id, false).is_none(), "before the peer's key");
@@ -701,8 +700,8 @@ fn small_goes_everywhere_until_confirmed() {
     assert_eq!((s.flows[f].tx_seq, s.flows[f].small, s.pool.held()), (1, true, 0));
 }
 
-/// §10.1: once a lane is confirmed, a small packet goes only on the validated lanes of the copy
-/// set, each counting its bytes and keeping only its counter in its rewind ring (§10.2).
+/// §13: once a lane is confirmed, a small packet goes only on the validated lanes of the copy set,
+/// each counting its bytes and keeping only its counter in its rewind ring (§14.2).
 #[test]
 fn copies_go_on_the_copy_set() {
     let (mut s, mut out) = (session(), Acts::default());
@@ -723,9 +722,9 @@ fn copies_go_on_the_copy_set() {
     assert_eq!(s.pool.held(), 0);
 }
 
-/// §11.1 and §7.3: a bulk packet goes on the lanes the scheduler chose, the first taking the
+/// §14.1 and §10.3: a bulk packet goes on the lanes the scheduler chose, the first taking the
 /// packet itself and each other lane its own copy of the same sealed bytes; with no lane that
-/// answers, on every validated lane at once (notes/core.md 24). No buffer leaks either way.
+/// answers, on every validated lane at once. No buffer leaks either way.
 #[test]
 fn bulk_goes_on_the_schedulers_lanes() {
     let (mut s, mut out) = (session(), Acts::default());
@@ -758,11 +757,11 @@ fn bulk_goes_on_the_schedulers_lanes() {
     assert_eq!(s.pool.held(), held, "no lane answers: sent at once and freed");
 }
 
-/// §6.1 and notes/rust.md (accept: integration): bulk that no lane carries goes out at once on
-/// every validated lane but those sharing a bottleneck group with a validated lane that answers
-/// (echoed within its suspect timeout) and comes first: one that answers, a direct lane before the
-/// Tailscale lane, then the lower OWD. A group none of whose lanes answers still gets it on every
-/// validated lane. Go sent it on every validated lane, twice through a shared shaper.
+/// §8: bulk that no lane carries goes out at once on every validated lane but those sharing a
+/// bottleneck group with a validated lane that answers (echoed within its suspect timeout) and
+/// comes first: one that answers, a direct lane before the Tailscale lane, then the lower OWD. A
+/// group none of whose lanes answers still gets it on every validated lane. Sent on every validated
+/// lane, as an earlier version did, it went twice through a shared shaper.
 #[test]
 fn bulk_without_a_lane_goes_once_per_group() {
     let (mut s, mut out) = (session(), Acts::default());
@@ -776,7 +775,7 @@ fn bulk_without_a_lane_goes_once_per_group() {
         (s.lanes[l].group, s.lanes[l].owd, s.lanes[l].rtt) = (group, owd, 40 * MS);
     }
     s.lanes[m].mesh = true;
-    (s.lanes[u].peer, s.lanes[u].group) = (Some(C_WIFI), 0); // not validated: nothing (§7.6 rule 2)
+    (s.lanes[u].peer, s.lanes[u].group) = (Some(C_WIFI), 0); // not validated: nothing (§9.4)
     let id = crate::FlowId(1);
     let f = txf(&mut s, id, true).unwrap();
     s.flows[f].small = false; // classify found it bulk
@@ -799,19 +798,19 @@ fn bulk_without_a_lane_goes_once_per_group() {
     assert_eq!(on(&mut s, &[a, b, m]), [b, c], "group 0's lowest-OWD direct lane; group 1 as before");
     assert_eq!(on(&mut s, &[a, m]), [a, c], "a lane that answers before one that does not");
     assert_eq!(on(&mut s, &[m, c]), [m, c], "the Tailscale lane when no direct lane of its group answers");
-    s.lanes[m].group = -1; // no link is default: the Tailscale lane shares every group (§6.1)
+    s.lanes[m].group = -1; // no link is default: the Tailscale lane shares every group
     assert_eq!(on(&mut s, &[a, m, c]), [a, c], "behind any direct lane that answers");
     assert_eq!(on(&mut s, &[m]), [m], "ahead of every lane that does not");
     assert_eq!(s.pool.held(), 0, "sent at once and freed");
 }
 
-/// §10.1, §8.4: copies go on the lowest-OWD validated lane of each group that answers, while its
+/// §13, §11.2: copies go on the lowest-OWD validated lane of each group that answers, while its
 /// sending leaves them room, on the Tailscale lane while fewer than two groups have such a lane,
 /// and on every lane carrying bulk; a lane that joins or leaves gets a probe at once.
 #[test]
 fn copy_set() {
     let (mut s, mut out) = (session(), Acts::default());
-    s.tx.rid = 9; // the peer's key: without it no probe is sent, as in Go's sendProbe
+    s.tx.rid = 9; // the peer's key: without it no probe is sent
     let ls = [0, 1, 2, 3].map(|_| lane(&mut s, 0, 0));
     let [a, b, c, m] = ls;
     for (l, group, owd, st, to) in [

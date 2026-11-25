@@ -1,5 +1,5 @@
-//! Tests of buf.rs. Owner: C1. No Go tests: add the pool's BOND_BYTES cap (`get` returns None
-//! at MAX_BUFS), reuse after `put`, and `copy`.
+//! Tests of buf.rs: the pool's BOND_BYTES cap (`get` returns None at MAX_BUFS), reuse after
+//! `put`, and `copy`.
 
 use crate::pair::*;
 
@@ -9,7 +9,7 @@ use crate::buf::{MAX_BUFS, Pkt, Pool, Ring};
 use crate::{BOND_BYTES, MAX_PACKET};
 
 /// The pool starts with 16 buffers, doubles when empty, and stops at MAX_BUFS, BOND_BYTES in
-/// all (§7.6 rule 5); every buffer it gives is distinct.
+/// all (§10.5 rule 4); every buffer it gives is distinct.
 #[test]
 fn grows_to_the_cap() {
     let mut p = Pool::default();
@@ -56,7 +56,7 @@ fn buffers_and_copy() {
 }
 
 /// Once warm, taking and putting back buffers allocates nothing, and nor does putting back every
-/// buffer the pool ever gave (§4.2). A warm Ring allocates nothing either.
+/// buffer the pool ever gave. A warm Ring allocates nothing either.
 #[test]
 fn warm_allocates_nothing() {
     let mut p = Pool::default();

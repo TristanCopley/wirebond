@@ -644,31 +644,72 @@ mod mac {
 #[cfg(windows)]
 mod win {
     use super::*;
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::process::{Child, Stdio};
+    use std::sync::mpsc;
+
+    /// How long a PowerShell may take to start and load its network modules, on a busy runner.
+    const WARM: Duration = Duration::from_secs(60);
 
     /// A PowerShell started ahead with its network modules loaded, so that a script run under
     /// capture costs its own time alone. It reads the script from its standard input, where a
     /// statement must fit on a line.
-    struct Shell(Child);
+    ///
+    /// `warm` returns once the shell has printed that the modules are loaded. Loading one can ask
+    /// the network (a module's signature is checked for revocation), and under capture the network
+    /// is the device: a shell still loading when capture went on stalled there until the watchdog's
+    /// 30 s were up, in one CI run whose twin on the same commit passed. Returned at once, as it
+    /// was, the shell was never ahead of the capture that followed on the next line.
+    struct Shell {
+        child: Child,
+        out: thread::JoinHandle<Vec<u8>>,
+        err: thread::JoinHandle<Vec<u8>>,
+    }
 
     impl Shell {
         fn warm() -> Shell {
             let mut c = Command::new("powershell");
             c.args(["-NoProfile", "-NonInteractive", "-Command", "-"]);
             let mut child = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-            let warm = b"Import-Module NetTCPIP, NetAdapter, DnsClient; Get-NetIPInterface | Out-Null\n";
+            let warm = b"Import-Module NetTCPIP, NetAdapter, DnsClient; Get-NetIPInterface | Out-Null; 'warm'\n";
             child.stdin.as_mut().unwrap().write_all(warm).unwrap();
-            Shell(child)
+            // Both pipes are read on threads of their own, so neither fills while the other is
+            // read. The line "warm" is the shell's word and not the script's: it is left out.
+            let (mut out, mut err) = (BufReader::new(child.stdout.take().unwrap()), child.stderr.take().unwrap());
+            let (ready, warmed) = mpsc::channel();
+            let out = thread::spawn(move || {
+                let mut text = Vec::new();
+                loop {
+                    let at = text.len();
+                    match out.read_until(b'\n', &mut text) {
+                        Ok(n) if n > 0 && text[at..].trim_ascii() != b"warm" => {}
+                        _ => break text.truncate(at), // the word, or the shell's end before it
+                    }
+                }
+                let _ = ready.send(());
+                let _ = out.read_to_end(&mut text);
+                text
+            });
+            let err = thread::spawn(move || {
+                let mut text = Vec::new();
+                let _ = err.read_to_end(&mut text);
+                text
+            });
+            if warmed.recv_timeout(WARM).is_err() {
+                eprintln!("PowerShell was not warm after {WARM:?}: going on with it as it is");
+            }
+            Shell { child, out, err }
         }
 
-        /// Runs `script` and returns what it printed, errors after output.
+        /// Runs `script` and returns what it printed, errors after output. A shell that has died
+        /// takes no script: what it printed before it did is what the caller's checks then show.
         fn run(mut self, script: &str) -> String {
-            let mut stdin = self.0.stdin.take().unwrap();
-            stdin.write_all(script.as_bytes()).and_then(|()| stdin.write_all(b"\n")).unwrap();
+            let mut stdin = self.child.stdin.take().unwrap();
+            let _ = stdin.write_all(script.as_bytes()).and_then(|()| stdin.write_all(b"\n"));
             drop(stdin);
-            let o = self.0.wait_with_output().unwrap();
-            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)
+            let _ = self.child.wait();
+            let (out, err) = (self.out.join().unwrap(), self.err.join().unwrap());
+            String::from_utf8_lossy(&out).into_owned() + &String::from_utf8_lossy(&err)
         }
     }
 

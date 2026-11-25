@@ -1,7 +1,7 @@
-//! Tests of wire.rs. Owner: C1. Ports from core/wire_test.go: TestReplayWindow, TestProbeCodec
-//! (the 175-byte three-echo probe; `token`/`chal` replace `observed`), FuzzProbe (as a seeded
-//! loop over DetRand inputs: decode then encode reproduces the input, with bytes 51–52 of each
-//! echo masked, since they are written 0 and ignored on read).
+//! Tests of wire.rs: the replay window, the probe codec (the 175-byte three-echo probe, with
+//! `token` and `chal`), and a fuzz of the codec (a seeded loop over DetRand inputs: decode then
+//! encode reproduces the input, with bytes 51–52 of each echo masked, since they are written 0 and
+//! ignored on read).
 
 use crate::pair::*;
 
@@ -14,7 +14,7 @@ use crate::{ECHO_LEN, MAX_ECHOES, MAX_PACKET, PROBE_LEN, REPLAY_WINDOW};
 const N: u64 = REPLAY_WINDOW / 64;
 
 /// The window against a set model while 2–4 lanes deliver copies of every counter with different
-/// skews and jitter (§17.1). Go: TestReplayWindow.
+/// skews and jitter.
 #[test]
 fn replay_window() {
     for lanes in 2..=4u64 {
@@ -25,7 +25,7 @@ fn replay_window() {
                 arrivals.push((c + l * 3000 + r.next() % 600, c));
             }
         }
-        arrivals.sort_by_key(|a| a.0); // stable, as Go's SortStableFunc
+        arrivals.sort_by_key(|a| a.0); // stable
         let mut w = Window::default();
         let (mut seen, mut top, mut any, mut accepted) = (BTreeSet::new(), 0, false, 0);
         for (_, c) in arrivals {
@@ -43,8 +43,8 @@ fn replay_window() {
     }
 }
 
-/// The window's width is 8,129 to 8,192 counters, depending on where the top falls in its word
-/// (note 3), and no counter, however large, overflows it.
+/// The window's width is 8,129 to 8,192 counters, depending on where the top falls in its word,
+/// and no counter, however large, overflows it.
 #[test]
 fn window_edges() {
     for (top, low) in [(64 * 300 + 63, 64 * (300 - N + 1)), (64 * 300, 64 * (300 - N + 1))] {
@@ -86,7 +86,7 @@ fn window_seen_reads_only() {
     assert!(!w.seen(20_001) && !w.seen(19_999), "not recorded");
 }
 
-/// The three echoes of TestProbeCodec, with challenges in place of Observed.
+/// The three echoes of `probe_codec`'s probe, with challenges in `token` and `chal`.
 fn three() -> [Echo; 3] {
     [
         Echo {
@@ -106,14 +106,14 @@ fn three() -> [Echo; 3] {
     ]
 }
 
-/// Encode and decode round trip; the 175-byte three-echo probe (§8.2, §17.1). Go: TestProbeCodec.
+/// Encode and decode round trip; the 175-byte three-echo probe (§11.2).
 #[test]
 fn probe_codec() {
     let echoes = three();
     let p = Probe { lane: 0x0102, seq: 7, sent_at: -5, flags: 1, n: 3 };
     let mut b = vec![0xee; MAX_PACKET];
     let n = p.encode(&echoes, &mut b);
-    assert_eq!(n, 175, "three-echo probe is {n} bytes, want 175 (§8.2)");
+    assert_eq!(n, 175, "three-echo probe is {n} bytes, want 175 (§11.2)");
     assert_eq!(n, probe_len(3));
     assert_eq!(b[n], 0xee, "encode wrote past the probe");
     // Big-endian, fixed-width: the header, then each echo's fields at their offsets.
@@ -128,7 +128,7 @@ fn probe_codec() {
     let mut buf = [Echo::default(); MAX_ECHOES];
     assert!(q.decode(&b[..n], &mut buf), "decode failed");
     assert_eq!((q, buf[..3].to_vec()), (p, echoes.to_vec()));
-    // Bytes 51–52 of an echo are ignored on read (a Go peer writes the observed port there).
+    // Bytes 51–52 of an echo are ignored on read.
     b[PROBE_LEN + 51] = 0x1f;
     b[PROBE_LEN + 2 * ECHO_LEN + 52] = 0x90;
     let mut q2 = Probe::default();
@@ -162,8 +162,8 @@ fn masked(b: &[u8]) -> Vec<u8> {
 }
 
 /// Decode never panics; whatever it accepts, encode gives back, but for the ignored bytes; what it
-/// rejects leaves the probe as it was. Go: FuzzProbe, here a seeded loop over random inputs, whole
-/// probes of every size, and mutations of a valid one.
+/// rejects leaves the probe as it was. A seeded loop over random inputs, whole probes of every
+/// size, and mutations of a valid one.
 #[test]
 fn fuzz_probe() {
     let mut r = DetRand(0x5eed);

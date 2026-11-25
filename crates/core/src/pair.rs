@@ -1,16 +1,13 @@
 //! A small test-only driver: two Sessions back to back through in-memory lanes with a configurable
 //! delay, rate and loss, plus node's part of the job (hello, links, control); and the helpers the
-//! unit tests share. Go: core/pair_test.go, with `keyed`, `rx_state`, `recv`, `delivered` and
-//! `forge` from wire_test.go, `hotel` and `lane_state` from lane_test.go, `logged` from
-//! stable_test.go. netsim does the heavy scenario testing.
+//! unit tests share. netsim does the heavy scenario testing.
 //!
-//! Owner: C1 (fills it first: every module's tests use it). Tests may add helpers in their own
-//! tests.rs; a helper two modules need goes here, through C1.
+//! Tests may add helpers in their own tests.rs; a helper two modules need goes here.
 //!
-//! Go's `*tnode` pointers become [`Side`]; `[]Action` becomes [`Acts`], an [`Out`] that copies;
-//! queued events are owned ([`Ev`]) and lent to `handle` as [`Event`]s. Each Tnode has its own
-//! [`RidTable`], as each device's node has. Go's maps of `*path` are a map of [`Path`] values:
-//! change one in place with `p.paths.get_mut(&(from, to))`.
+//! A device is named by [`Side`]; a handle's actions are collected in [`Acts`], an [`Out`] that
+//! copies; queued events are owned ([`Ev`]) and lent to `handle` as [`Event`]s. Each Tnode has its
+//! own [`RidTable`], as each device's node has. The paths are a map of [`Path`] values: change one
+//! in place with `p.paths.get_mut(&(from, to))`.
 //!
 //! Allocation tests: the test binary's global allocator counts allocations per thread (a const
 //! thread-local `Cell<u64>`, so counting allocates nothing); its impl alone allows unsafe code
@@ -38,20 +35,19 @@ const fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
 }
 
-/// The two mesh addresses (pair_test.go).
+/// The two mesh addresses.
 pub(crate) const C_MESH: SocketAddr = v4(100, 64, 0, 1, 7849);
 pub(crate) const S_MESH: SocketAddr = v4(100, 64, 0, 2, 7849);
-/// The hotel's links (lane_test.go).
+/// The hotel's links.
 pub(crate) const C_WIFI: SocketAddr = v4(10, 0, 0, 2, 7849);
 pub(crate) const C_PHONE: SocketAddr = v4(172, 20, 10, 2, 7849);
 pub(crate) const S_ETH: SocketAddr = v4(198, 51, 100, 7, 7849);
-/// The client's Wi-Fi toward the server's Ethernet. Go: `wifiTo`.
+/// The client's Wi-Fi toward the server's Ethernet.
 pub(crate) const WIFI_TO: (SocketAddr, SocketAddr) = (C_WIFI, S_ETH);
-/// Where a packet from a socket the node does not know comes from (Go: the invalid address).
+/// Where a packet from a socket the node does not know comes from (an invalid address).
 pub(crate) const NOWHERE: SocketAddr = v4(0, 0, 0, 0, 0);
 
-/// A deterministic stream for session keys and the driver's loss draws (a 64-bit LCG). Go:
-/// `detRand`.
+/// A deterministic stream for session keys and the driver's loss draws (a 64-bit LCG).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DetRand(pub(crate) u64);
 
@@ -61,7 +57,7 @@ impl DetRand {
         self.0
     }
 
-    /// Fills `p`, one byte per step (the top byte), as Go's Read does.
+    /// Fills `p`, one byte per step (the top byte).
     pub(crate) fn fill(&mut self, p: &mut [u8]) {
         for b in p {
             *b = (self.next() >> 56) as u8;
@@ -73,14 +69,14 @@ impl DetRand {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// A session's Rand drawing from `DetRand(seed)`. Go: `ptr(detRand(seed))`.
+    /// A session's Rand drawing from `DetRand(seed)`.
     pub(crate) fn rand(seed: u64) -> Rand {
         let mut r = DetRand(seed);
         Box::new(move |p: &mut [u8]| r.fill(p))
     }
 }
 
-/// An owned [`Event`], for the queue. Go queued `Event` values, which own nothing.
+/// An owned [`Event`], for the queue: an `Event` borrows its data.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Ev {
     App { flow: FlowId, data: Vec<u8> },
@@ -104,7 +100,7 @@ impl Ev {
     }
 }
 
-/// One action, copied out of the Out call. Go: `Action`.
+/// One action, copied out of the Out call.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Act {
     Send { sock: SockId, to: SocketAddr, data: Vec<u8> },
@@ -112,7 +108,7 @@ pub(crate) enum Act {
     Control(Msg),
 }
 
-/// Collects a handle's actions in order. Go: the `[]Action` Handle returned.
+/// Collects a handle's actions in order.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Acts(pub(crate) Vec<Act>);
 
@@ -131,8 +127,8 @@ impl Out for Acts {
     }
 }
 
-/// `s.handle(now, ev)` with a throwaway RidTable, returning the actions. Go: `s.Handle(now, ev,
-/// nil)`. The session's rid is allocated on its first handle; later tables are not consulted.
+/// `s.handle(now, ev)` with a throwaway RidTable, returning the actions. The session's rid is
+/// allocated on its first handle; later tables are not consulted.
 pub(crate) fn handle(s: &mut Session, now: Mono, ev: Event<'_>) -> Vec<Act> {
     let mut acts = Acts::default();
     s.handle(now, ev, &mut RidTable::new(), &mut acts);
@@ -187,8 +183,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
-/// Allocations made on this thread so far (the counting allocator above). Go's
-/// `testing.AllocsPerRun` and `runtime.MemStats.Mallocs`.
+/// Allocations made on this thread so far (the counting allocator above).
 pub(crate) fn allocs() -> u64 {
     ALLOCS.with(Cell::get)
 }
@@ -277,7 +272,7 @@ impl Out for Arena {
 // ---------------------------------------------------------------------------------------------
 // Two devices and the network between them
 
-/// Which device. Go: a `*tnode`.
+/// Which device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Side {
     C,
@@ -293,7 +288,7 @@ impl Side {
     }
 }
 
-/// One device: its Session and what node knows about its sockets. Go: `tnode`.
+/// One device: its Session and what node knows about its sockets.
 pub(crate) struct Tnode {
     pub(crate) s: Session,
     pub(crate) rids: RidTable,
@@ -339,7 +334,7 @@ impl Tnode {
     }
 }
 
-/// One direction between two socket addresses. Go: `path`.
+/// One direction between two socket addresses.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Path {
     pub(crate) delay: Mono,
@@ -355,7 +350,7 @@ pub(crate) struct Path {
     pub(crate) mtu: usize,
 }
 
-/// A queued event, or a sent lane packet in `Pair::wire`. Go: `item`.
+/// A queued event, or a sent lane packet in `Pair::wire`.
 #[derive(Clone, Debug)]
 pub(crate) struct Item {
     pub(crate) at: Mono,
@@ -387,7 +382,7 @@ impl Ord for Item {
     }
 }
 
-/// Two devices and the network between them. Go: `pair`.
+/// Two devices and the network between them.
 pub(crate) struct Pair {
     pub(crate) now: Mono,
     pub(crate) c: Tnode,
@@ -406,7 +401,7 @@ pub(crate) struct Pair {
     pub(crate) wire: Vec<Item>,
 }
 
-/// A generator: size-byte datagrams on flow `f` from `side`, one every `gap`. Go: `gen`.
+/// A generator: size-byte datagrams on flow `f` from `side`, one every `gap`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Gen {
     pub(crate) side: Side,
@@ -418,7 +413,7 @@ pub(crate) struct Gen {
 
 impl Pair {
     /// A client and a server whose Tailscale lane has the given one-way delay; sessions seeded 1
-    /// and 2, the driver 7. Go: `newPair`.
+    /// and 2, the driver 7.
     pub(crate) fn new(mesh_delay: Mono) -> Pair {
         let mut p = Pair {
             now: 0,
@@ -494,7 +489,7 @@ impl Pair {
         self.nat.get(&a).copied().unwrap_or(a)
     }
 
-    /// `side`'s links as node offers them: the local address, then the public mapping (§6.3).
+    /// `side`'s links as node offers them: the local address, then the public mapping (§9.3).
     pub(crate) fn infos(&self, side: Side) -> Vec<LinkInfo> {
         let info = |l: &Link| {
             let mut cands = vec![l.local];
@@ -655,7 +650,7 @@ impl Pair {
             for g in gs.iter_mut() {
                 g.next = g.next.max(self.now);
             }
-            // The earliest due, the first of equals, as Go's strict < picks.
+            // The earliest due, the first of equals.
             let Some(i) = (0..gs.len()).filter(|&i| gs[i].next <= end).min_by_key(|&i| gs[i].next) else { break };
             self.run(gs[i].next - self.now);
             let (side, f, size) = (gs[i].side, gs[i].f, gs[i].size);
@@ -742,7 +737,7 @@ pub(crate) fn keyed() -> (Session, Session, Vec<u8>) {
     (c, s, pkt.expect("no packet sent"))
 }
 
-/// The receiver's state, comparable. Go: `rxState`.
+/// The receiver's state, comparable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RxState {
     pub(crate) keys: [(u64, [u8; 32], bool); 3],

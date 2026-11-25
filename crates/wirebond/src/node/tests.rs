@@ -3,43 +3,8 @@
 
 use std::sync::Mutex;
 
+use super::testkit::{FakeTun, ip};
 use super::*;
-
-/// A fake TUN device: what the test writes for the daemon to read, and what the daemon wrote.
-#[derive(Clone, Default)]
-struct FakeTun(Arc<Mutex<Queues>>);
-
-/// What the daemon will read, and what it wrote.
-type Queues = (VecDeque<Vec<u8>>, Vec<Vec<u8>>);
-
-impl FakeTun {
-    fn inject(&self, p: Vec<u8>) {
-        self.0.lock().unwrap().0.push_back(p);
-    }
-
-    fn written(&self) -> Vec<Vec<u8>> {
-        self.0.lock().unwrap().1.clone()
-    }
-}
-
-struct TunHandle(FakeTun);
-
-impl TunDev for TunHandle {
-    fn name(&self) -> &str {
-        "fake0"
-    }
-
-    fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let p = self.0.0.lock().unwrap().0.pop_front().ok_or(io::ErrorKind::WouldBlock)?;
-        buf[..p.len()].copy_from_slice(&p);
-        Ok(p.len())
-    }
-
-    fn write(&self, packet: &[u8]) -> io::Result<()> {
-        self.0.0.lock().unwrap().1.push(packet.to_vec());
-        Ok(())
-    }
-}
 
 /// A fake host: one link and one mesh address, a fake TUN device, and a record of the calls.
 struct Fake {
@@ -53,7 +18,7 @@ struct Fake {
 impl Platform for Fake {
     fn open_tun(&mut self, c: &host::TunConfig) -> io::Result<Box<dyn TunDev>> {
         self.calls.lock().unwrap().push(format!("tun {:?}", c.addr4));
-        Ok(Box::new(TunHandle(self.tun.clone())))
+        Ok(Box::new(self.tun.clone()))
     }
 
     fn capture_install(&mut self, c: &host::Capture) -> io::Result<()> {
@@ -131,11 +96,6 @@ fn node(name: &str, link: IpAddr, mesh: IpAddr, cfg: Config) -> (Daemon, FakeTun
     let mut d = Daemon::new("2.0.0", None, cfg, Box::new(fake)).unwrap();
     (d.loopback, d.captive_url) = (true, None);
     (d, tun, calls)
-}
-
-/// 127.`net`.0.`host`.
-fn ip(net: u8, host: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(127, net, 0, host))
 }
 
 /// An IPv4/UDP packet from `src` to `dst` carrying `data`.
@@ -475,7 +435,10 @@ fn an_idle_bond_outlives_its_channel() {
     }
     let (mut pa, mut pc) = (host::Poll::default(), host::Poll::default());
     let down = Instant::now();
-    while down.elapsed() < Duration::from_secs(8) {
+    // Until FAIL_OPEN_AFTER + SEC on the client's clock, with room for the anchor, which saw the
+    // channel go at about the same time.
+    while c.bonds[0].chan_down.is_none_or(|t| c.now() - t <= FAIL_OPEN_AFTER + SEC + 200 * MS) {
+        assert!(down.elapsed() < Duration::from_secs(15), "the client never saw its channel go");
         c.redial_at = Mono::MAX; // the mesh stays down
         c.step(&mut pc, Duration::from_millis(2)).unwrap();
         a.step(&mut pa, Duration::from_millis(2)).unwrap();
@@ -512,7 +475,7 @@ fn an_anchor_that_alone_lost_the_channel_keeps_an_idle_clients_bond() {
     let (owner, down) = (a.bonds[0].owner, a.now());
     (a.bonds[0].chan, a.bonds[0].chan_down) = (None, Some(down));
     let (mut pa, mut pc) = (host::Poll::default(), host::Poll::default());
-    while a.now() - down < FAIL_OPEN_AFTER + 2 * SEC {
+    while a.now() - down < FAIL_OPEN_AFTER + SEC {
         c.step(&mut pc, Duration::from_millis(2)).unwrap();
         a.step(&mut pa, Duration::from_millis(2)).unwrap();
     }
@@ -603,15 +566,8 @@ fn a_remote_view_answers_with_the_peers_status() {
     let acfg = Config { role: Role::Anchor, ..Config::default() };
     let (mut a, _, _) = node("xanth", ip(39, 2), ip(39, 20), acfg);
     let (mut c, _, _) = node("mac", ip(39, 1), ip(39, 10), Config::default());
-    let (tx, rx) = mpsc::channel();
     run(&mut a, &mut c, "scan", |a, c| !a.listening.is_empty() && !c.socks.is_empty());
-    c.call(Request::Status { device: Some(ip(39, 20).to_string()) }, tx);
-    let mut got = None;
-    run(&mut a, &mut c, "view", |_, _| {
-        got = got.take().or_else(|| rx.try_recv().ok());
-        got.is_some()
-    });
-    let r = got.unwrap();
+    let r = call(&mut a, &mut c, Request::Status { device: Some(ip(39, 20).to_string()) });
     let st = r.status.clone().unwrap_or_else(|| panic!("{r:?}"));
     assert_eq!((st.device.as_str(), st.role), ("xanth", Role::Anchor));
     assert!(st.anchor.is_some());

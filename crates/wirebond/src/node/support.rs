@@ -9,7 +9,7 @@
 use std::io;
 use std::net::IpAddr;
 
-use wirebond_core::{Mono, SEC};
+use wirebond_core::{Mono, PORT, SEC};
 
 use super::{Daemon, Msg, ctl, link, network, proto};
 use crate::api::{self, Role};
@@ -170,7 +170,7 @@ impl Daemon {
                 }
                 let id = ctl::next_id();
                 (self.support.chan, self.support.next_reg) = (Some(id), now + REDIAL);
-                ctl::dial(client, self.port, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
+                ctl::dial(client, PORT, self.mesh_addr(), id, self.ev_tx.clone(), self.waker.clone());
             }
         }
     }

@@ -15,6 +15,9 @@ export default defineConfig({
 		sveltekit({
 			adapter: adapter({ strict: true }),
 			paths: { base: base as '' | `/${string}` },
+			// The one stylesheet, under 2 KB compressed, goes into each page, so that nothing
+			// holds up the first paint; the policy below allows it by its hash.
+			inlineStyleThreshold: Infinity,
 			// Prerendered pages carry this policy as a <meta> tag: nothing loads from elsewhere,
 			// and the only request that leaves the site is the download page's release refresh.
 			csp: {
@@ -24,7 +27,8 @@ export default defineConfig({
 					'script-src': ['self'],
 					'style-src': ['self'],
 					// SvelteKit's route announcer, mounted on the download page, is hidden with a style
-					// attribute. Attributes only: style elements and scripts stay locked.
+					// attribute. Attributes only: scripts stay locked, and so do style elements but the
+					// one inlined stylesheet, which style-src allows by its hash.
 					'style-src-attr': ['unsafe-inline'],
 					'img-src': ['self', 'data:'],
 					'connect-src': ['self', 'https://api.github.com'],

@@ -97,18 +97,17 @@ fn args_parse_values_flags_and_rest() {
     let a = Args::parse(
         &s(&["--to", "1.2.3.4:5", "--mbps=30", "--check", "a<1", "--check", "b>2", "--table"]),
         &["to", "mbps"],
-        &[],
     )
     .unwrap();
     assert_eq!(a.get("to"), Some("1.2.3.4:5"));
     assert_eq!(a.num("mbps", 0.0).unwrap(), 30.0);
     assert_eq!(a.common().checks, ["a<1", "b>2"]);
     assert!(a.common().table);
-    let w = Args::parse(&s(&["--for", "x==1", "--", "wirebond", "status", "--json"]), &["for"], &[]).unwrap();
+    let w = Args::parse(&s(&["--for", "x==1", "--", "wirebond", "status", "--json"]), &["for"]).unwrap();
     assert_eq!(w.rest, ["wirebond", "status", "--json"]);
-    assert!(Args::parse(&s(&["--nope", "1"]), &["to"], &[]).is_err());
-    assert!(Args::parse(&s(&["--to"]), &["to"], &[]).is_err());
-    assert!(Args::parse(&s(&["stray"]), &["to"], &[]).is_err());
+    assert!(Args::parse(&s(&["--nope", "1"]), &["to"]).is_err());
+    assert!(Args::parse(&s(&["--to"]), &["to"]).is_err());
+    assert!(Args::parse(&s(&["stray"]), &["to"]).is_err());
     assert_eq!(duration("250ms"), Some(Duration::from_millis(250)));
     assert_eq!(duration("10"), Some(Duration::from_secs(10)));
     assert_eq!(duration("1.5s"), Some(Duration::from_millis(1500)));

@@ -117,6 +117,25 @@ impl Bond {
         }
     }
 
+    /// The address checks of this bond's inner packets, with nothing counted yet.
+    pub fn check(&self) -> Check {
+        Check { addr4: self.addr4, addr6: self.addr6, ..Check::default() }
+    }
+}
+
+/// What §10.5 rule 6 checks a bond's inner packets against, the client's bond addresses, and what
+/// the checks counted for the bond. The engine delivers through this, not the bond, so that it
+/// works on the bond's session in place.
+#[derive(Clone, Copy, Default)]
+pub struct Check {
+    addr4: Option<Ipv4Addr>,
+    addr6: Option<Ipv6Addr>,
+    pub egressed: u64,
+    pub local: u64,
+    pub dropped: u64,
+}
+
+impl Check {
     /// Whether `a` is one of the client's bond addresses.
     pub fn is_addr(&self, a: IpAddr) -> bool {
         match a {
@@ -388,6 +407,7 @@ mod tests {
         let mut b = Bond::new("mac".into(), "100.64.0.2".parse().unwrap(), 1, Mode::Performance, 0);
         b.addr4 = Some(Ipv4Addr::new(10, 77, 0, 2));
         b.addr6 = Some("fd77:b0d::2".parse().unwrap());
+        let b = b.check();
         assert!(b.client_accepts(&v4([10, 77, 0, 1], [10, 77, 0, 2])));
         assert!(!b.client_accepts(&v4([10, 77, 0, 1], [10, 77, 0, 3])), "not this client's address");
         assert!(!b.client_accepts(&[0x45, 0, 0]), "not a packet");

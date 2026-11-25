@@ -1,11 +1,10 @@
-//! The simulator's self-tests with the fake endpoint (Go netsim/selftest_test.go): the plumbing
-//! end to end, determinism, hole punching through the NAT models, control reconnects, sleep and
-//! wake, restarts, every safety invariant failing on a fake built to break it, the adversary, and
-//! the frame-time formula. Owner: N5.
+//! The simulator's self-tests with the fake endpoint: the plumbing end to end, determinism, hole
+//! punching through the NAT models, control reconnects, sleep and wake, restarts, every safety
+//! invariant failing on a fake built to break it, the adversary, and the frame-time formula.
 //!
 //! Each test collects its failures, measured values beside their bounds, and panics once with all
-//! of them and the command that reproduces it (Go's t.Errorf went on); a safety failure where none
-//! is expected stops the test at once (Go's t.Fatalf). The self-tests run seed 1 only.
+//! of them and the command that reproduces it; a safety failure where none is expected stops the
+//! test at once. The self-tests run seed 1 only.
 
 use std::any::Any;
 use std::net::{IpAddr, SocketAddr};
@@ -19,7 +18,7 @@ use wirebond_netsim::{
 
 /// Runs a 30 Mbps Moonlight stream from 1 s to stop over o's topology with mk's endpoints,
 /// watching the hotel's down queue; setup runs before the start; settles the stream after the
-/// run (Go stream). The run's failure, if any, is `env.w.failed()`.
+/// run. The run's failure, if any, is `env.w.failed()`.
 fn stream(seed: u64, mk: Maker, o: &Opts, stop: Dur, until: Dur, setup: impl FnOnce(&mut Env)) -> (Env, MoonId) {
     let mut e = Env::new(seed, mk, o);
     let m = e.w.moonlight(30e6, 120.0, SEC, stop);
@@ -32,33 +31,33 @@ fn stream(seed: u64, mk: Maker, o: &Opts, stop: Dur, until: Dur, setup: impl FnO
     (e, m)
 }
 
-/// The fake that does what it should (Go fakeMaker(direct, 0)).
+/// The fake that does what it should.
 fn fake(direct: bool) -> Maker {
     fake_maker(direct, Evil::None)
 }
 
-/// The command that reproduces a failure of test (§17.4).
+/// The command that reproduces a failure of test.
 fn repro(test: &str) -> String {
-    format!("cargo test -p wirebond-netsim --test selftest -- --exact {test}")
+    format!("cargo test -p wirebond-netsim --profile sim --test sim -- --exact selftest::{test}")
 }
 
-/// Fails test at once on a safety failure (Go's t.Fatalf("safety: …")).
+/// Fails test at once on a safety failure.
 fn safe(test: &str, e: &Env) {
     if let Some(f) = e.w.failed() {
         panic!("safety: {f}\nreproduce: {}", repro(test));
     }
 }
 
-/// Fails test once, listing every failure (Go's t.Errorf calls).
+/// Fails test once, listing every failure.
 fn report(test: &str, errs: &[String]) {
     assert!(errs.is_empty(), "{}\nreproduce: {}", errs.join("\n"), repro(test));
 }
 
-/// Go TestFakeStream: with the fake (no direct lanes) the control channel connects once (one
-/// session and one key per device), STUN maps each link to its NAT's public address (eth: PUB_HOME
-/// port 7849), and 2–19 s: ≥ 2,000 frames sent, ≥ 99% decoded, ≤ 2 unrecovered; p99 excess over
-/// the hotel's frame time ≤ 15 ms; longest frame gap ≤ 60 ms; input p99.9 beyond the lower lane ≤
-/// 30 ms; no audio or input lost; the Tailscale lane carries bulk ≥ 95%; hotel queue p95 ≤ 30 ms.
+/// With the fake (no direct lanes) the control channel connects once (one session and one key per
+/// device), STUN maps each link to its NAT's public address (eth: PUB_HOME port 7849), and 2–19 s:
+/// ≥ 2,000 frames sent, ≥ 99% decoded, ≤ 2 unrecovered; p99 excess over the hotel's frame time ≤
+/// 15 ms; longest frame gap ≤ 60 ms; input p99.9 beyond the lower lane ≤ 30 ms; no audio or input
+/// lost; the Tailscale lane carries bulk ≥ 95%; hotel queue p95 ≤ 30 ms.
 #[test]
 fn fake_stream() {
     const FRAMES: usize = 2000;
@@ -97,8 +96,7 @@ fn fake_stream() {
              unrecovered (≤ {UNRECOVERED})"
         ));
     }
-    // The shaper's 64 KB burst can beat §17.3's frame time, which paces at the rate: below 0 is
-    // fine.
+    // The shaper's 64 KB burst can beat the frame time, which paces at the rate: below 0 is fine.
     let excess = pct(&x.excess(0, from, to), 0.99);
     if excess > EXCESS {
         errs.push(format!("p99 frame delay beyond the hotel's frame time: {} (≤ {})", ms(excess), ms(EXCESS)));
@@ -145,7 +143,7 @@ fn fake_stream() {
     report("fake_stream", &errs);
 }
 
-/// Go TestDeterminism: seed 1 twice gives one hash; seeds 1 and 2 differ (6 s, direct fake).
+/// Seed 1 twice gives one hash; seeds 1 and 2 differ (6 s, direct fake).
 #[test]
 fn determinism() {
     let run = |seed| {
@@ -163,8 +161,8 @@ fn determinism() {
     report("determinism", &errs);
 }
 
-/// Go TestFakeDirect: with the forward the direct fake leaves the Tailscale lane (≤ 5% of 3–8 s);
-/// behind hard NATs on both ends no direct lane forms and the Tailscale lane alone loses ≤ 2 frames.
+/// With the forward the direct fake leaves the Tailscale lane (≤ 5% of 3–8 s); behind hard NATs on
+/// both ends no direct lane forms and the Tailscale lane alone loses ≤ 2 frames.
 #[test]
 fn fake_direct() {
     let mut errs = Vec::new();
@@ -194,8 +192,7 @@ fn fake_direct() {
     report("fake_direct", &errs);
 }
 
-/// Go TestControlReconnect: the channel cut 4–7 s comes back with one session and the same key
-/// twice; no frame lost 2–11 s.
+/// The channel cut 4–7 s comes back with one session and the same key twice; no frame lost 2–11 s.
 #[test]
 fn control_reconnect() {
     let (e, m) = stream(1, fake(false), &defaults(), 12 * SEC, 12 * SEC, |e| {
@@ -220,9 +217,9 @@ fn control_reconnect() {
     report("control_reconnect", &errs);
 }
 
-/// Go TestSleepWake: the Mac sleeps 30 s at 5 s, the clock paused then advancing: one wake (the
-/// client's fake, downcast from `world[DevId::Client].endpoint()`), the clock offset moved by 30 s
-/// (paused) or 0 (advancing), control up, ≥ 100 frames shown in 36–37 s.
+/// The Mac sleeps 30 s at 5 s, the clock paused then advancing: one wake (the client's fake,
+/// downcast from `world[DevId::Client].endpoint()`), the clock offset moved by 30 s (paused) or 0
+/// (advancing), control up, ≥ 100 frames shown in 36–37 s.
 #[test]
 fn sleep_wake() {
     let mut errs = Vec::new();
@@ -254,8 +251,8 @@ fn sleep_wake() {
     report("sleep_wake", &errs);
 }
 
-/// Go TestRestart: the server restarts at 5 s for 1 s: two sessions each, two different server
-/// keys; the first frame after 6 s by 9 s.
+/// The server restarts at 5 s for 1 s: two sessions each, two different server keys; the first
+/// frame after 6 s by 9 s.
 #[test]
 fn restart() {
     let (e, m) = stream(1, fake(false), &defaults(), 15 * SEC, 15 * SEC, |e| {
@@ -280,14 +277,13 @@ fn restart() {
     report("restart", &errs);
 }
 
-/// Go TestCheckerCatches: each evil fake fails the run with a message containing (any of '|'):
-/// Twice "delivered twice"; Reuse "sealed twice"; Corrupt "corrupted"; Unvalid "not a validated
-/// lane"; Bytes "above SessionBytes"; Move (direct) "moved"; Disorder "in one release"; Answer
-/// with an adversary forging 5% at the client "answered a"; Trust (direct) with an adversary
-/// relaying 20% at the server "has reached the peer|without a newer authenticated probe";
-/// ForgeKeys with the server restarting at 3 s "key sent to an earlier process". Then the
-/// registry driven directly: a datagram submitted under one pairing and delivered under another
-/// fails with "replay".
+/// Each evil fake fails the run with a message containing (any of '|'): Twice "delivered twice";
+/// Reuse "sealed twice"; Corrupt "corrupted"; Unvalid "not a validated lane"; Bytes "above
+/// SessionBytes"; Move (direct) "moved"; Disorder "in one release"; Answer with an adversary
+/// forging 5% at the client "answered a"; Trust (direct) with an adversary relaying 20% at the
+/// server "has reached the peer|without a newer authenticated probe"; ForgeKeys with the server
+/// restarting at 3 s "key sent to an earlier process". Then the registry driven directly: a
+/// datagram submitted under one pairing and delivered under another fails with "replay".
 #[test]
 fn checker_catches() {
     type Setup = fn(&mut Env);
@@ -334,8 +330,8 @@ fn checker_catches() {
     report("checker_catches", &errs);
 }
 
-/// Go TestAdversaryFake: every attack at 2% against the client's fake: no safety failure, every
-/// kind injected, ≤ 1 frame lost 2–9 s.
+/// Every attack at 2% against the client's fake: no safety failure, every kind injected, ≤ 1 frame
+/// lost 2–9 s.
 #[test]
 fn adversary_fake() {
     let (e, m) = stream(1, fake(false), &defaults(), 10 * SEC, 10 * SEC, |e| {
@@ -361,11 +357,10 @@ fn adversary_fake() {
     report("adversary_fake", &errs);
 }
 
-/// Go TestFrameTime: 11 packets of 1,000 bytes at 40 Mbps with 30 ms delay from 1 s arrive by
-/// 1 s + 2 ms + 30 ms.
+/// 11 packets of 1,000 bytes at 40 Mbps with 30 ms delay from 1 s arrive by 1 s + 2 ms + 30 ms.
 #[test]
 fn frame_time() {
-    // Go testLink: one client link whose directions both use p, on a world with the fake.
+    // One client link whose directions both use p, on a world with the fake.
     let p = Profile { rate: 40e6, delay: 30 * MS, ..Profile::default() };
     let mut w = World::new(1, fake(false));
     let l = w.add_link(

@@ -1,15 +1,13 @@
 //! Sealing, the key ratchet, the receiver's epoch slots, path-validation challenges and receive
-//! ids (§7.2, §7.3, §7.5; Go: core/keys.go).
+//! ids (§10.2, §10.3, §10.4).
 //!
-//! Owner: C1.
-//!
-//! Superseded and dropped keys are zeroed (§7.2 forward secrecy per epoch; notes/open.md
-//! "superseded epoch keys are not zeroed"). [`EpochKey`] zeroes its key bytes on drop, and the AES
-//! round keys and GHASH key inside its AEAD zero themselves (aes-gcm's `zeroize` feature); every
-//! slot change (ratchet, advance, install) drops the key it replaces. The HMAC that derives a key
-//! zeroes its state and output (the `zeroize` features of hmac and sha2): the inner state of a
-//! superseded key would derive every later key. Safe Rust cannot reach the copies the compiler
-//! leaves when it moves a value, nor the key bytes of a key message once node has sent it.
+//! Superseded and dropped keys are zeroed (§10.2), for forward secrecy per epoch. [`EpochKey`]
+//! zeroes its key bytes on drop, and the AES round keys and GHASH key inside its AEAD zero
+//! themselves (aes-gcm's `zeroize` feature); every slot change (ratchet, advance, install) drops
+//! the key it replaces. The HMAC that derives a key zeroes its state and output (the `zeroize`
+//! features of hmac and sha2): the inner state of a superseded key would derive every later key.
+//! Safe Rust cannot reach the copies the compiler leaves when it moves a value, nor the key bytes
+//! of a key message once node has sent it.
 
 use aes_gcm::aead::inout::InOutBuf;
 use aes_gcm::aead::{AeadInOut, Nonce};
@@ -22,9 +20,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::wire::{Window, be};
 use crate::{EPOCH_BITS, EPOCH_LABEL, HEADER_LEN, RidTable, TAG_LEN};
 
-/// One epoch's AES-256-GCM key (Go: `epochKey`); `aead` None is an empty slot, as the default is
-/// (Go: `epochKey{}`). Not Clone, so key material is never duplicated by accident; its bytes are
-/// zeroed on drop.
+/// One epoch's AES-256-GCM key; `aead` None is an empty slot, as the default is. Not Clone, so key
+/// material is never duplicated by accident; its bytes are zeroed on drop.
 #[derive(Default)]
 pub(crate) struct EpochKey {
     pub(crate) e: u64,
@@ -33,7 +30,7 @@ pub(crate) struct EpochKey {
 }
 
 impl EpochKey {
-    /// The key for epoch `e` (a 32-byte key never fails). Go: `newKey`.
+    /// The key for epoch `e` (a 32-byte key never fails).
     pub(crate) fn new(e: u64, k: [u8; 32]) -> EpochKey {
         EpochKey { e, k, aead: Aes256Gcm::new_from_slice(&k).ok() }
     }
@@ -43,7 +40,7 @@ impl EpochKey {
         self.aead.is_some()
     }
 
-    /// The next epoch's key, K_{e+1} = HMAC-SHA256(K_e, EPOCH_LABEL) (§7.2), written straight into
+    /// The next epoch's key, K_{e+1} = HMAC-SHA256(K_e, EPOCH_LABEL) (§10.2), written straight into
     /// the slot that zeroes it. The epoch wraps rather than overflow: a key message may carry any
     /// `e`.
     pub(crate) fn ratchet(&self) -> EpochKey {
@@ -68,7 +65,7 @@ fn hmac(key: &[u8; 32], msg: &[&[u8]]) -> CtOutput<Hmac<Sha256>> {
     m.finalize()
 }
 
-/// The nonce of the packet whose header is `h`: 2 zero bytes ‖ rid ‖ counter (§7.3).
+/// The nonce of the packet whose header is `h`: 2 zero bytes ‖ rid ‖ counter (§10.3).
 fn nonce(h: &[u8]) -> Nonce<Aes256Gcm> {
     let mut n = [0; 12];
     n[2..].copy_from_slice(&h[1..HEADER_LEN]);
@@ -76,8 +73,8 @@ fn nonce(h: &[u8]) -> Nonce<Aes256Gcm> {
 }
 
 /// My send key toward the peer. One counter covers every packet type and lane, so the nonce
-/// 0 ‖ rid ‖ counter never repeats under a key (§7.3). Go: `sender` (its nonce scratch is a
-/// local in Rust).
+/// 0 ‖ rid ‖ counter never repeats under a key (§10.3). The nonce is built per packet (`nonce`), so
+/// the sender keeps no scratch for it.
 pub(crate) struct Sender {
     pub(crate) key: EpochKey,
     /// The next counter.
@@ -110,7 +107,7 @@ impl Sender {
     }
 }
 
-/// Which receiver slot opened a packet. Go compared the returned `*epochKey` with `&s.rx.next`.
+/// Which receiver slot opened a packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
     Prev,
@@ -119,7 +116,7 @@ pub(crate) enum Slot {
 }
 
 /// The peer's keys for the previous, current and next epoch, and the session's replay window
-/// (§7.2, §7.5); the default has no key. Go: `receiver`.
+/// (§10.2, §10.4); the default has no key.
 #[derive(Default)]
 pub(crate) struct Receiver {
     pub(crate) prev: EpochKey,
@@ -132,10 +129,10 @@ pub(crate) struct Receiver {
 }
 
 impl Receiver {
-    /// Authenticates lane packet `b` (§7.5 steps 1–2), writing its plaintext to the front of `dst`
+    /// Authenticates lane packet `b` (§10.4 steps 1–2), writing its plaintext to the front of `dst`
     /// (a MAX_PACKET buffer), and returns the plaintext's length and the slot that opened it. A
     /// counter whose epoch is not the previous, current or next one is dropped before any work, so
-    /// a forged counter costs no HMAC and changes nothing (§7.6 rule 1); so is one below the floor
+    /// a forged counter costs no HMAC and changes nothing (§10.5 rule 1); so is one below the floor
     /// (R2-09). The caller has checked HEADER_LEN + TAG_LEN ≤ b.len() ≤ MAX_PACKET; any other
     /// length, or a `dst` too short, is dropped too. `dst` is untouched unless the packet opens.
     pub(crate) fn open(&self, dst: &mut [u8], b: &[u8]) -> Option<(usize, Slot)> {
@@ -154,7 +151,7 @@ impl Receiver {
         if !self.cur.is_set() || c < self.floor {
             return None;
         }
-        // The epoch's distance from the current one, which wraps as Go's uint64 does.
+        // The epoch's distance from the current one, wrapping: the previous epoch is u64::MAX.
         match (c >> EPOCH_BITS).wrapping_sub(self.cur.e) {
             0 => Some((&self.cur, Slot::Cur)),
             1 => Some((&self.next, Slot::Next)),
@@ -165,17 +162,16 @@ impl Receiver {
 
     /// Takes the peer's key for epoch `e` from a key message and derives the next epoch's with one
     /// HMAC. Reports whether the key is from outside the chain held, which means the peer's
-    /// session is new while mine lives on (§7.6 rule 8): the window restarts and the caller
-    /// forgets what the peer numbered (`Session::peer_new`). A key message that crossed its
-    /// epoch's packets is ignored; a jump past the next epoch drops the previous key, which cannot
-    /// be derived backwards. A key that is not 32 bytes changes nothing. Go: `install`.
+    /// session is new while mine lives on: the window restarts and the caller forgets what the
+    /// peer numbered (`Session::peer_new`). A key message that crossed its epoch's packets is
+    /// ignored; a jump past the next epoch drops the previous key, which cannot be derived
+    /// backwards. A key that is not 32 bytes changes nothing.
     ///
-    /// `c` is the peer's next counter when it sent the message (`Msg::c`, R2-09; 0 from a Go
-    /// peer, which is Go's behavior). On the first key and on a key from outside the chain,
-    /// counters below `c` are dropped from then on: they were sealed before the message, so they
-    /// are replays of an earlier session's packets into a session that took the peer's unchanged
-    /// key on a reused rid. Not on a catch-up past the next epoch, whose first packets are sealed
-    /// before its key message.
+    /// `c` is the peer's next counter when it sent the message (`Msg::c`, R2-09; 0 when the peer
+    /// did not say). On the first key and on a key from outside the chain, counters below `c` are
+    /// dropped from then on: they were sealed before the message, so they are replays of an earlier
+    /// session's packets into a session that took the peer's unchanged key on a reused rid. Not on
+    /// a catch-up past the next epoch, whose first packets are sealed before its key message.
     pub(crate) fn install_from(&mut self, e: u64, k: &[u8], c: u64) -> bool {
         // The message's key, zeroed whichever way this returns.
         let Ok(key) = <[u8; 32]>::try_from(k).map(Zeroizing::new) else { return false };
@@ -198,7 +194,7 @@ impl Receiver {
     }
 
     /// Makes the next epoch current once one of its packets passed the session replay window,
-    /// drops (zeroing) the oldest key and derives the new next one (§7.2). The slots swap in
+    /// drops (zeroing) the oldest key and derives the new next one (§10.2). The slots swap in
     /// place, so no key passes through a temporary.
     pub(crate) fn advance(&mut self) {
         std::mem::swap(&mut self.prev, &mut self.cur);
@@ -207,10 +203,10 @@ impl Receiver {
     }
 }
 
-/// Path-validation challenges (R2-03, notes/open.md; §7.6 rule 2, §8.2). A probe's challenge is
-/// a keyed PRF of (lane, address generation, seq), so the peer cannot predict the challenge of a
-/// probe sent to an address it does not hold, nothing is stored per probe, and rand is read once
-/// per session rather than on the send path.
+/// Path-validation challenges (R2-03; §9.4, §11.2). A probe's challenge is a keyed PRF of (lane,
+/// address generation, seq), so the peer cannot predict the challenge of a probe sent to an address
+/// it does not hold, nothing is stored per probe, and rand is read once per session rather than on
+/// the send path.
 pub(crate) struct Challenger {
     /// Drawn from the session's rand at start; never leaves the session; zeroed on drop.
     key: Zeroizing<[u8; 32]>,

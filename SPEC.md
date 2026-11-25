@@ -766,7 +766,7 @@ Every role runs as a system service:
 | Tier | What | Where |
 | --- | --- | --- |
 | 1 | `cargo test`: units, vectors, pair tests of the engine | Linux, macOS, Windows CI |
-| 2 | `netsim`: deterministic acceptance on simulated links and traces | Linux CI; PR set on every push, full set nightly |
+| 2 | `netsim`: deterministic acceptance on simulated links and traces | Linux CI; PR set on every pull request and every push to `main`, except those that change only `site/` and `site.yml`; full set nightly |
 | 3 | System harness: network namespaces for client, anchor and an "internet" with a server, with real TUN devices, nftables NAT, tc shaping and netem jitter; driven by `crates/load` | Linux CI |
 | 4 | Field run: the owner's Mac at a hotel (Wi-Fi plus an iPhone on USB) bonded to xanth | by hand, before 2.0.0 ships |
 

@@ -1,5 +1,5 @@
-//! Install and uninstall (SPEC §19, §22.2): the scope a verb needs, the executable copied into
-//! place, config.json, and the service. What names an agent or `Scope::User` is 1.x's macOS login
+//! Install and uninstall (SPEC §19, §22.2): the executable copied into place, config.json, and
+//! the service, always the system scope's. What names an agent or `Scope::User` is 1.x's macOS login
 //! agent, which §25 removes: install only replaces one that is there with the system service.
 
 use super::{CONFIG_FILE, Config, Scope, os};
@@ -13,13 +13,6 @@ use std::{env, fs};
 use super::tests::executable;
 #[cfg(not(test))]
 use std::env::current_exe as executable;
-
-/// The scope a changing verb needs: the system service for every role on every OS, a LaunchDaemon
-/// on macOS too (SPEC 2.0 §22.2, §25: the login agent is gone); `serve` is 1.x's. The daemon's own
-/// is `need(false)`. A 1.x login agent on a Mac goes at the next system install (`install`).
-pub fn need(_serve: bool) -> Scope {
-    Scope::System
-}
 
 /// Whether `s`'s config.json exists, which install writes before registering the service and
 /// uninstall removes after. Only macOS has a separate user scope.
@@ -94,7 +87,7 @@ pub fn install(s: Scope) -> io::Result<bool> {
     }
     changed |= os::register(s, &exe, changed)?;
     if let Some(d) = download {
-        os::drop(&d);
+        os::discard(&d);
         // A download saved where the link goes, /usr/local/bin/wirebond, kept register from
         // linking; it is gone now.
         #[cfg(target_os = "macos")]

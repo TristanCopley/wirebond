@@ -1,7 +1,8 @@
 # The website in site/: type and Svelte checks, the static build, and the Playwright smoke test
-# against that build, at the root and under GitHub Pages' /wirebond. On main, once the owner turns
-# GitHub Pages on (Settings, Pages, Source: GitHub Actions), it also publishes the site there;
-# until then the deploy says Pages is off and ends successfully.
+# against that build, at the root and under GitHub Pages' /wirebond. On main, once GitHub Pages'
+# source is GitHub Actions (Settings, Pages, Build and deployment, Source), it also publishes the
+# site there; until then the pages job says why nothing is deployed (Pages off, or publishing from
+# a branch), the deploy job is skipped and the run succeeds.
 name: site
 
 on:
@@ -10,7 +11,7 @@ on:
     paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
   pull_request:
     paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
-  # To publish at once after turning Pages on, or to refresh the release a page lists without
+  # To publish at once after setting Pages' source, or to refresh the release a page lists without
   # JavaScript (the download page asks GitHub again in the browser).
   workflow_dispatch:
 
@@ -39,8 +40,16 @@ jobs:
         run: npm ci
       - name: Check
         run: npm run check
-      - name: Chromium for Playwright
-        run: npx playwright install --with-deps chromium
+      # Only Chromium's headless shell: the tests run headless, which launches the shell and never
+      # the full browser. The lock file pins Playwright, and so the shell's build: it is the key.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-shell-${{ runner.os }}-${{ hashFiles('site/package-lock.json') }}
+      # From the cache, install finds the shell in place and downloads nothing; the system packages
+      # it needs are installed each time.
+      - name: Chromium's headless shell for Playwright
+        run: npx playwright install --with-deps --only-shell chromium
       - name: Build
         run: npm run build
         env:

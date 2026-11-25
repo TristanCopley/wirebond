@@ -1,10 +1,8 @@
-//! Tests of session.rs and lib.rs's Session methods. Owner: C2. Ports from core/pair_test.go:
-//! TestPairKeyExchange, TestPairMeshFlow, TestPairForged; from core/session_test.go:
-//! TestSendAllocs (with `pair::allocs` and an Out that does not allocate).
+//! Tests of session.rs and lib.rs's Session methods (tests/alloc.rs holds the send path's
+//! allocation test).
 //!
-//! The ports drive whole sessions; the other tests need only session.rs and lib.rs.
-
-use std::net::SocketAddr;
+//! `pair_key_exchange`, `pair_mesh_flow` and `pair_forged` drive whole sessions; the other tests
+//! need only session.rs and lib.rs.
 
 use super::Mode;
 use crate::flow::FLOW_LANES;
@@ -12,13 +10,9 @@ use crate::flow::FlowLane;
 use crate::lane::{Lane, LaneIx};
 use crate::pair::*;
 use crate::wire::Window;
-use crate::{
-    Event, HEADER_LEN, MAX_PACKET, MS, Msg, Out, RidTable, Role, SMALL_BIT, Session, SockId, TAG_LEN, TYPE_DATA,
-    TYPE_PROBE,
-};
+use crate::{Event, HEADER_LEN, MAX_PACKET, MS, Msg, Role, SMALL_BIT, Session, TAG_LEN, TYPE_DATA, TYPE_PROBE};
 
-/// Go: TestPairKeyExchange. Each side sends its rid and key on the peer's hello, and each takes
-/// the other's.
+/// Each side sends its rid and key on the peer's hello, and each takes the other's.
 #[test]
 fn pair_key_exchange() {
     let mut p = Pair::new(20 * MS);
@@ -29,7 +23,7 @@ fn pair_key_exchange() {
     }
 }
 
-/// Go: TestPairMeshFlow. A flow each way over the Tailscale lane arrives whole and in order.
+/// A flow each way over the Tailscale lane arrives whole and in order.
 #[test]
 fn pair_mesh_flow() {
     let mut p = Pair::new(15 * MS);
@@ -43,8 +37,8 @@ fn pair_mesh_flow() {
     in_order(&p.c, f, 200, 0);
 }
 
-/// Go: TestPairForged. Real packets replayed, corrupted and re-addressed are all dropped, with
-/// no reply and no change to the receiver's keys or window (§7.6 rule 1).
+/// Real packets replayed, corrupted and re-addressed are all dropped, with no reply and no change
+/// to the receiver's keys or window (§10.5 rule 1).
 #[test]
 fn pair_forged() {
     let mut p = Pair::new(10 * MS);
@@ -78,59 +72,6 @@ fn pair_forged() {
     assert_eq!(p.s.got.get(&f).map_or(0, Vec::len), got, "a replayed packet was delivered");
 }
 
-/// An Out that only counts, so the measured `handle` calls allocate nothing of their own.
-#[derive(Default)]
-struct Count {
-    sends: usize,
-    bytes: usize,
-    delivers: usize,
-    controls: usize,
-}
-
-impl Out for Count {
-    fn send(&mut self, _: SockId, _: SocketAddr, data: &[u8]) {
-        self.sends += 1;
-        self.bytes += data.len();
-    }
-
-    fn deliver(&mut self, _: &[u8]) {
-        self.delivers += 1;
-    }
-
-    fn control(&mut self, _: Msg) {
-        self.controls += 1;
-    }
-}
-
-/// Go: TestSendAllocs. `handle` allocates nothing for an App event in steady state (§4.2,
-/// §17.1).
-#[test]
-fn send_allocs() {
-    let (mut c, _, _) = keyed();
-    // Two keyed flows (§13), their packets built once: building them would allocate.
-    let video = crate::pair::inner(crate::FlowId(1), &[0u8; 1380]);
-    let audio = crate::pair::inner(crate::FlowId(2), &[0u8; 200]);
-    let (mut out, mut rids, mut now) = (Count::default(), RidTable::new(), 0);
-    let mut step = |c: &mut Session, out: &mut Count| {
-        now += MS / 10;
-        c.handle(now, Event::Send { packet: &video }, &mut rids, out);
-        c.handle(now, Event::Send { packet: &audio }, &mut rids, out);
-    };
-    // Warm up, plus one unmeasured batch as Go's AllocsPerRun runs; then one measured run of
-    // 5,000 steps, so that even one allocation in the whole batch (a probe tick, a pacer release)
-    // shows.
-    for _ in 0..25_000 {
-        step(&mut c, &mut out);
-    }
-    let (before, sends) = (allocs(), out.sends);
-    for _ in 0..5_000 {
-        step(&mut c, &mut out);
-    }
-    let n = allocs() - before;
-    assert_eq!(n, 0, "send path: {n} allocations in 5,000 steps");
-    assert!(out.sends > sends && out.bytes > 0, "nothing was sent");
-}
-
 /// The modes as messages name them; nothing else is one, from either mode. A new session runs
 /// performance (§14).
 #[test]
@@ -153,7 +94,7 @@ fn mode_names() {
 }
 
 /// A new mode restarts the scheduler from no lane; an unknown or unchanged one, which a peer's
-/// hello can carry, changes nothing (§11).
+/// hello can carry, changes nothing (§14).
 #[test]
 fn set_mode() {
     let mut s = Session::new(Role::Client, 1, DetRand::rand(1));
@@ -193,7 +134,7 @@ fn control_mode() {
     assert_eq!(s.rid, 1, "the rid is allocated on the first handle");
 }
 
-/// `key` carries my receive id and my current send key: the first 32 bytes drawn (§7.2).
+/// `key` carries my receive id and my current send key: the first 32 bytes drawn (§10.2).
 #[test]
 fn send_key() {
     let mut s = Session::new(Role::Anchor, 1, DetRand::rand(2));
@@ -205,14 +146,14 @@ fn send_key() {
     match &acts.0[..] {
         [Act::Control(m)] => {
             assert!(m.t == "key" && m.rid == s.rid && m.rid != 0 && m.e == 0 && m.k == k, "{m:?}");
-            assert!(m.links.is_empty() && m.mode.is_empty() && m.view.is_none(), "{m:?}");
+            assert!(m.links.is_empty() && m.mode.is_empty(), "{m:?}");
         }
         a => panic!("{a:?}"),
     }
 }
 
-/// §7.5 starts with the size, the rid and the type: a packet that fails them is dropped before
-/// any key is touched, with no reply and no state (§7.6 rule 1).
+/// §10.4 starts with the rid; a packet with a bad size, rid or type is dropped before any key is
+/// touched, with no reply and no state (§10.5 rule 1).
 #[test]
 fn packet_drops_before_opening() {
     let mut s = Session::new(Role::Anchor, 1, DetRand::rand(12));
@@ -244,8 +185,8 @@ fn packet_drops_before_opening() {
 }
 
 /// A key from outside the chain: the peer's new session numbers from 1 again, so every lane's
-/// window, probe Seq, counters and lagging state, and every flow's order, start again (notes/core.md
-/// 31). The receive statistics stay: echoes report them as differences.
+/// window, probe Seq, counters and lagging state, and every flow's order, start again. The receive
+/// statistics stay: echoes report them as differences.
 #[test]
 fn peer_new_forgets_numbering() {
     let mut s = Session::new(Role::Client, 1, DetRand::rand(1));

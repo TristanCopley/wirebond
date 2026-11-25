@@ -1,19 +1,16 @@
-//! The read-only view status prints and netsim checks (§14.2–§14.4; Go: core/status.go).
-//!
-//! Owner: C2.
+//! The read-only view status prints and netsim checks (§20.2).
 
 use crate::estimate::INF;
 use crate::flow::Flow;
-use crate::lane::LaneIx;
+use crate::lane::{Lane, LaneIx};
 use crate::{
-    FlowStatus, LaneOut, LaneStatus, MIN, Mono, Problem, REORDER_LANES, SMALL_WINDOW, STATUS_EVENTS, Session,
-    SessionStatus,
+    FlowStatus, LaneOut, LaneStatus, MIN, Mono, REORDER_LANES, SMALL_WINDOW, STATUS_EVENTS, Session, SessionStatus,
 };
 
 impl Session {
     /// The read-only view that status prints, with the session's last STATUS_EVENTS events,
-    /// oldest first, at the time of the last `handle` (Go: `Snapshot`). Reading it changes
-    /// nothing, so it never alters what the session does next: meters are read with `Meter::peek`.
+    /// oldest first, at the time of the last `handle`. Reading it changes nothing, so it never
+    /// alters what the session does next: meters are read with `Meter::peek`.
     pub fn snapshot(&self) -> SessionStatus {
         let now = self.now;
         // The base of owdRelMs: the lowest OWD of the lanes with a sample, a fresh echo since the
@@ -31,10 +28,28 @@ impl Session {
             flows_dropped: self.flows_dropped,
             bytes: self.pool.held(),
             last_auth: self.last_auth,
-            problems: self.problems(now),
             events: (self.nevents.saturating_sub(STATUS_EVENTS)..self.nevents)
                 .map(|i| self.events[i % STATUS_EVENTS].clone())
                 .collect(),
+        }
+    }
+
+    /// The part of [`Session::snapshot`] a driver checks after every call (netsim's checker): each
+    /// lane's id, socket, return address and whether it validated, and the bytes held. Every other
+    /// field is its default. The whole snapshot builds each label, statistic, flow and event
+    /// besides, which cost a quarter of a simulated run when taken per call.
+    pub fn paths(&self) -> SessionStatus {
+        let lane = |x: &Lane| LaneStatus {
+            id: x.id,
+            sock: x.sock,
+            peer: x.peer,
+            validated: x.validated,
+            ..LaneStatus::default()
+        };
+        SessionStatus {
+            lanes: self.lanes.iter().map(lane).collect(),
+            bytes: self.pool.held(),
+            ..SessionStatus::default()
         }
     }
 
@@ -63,7 +78,6 @@ impl Session {
                 queue_ms: ms(x.qd),
                 loss: x.loss,
                 rate_mbps: if x.rate < INF { x.rate / 1e6 } else { 0.0 },
-                sent_bytes: x.sent_bytes,
                 copy_bytes: x.copy_bytes,
             },
             // §11.5.
@@ -97,7 +111,7 @@ impl Session {
         }
     }
 
-    /// l's part in my sending (§14.3): spread only while this side sends bulk (every packet in
+    /// l's part in my sending: spread only while this side sends bulk (every packet in
     /// performance, a share in bandwidth), else copies or standby. A client sending only small
     /// input still has a spread chosen; calling it that told status the bulk went this way (R2-06).
     pub(crate) fn lane_role(&self, l: LaneIx) -> &'static str {
@@ -106,11 +120,6 @@ impl Session {
             _ if self.lanes[l].in_copy => "copies",
             _ => "standby",
         }
-    }
-
-    /// Problems the engine detects (§17).
-    pub(crate) fn problems(&self, _now: Mono) -> Vec<Problem> {
-        Vec::new() // 2.0: §17's problems are the daemon's; the engine raises none yet
     }
 }
 

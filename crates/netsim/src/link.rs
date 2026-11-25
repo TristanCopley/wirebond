@@ -1,11 +1,11 @@
-//! Links and their two directions (Go netsim/link.go): a bottleneck (token bucket, policer or
-//! Mahimahi trace) feeding a FIFO, then loss, delay and jitter that never reorder; the radio-wide
-//! delay bumps (spikes, AWDL, Starlink), the hotel's measured jitter replay, cold radio, MTU and
-//! fragment loss; ground-truth OWD and frame time (§17.2, §17.3).
+//! Links and their two directions: a bottleneck (token bucket, policer or Mahimahi trace) feeding
+//! a FIFO, then loss, delay and jitter that never reorder; the radio-wide delay bumps (spikes,
+//! AWDL, Starlink), the hotel's measured jitter replay, cold radio, MTU and fragment loss;
+//! ground-truth OWD and frame time.
 //!
 //! A direction is named by [`DirId`] (its link and [`Side`]). Operations that need the clock, the
 //! event queue or the link's radio-wide bumps are `World` methods taking a `DirId`; pure state is
-//! on [`Dir`]. Owner: N1.
+//! on [`Dir`].
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -19,7 +19,7 @@ use crate::node::{DevId, Pkt};
 use crate::sim::{Dur, Entry, MS, Rng, SEC, Task, World, secs, splitmix};
 use crate::trace::{Trace, TracePos};
 
-/// One direction of a link (§17.2).
+/// One direction of a link.
 #[derive(Clone, Debug, Default)]
 pub struct Profile {
     /// Bottleneck bits per second; 0: unlimited.
@@ -63,7 +63,7 @@ pub struct LinkSpec {
     pub nat: NatKind,
     /// The socket's address.
     pub local: SocketAddr,
-    /// The NAT's public address (IPv4: the models are IPv4, as Go's Rebind assumed).
+    /// The NAT's public address (IPv4: the models are IPv4, as `Nat::rebind` assumes).
     pub public: Ipv4Addr,
     /// Ramp to 150 ms over 20 ms every 5 ± 2 s.
     pub spikes: bool,
@@ -99,7 +99,7 @@ impl Default for LinkSpec {
 }
 
 // Model constants. The hotel numbers come from the owner's 100 pings (CONTEXT.md); the rest from
-// §17.2 and [Testing 7, Testing 13]. See Go link.go for the derivation of the hotel shape.
+// [Testing 7, Testing 13].
 pub const COLD_IDLE: Dur = 11 * SEC;
 pub const COLD_DELAY: Dur = 260 * MS;
 pub const SPIKE_EVERY: Dur = 5 * SEC;
@@ -113,7 +113,7 @@ pub const SHORT_EVERY_MIN: Dur = 2 * SEC;
 pub const SHORT_EVERY_MAX: Dur = 5 * SEC;
 /// Hotel jitter: Poisson delay episodes per direction at this rate per second, rising over 20 ms
 /// to a level uniform in HOTEL_MIN–HOTEL_MAX, held HOTEL_HOLD_MIN–HOTEL_HOLD_MAX, draining at
-/// slope −1 (notes/netsim.md 1).
+/// slope −1.
 pub const HOTEL_RATE: f64 = 0.036;
 pub const HOTEL_MIN: Dur = 150 * MS;
 pub const HOTEL_MAX: Dur = 350 * MS;
@@ -130,7 +130,7 @@ pub const IP_UDP: usize = 28;
 /// Tailscale's per-packet overhead on the default link, headers included.
 pub const TS_OVER: usize = 32 + IP_UDP;
 
-/// A link: index into the world's links (Go *Link).
+/// A link: index into the world's links.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LinkId(pub usize);
 
@@ -141,7 +141,7 @@ pub enum Side {
     Down,
 }
 
-/// One direction of one link (Go *Dir; the Recorder keys its queues by it).
+/// One direction of one link (the Recorder keys its queues by it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DirId {
     pub link: LinkId,
@@ -160,7 +160,7 @@ impl LinkId {
     }
 }
 
-/// One interface of a device and its path to the internet (Go Link).
+/// One interface of a device and its path to the internet.
 pub struct Link {
     pub spec: LinkSpec,
     /// 1–255 within the device: its index in the device's links + 1.
@@ -176,14 +176,14 @@ pub struct Link {
     pub down: Dir,
     /// Radio-wide trains: spikes, AWDL, Starlink.
     pub(crate) bumps: Vec<Bumps>,
-    /// Last departure on either direction, for cold radio (Go used).
+    /// Last departure on either direction, for cold radio.
     pub(crate) used: Dur,
-    /// A STUN request is pending since; None: none (Go −1).
+    /// A STUN request is pending since; None: none.
     pub(crate) stun_at: Option<Dur>,
 }
 
 impl Link {
-    /// Every wire byte offered to the link, both directions, STUN included (Go Bytes).
+    /// Every wire byte offered to the link, both directions, STUN included.
     pub fn bytes(&self) -> i64 {
         self.up.bytes + self.down.bytes
     }
@@ -213,8 +213,7 @@ impl Link {
 }
 
 /// One direction of a link: a bottleneck feeding a FIFO, then loss, delay and jitter that never
-/// reorder (Go Dir). The Go back-pointer to the link is the [`DirId`] the World methods take;
-/// Go's unused tbase and tperiod are dropped.
+/// reorder. It holds no pointer back to its link: the World methods take its [`DirId`] instead.
 pub struct Dir {
     pub p: Profile,
     /// Blackholed.
@@ -243,12 +242,12 @@ pub struct Dir {
     pub(crate) busy: bool,
     /// Gilbert–Elliott state.
     pub(crate) bad: bool,
-    /// Newest arrival: the FIFO rule (Go initial −1).
+    /// Newest arrival: the FIFO rule.
     pub(crate) last: Dur,
-    /// Trace position (Go topp, left).
+    /// Trace position.
     pub(crate) tpos: TracePos,
-    /// Packets past the bottleneck, in arrival order; the first is in the event heap (see
-    /// `Task::Arrive`). New in Rust: Go put every one in its heap.
+    /// Packets past the bottleneck, in arrival order; only the first is in the event heap (see
+    /// `Task::Arrive`), so the heap holds one entry per direction, not one per packet in flight.
     pub(crate) flight: VecDeque<Flight>,
 }
 
@@ -261,7 +260,7 @@ pub(crate) struct Flight {
     pub(crate) p: Pkt,
 }
 
-/// A queued packet: n wire bytes in k fragments, and where it goes on arrival (Go qent).
+/// A queued packet: n wire bytes in k fragments, and where it goes on arrival.
 pub(crate) struct QEnt {
     pub(crate) p: Pkt,
     pub(crate) n: usize,
@@ -269,8 +268,8 @@ pub(crate) struct QEnt {
     pub(crate) then: Then,
 }
 
-/// What happens to a packet when its direction delivers it (Go's `then func(*pkt)`). The two
-/// routing continuations are variants so the per-packet path allocates no closure.
+/// What happens to a packet when its direction delivers it. The two routing continuations are
+/// variants so the per-packet path allocates no closure.
 pub enum Then {
     /// It left link `from` through its NAT with public source `src`, addressed to `to`:
     /// [`World::arrive`].
@@ -285,9 +284,9 @@ pub enum Then {
 pub type ThenFn = Box<dyn FnOnce(&mut World, Pkt)>;
 
 impl Dir {
-    /// A direction with profile p drawing from r (Go newDir): seeds the jitter, sets Slot to 1 ms
-    /// if zero, depth = max(burst, 3,000), full bucket, the drop-tail limit from rate × buffer, and
-    /// the hotel train (its own sub-Rng drawn from r) when p.hotel.
+    /// A direction with profile p drawing from r: seeds the jitter, sets Slot to 1 ms if zero,
+    /// depth = max(burst, 3,000), full bucket, the drop-tail limit from rate × buffer, and the
+    /// hotel train (its own sub-Rng drawn from r) when p.hotel.
     pub(crate) fn new(mut p: Profile, mut r: Rng) -> Dir {
         let seed = r.u64();
         if p.slot == 0 {
@@ -386,7 +385,7 @@ fn jitter_of(dir: &mut Dir, bumps: &mut [Bumps], t: Dur) -> Dur {
 }
 
 impl World {
-    /// Changes d's bottleneck rate from now; packets already queued keep their times (Go SetRate).
+    /// Changes d's bottleneck rate from now; packets already queued keep their times.
     pub fn set_rate(&mut self, d: DirId, bps: f64) {
         let now = self.now;
         let dir = &mut self[d];
@@ -394,9 +393,9 @@ impl World {
         dir.p.rate = bps;
     }
 
-    /// Offers p (n wire bytes in k fragments) to d; then runs when it arrives (Go Dir.send).
-    /// Counts bytes and packets; a hole or a fragmented packet with frag_drop drops it; unlimited
-    /// departs now; a policer drops above rate; otherwise drop-tail queue, served in order.
+    /// Offers p (n wire bytes in k fragments) to d; then runs when it arrives. Counts bytes and
+    /// packets; a hole or a fragmented packet with frag_drop drops it; unlimited departs now; a
+    /// policer drops above rate; otherwise drop-tail queue, served in order.
     pub(crate) fn dir_send(&mut self, d: DirId, p: Pkt, n: usize, k: usize, then: Then) {
         let now = self.now;
         let dir = &mut self[d];
@@ -433,8 +432,8 @@ impl World {
         }
     }
 
-    /// Schedules the head of d's queue to leave when the bottleneck lets it (Go serve): a
-    /// `Task::Serve` that pops it, departs it and serves the next.
+    /// Schedules the head of d's queue to leave when the bottleneck lets it: a `Task::Serve` that
+    /// pops it, departs it and serves the next.
     pub(crate) fn serve(&mut self, d: DirId) {
         let now = self.now;
         let dir = &mut self[d];
@@ -446,8 +445,8 @@ impl World {
             let mut t = now;
             let n = n as f64;
             if dir.tok < n {
-                // A rate set to 0 means unlimited: the queue goes at once. Go divided by zero
-                // here, and amd64 turns the +Inf wait into a time in the past.
+                // A rate set to 0 means unlimited: the queue goes at once. Divided by zero, the
+                // wait would be +Inf, which saturates to `Dur::MAX` and overflows `t`.
                 if dir.p.rate > 0.0 {
                     t += ((n - dir.tok) / (dir.p.rate / 8.0) * 1e9) as Dur;
                 }
@@ -460,9 +459,9 @@ impl World {
         self.push(t, Task::Serve(d));
     }
 
-    /// The head of d's queue leaves the bottleneck now: the event [`World::serve`] scheduled (Go's
-    /// closure in serve). Only this event pops the queue, so its head is the packet serve saw, and
-    /// the clock stands at the time serve chose.
+    /// The head of d's queue leaves the bottleneck now: the event [`World::serve`] scheduled. Only
+    /// this event pops the queue, so its head is the packet serve saw, and the clock stands at the
+    /// time serve chose.
     pub(crate) fn dir_leave(&mut self, d: DirId) {
         let now = self.now;
         let dir = &mut self[d];
@@ -478,7 +477,7 @@ impl World {
 
     /// Applies loss, delay, jitter, cold radio and the FIFO rule to a packet leaving d's
     /// bottleneck at t, and queues its arrival in d's flight, as an event of its own (a
-    /// `Task::Arrive` once it is first) (Go depart).
+    /// `Task::Arrive` once it is first).
     pub(crate) fn depart(&mut self, d: DirId, e: QEnt, t: Dur) {
         let Link { up, down, bumps, spec, used, .. } = &mut self.links[d.link.0];
         let dir = match d.side {
@@ -500,7 +499,7 @@ impl World {
         }
         at = at.max(dir.last);
         dir.last = at;
-        // The time and number push would give it (Go's At), so events keep their order.
+        // The time and number push would give it, so events keep their order.
         let at = at.max(self.now);
         self.seq += 1;
         let seq = self.seq;
@@ -533,15 +532,15 @@ impl World {
     }
 
     /// The extra delay of a packet leaving d at t: a function of time, not of the packet, so the
-    /// frame-time criteria replay the same draws (§17.3): slot jitter + the largest bump (d's
-    /// hotel train, the link's radio trains). Mutable because trains grow lazily (Go jitter).
+    /// frame-time criteria replay the same draws: slot jitter + the largest bump (d's hotel train,
+    /// the link's radio trains). Mutable because trains grow lazily.
     pub fn jitter(&mut self, d: DirId, t: Dur) -> Dur {
         let (dir, bumps) = self.links[d.link.0].dir_bumps(d.side);
         jitter_of(dir, bumps, t)
     }
 
-    /// The ground-truth one-way delay of a small packet sent on d now (§17.3): queue, delay,
-    /// jitter and the FIFO rule (Go OWD).
+    /// The ground-truth one-way delay of a small packet sent on d now: queue, delay, jitter and
+    /// the FIFO rule.
     pub fn owd(&mut self, d: DirId) -> Dur {
         let now = self.now;
         let (dir, bumps) = self.links[d.link.0].dir_bumps(d.side);
@@ -549,9 +548,9 @@ impl World {
         dir.last.max(dep + dir.p.delay + jitter_of(dir, bumps, dep)) - now
     }
 
-    /// When k packets of n wire bytes, the first sent at t0, would all arrive on d alone (§17.3):
-    /// packet i departs at t0 + i·n·8 ÷ rate and arrives at max(previous arrival, departure +
-    /// delay + jitter(departure)) (Go FrameTime).
+    /// When k packets of n wire bytes, the first sent at t0, would all arrive on d alone: packet i
+    /// departs at t0 + i·n·8 ÷ rate and arrives at max(previous arrival, departure + delay +
+    /// jitter(departure)).
     pub fn frame_time(&mut self, d: DirId, t0: Dur, n: usize, k: usize) -> Dur {
         let (dir, bumps) = self.links[d.link.0].dir_bumps(d.side);
         let r = dir.rate();
@@ -566,7 +565,7 @@ impl World {
         arr
     }
 
-    /// The ground-truth round trip of the fastest client link now; 60 ms with no link (Go RTT).
+    /// The ground-truth round trip of the fastest client link now; 60 ms with no link.
     pub fn rtt(&mut self) -> Dur {
         let mut best = Dur::MAX;
         for i in 0..self[DevId::Client].links.len() {
@@ -607,7 +606,7 @@ impl IndexMut<DirId> for World {
 // Delay bumps
 
 /// One delay episode: rises linearly to peak over rise, holds it for hold, then falls at slope
-/// −1, so packets sent while it drains arrive together when it ends, as from a stall (Go bump).
+/// −1, so packets sent while it drains arrive together when it ends, as from a stall.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Bump {
     pub(crate) start: Dur,
@@ -636,8 +635,8 @@ impl Bump {
     }
 }
 
-/// What makes a train's next bump after `prev` (Go's gen closures). Each random train owns its
-/// own sub-Rng (Go shared one per link or direction).
+/// What makes a train's next bump after `prev`. Each random train owns its own sub-Rng, so its
+/// bumps do not depend on when the other trains are drawn.
 #[derive(Clone, Debug)]
 pub(crate) enum Gen {
     /// Exp(HOTEL_RATE) gaps, peak uniform HOTEL_MIN–HOTEL_MAX, hold HOTEL_HOLD_MIN–HOTEL_HOLD_MAX.
@@ -653,7 +652,7 @@ pub(crate) enum Gen {
 }
 
 /// A train of bumps from a generator, made lazily in time order so a query for any time sees
-/// the same train (Go bumps).
+/// the same train.
 #[derive(Clone, Debug)]
 pub(crate) struct Bumps {
     pub(crate) make: Gen,
@@ -666,7 +665,7 @@ impl Bumps {
         Bumps { make, list: VecDeque::new(), upto: 0 }
     }
 
-    /// The train's next bump after prev (Go gen(prev)), drawing in Go's order.
+    /// The train's next bump after prev.
     pub(crate) fn next(&mut self, prev: Dur) -> Bump {
         match &mut self.make {
             Gen::Hotel(r) => {
@@ -744,7 +743,7 @@ pub(crate) fn starlink_train(peak: Dur) -> Bumps {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    //! Go models_test.go's link tests. Helpers: `test_link` (Go testLink) and `drive` (Go drive).
+    //! The link models' tests. Helpers: `test_link` and `drive`.
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -754,7 +753,7 @@ pub(crate) mod tests {
     use crate::fake::{Evil, fake_maker};
     use crate::sim::{NS, US, fmt_dur};
 
-    /// A world with one client link whose two directions use p (Go testLink).
+    /// A world with one client link whose two directions use p.
     pub(crate) fn test_link(p: Profile, s: LinkSpec) -> (World, LinkId) {
         let mut w = World::new(1, fake_maker(false, Evil::None));
         let s = LinkSpec { up: p.clone(), down: p, local: ADDR_HOTEL, public: PUB_HOTEL, ..s };
@@ -763,7 +762,7 @@ pub(crate) mod tests {
     }
 
     /// Offers n-byte packets to d every gap until until and returns, per packet, when it was sent
-    /// and when it arrived (None: dropped) (Go drive).
+    /// and when it arrived (None: dropped).
     pub(crate) fn drive(w: &mut World, d: DirId, n: usize, gap: Dur, until: Dur) -> Vec<(Dur, Option<Dur>)> {
         let r = Rc::new(RefCell::new(Vec::new()));
         let rr = r.clone();
@@ -794,7 +793,7 @@ pub(crate) mod tests {
         assert!(errs.is_empty(), "{}", errs.join("\n"));
     }
 
-    /// Go TestShaper: 38 Mbps ± 2%, the 64 KB burst passes unqueued, the 180 ms buffer bounds delay.
+    /// The shaper: 38 Mbps ± 2%, the 64 KB burst passes unqueued, the 180 ms buffer bounds delay.
     #[test]
     fn shaper() {
         let p = Profile { jitter: 0, ..hotel_clean() };
@@ -836,7 +835,7 @@ pub(crate) mod tests {
         report(&errs);
     }
 
-    /// Go TestPolicer: about 10 Mbps passes, nothing queued.
+    /// The policer: about 10 Mbps passes, nothing queued.
     #[test]
     fn policer() {
         let p = Profile { rate: 10e6, burst: 16 << 10, police: true, delay: 30 * MS, ..Profile::default() };
@@ -855,7 +854,7 @@ pub(crate) mod tests {
         assert!((9e6..=10.5e6).contains(&rate), "policer passed {:.1} Mbps, want about 10", rate / 1e6);
     }
 
-    /// Go TestJitterNeverReorders: hotel jitter, spikes and AWDL never reorder; some packet > 130 ms.
+    /// Hotel jitter, spikes and AWDL never reorder; some packet > 130 ms.
     #[test]
     fn jitter_never_reorders() {
         let s = LinkSpec { spikes: true, awdl: true, ..LinkSpec::default() };
@@ -875,7 +874,7 @@ pub(crate) mod tests {
         assert!(slow > 0, "no packet above 130 ms in a minute of hotel jitter, spikes and AWDL gaps");
     }
 
-    /// Go TestHotelJitter: RTT excess mean 9–22 ms, deviation 45–75 ms, max < 2 × HOTEL_MAX + 4 ms.
+    /// The hotel's jitter: RTT excess mean 9–22 ms, deviation 45–75 ms, max < 2 × HOTEL_MAX + 4 ms.
     /// It checks the replayed distribution against the owner's pings: a ping's RTT excess over the
     /// idle base is the up direction's jitter plus the down direction's.
     #[test]
@@ -901,7 +900,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Go TestSpikesAndStarlink: 100–145 spikes in 10 minutes; Starlink at :12, :27, :42, :57.
+    /// 100–145 spikes in 10 minutes; Starlink at :12, :27, :42, :57.
     #[test]
     fn spikes_and_starlink() {
         let s = LinkSpec { spikes: true, ..LinkSpec::default() };
@@ -930,7 +929,7 @@ pub(crate) mod tests {
         report(&errs);
     }
 
-    /// Go TestFragments: frags(1471, 1280) = (2, 1491); frag_drop passes only the small packet.
+    /// frags(1471, 1280) = (2, 1491); frag_drop passes only the small packet.
     #[test]
     fn fragments() {
         let mut errs = Vec::new();
@@ -955,7 +954,7 @@ pub(crate) mod tests {
         report(&errs);
     }
 
-    /// Go TestColdRadio: 300 ms cold, 40 ms warm, 300 ms after 11 s idle.
+    /// Cold radio: 300 ms cold, 40 ms warm, 300 ms after 11 s idle.
     #[test]
     fn cold_radio() {
         let p = Profile { delay: 40 * MS, ..Profile::default() };
@@ -973,7 +972,7 @@ pub(crate) mod tests {
         assert_eq!(d.take(), [300 * MS, 40 * MS, 300 * MS], "want 300 ms cold, 40 ms warm, 300 ms after 11 s idle");
     }
 
-    /// Go TestGilbertElliott: loss 0.01/0.26 ± 0.5%, mean burst 4 ± 0.5.
+    /// Gilbert–Elliott: loss 0.01/0.26 ± 0.5%, mean burst 4 ± 0.5.
     #[test]
     fn gilbert_elliott() {
         let p = Profile { ge_bad: 0.01, ge_good: 0.25, ..Profile::default() };
@@ -1001,8 +1000,8 @@ pub(crate) mod tests {
         report(&errs);
     }
 
-    /// Not in Go: the token bucket's times, set_rate (to a lower rate, then to 0, which lets the
-    /// queue go at once), a hole, and the ground truth (OWD, queue, frame time, RTT) of §17.3.
+    /// The token bucket's times, set_rate (to a lower rate, then to 0, which lets the queue go at
+    /// once), a hole, and the ground truth (OWD, queue, frame time, RTT).
     #[test]
     fn bucket_and_ground_truth() {
         let mut w = World::new(1, fake_maker(false, Evil::None));
@@ -1050,10 +1049,10 @@ pub(crate) mod tests {
         assert_eq!(w[l].bytes(), 17_000);
     }
 
-    /// Not in Go: a direction's packets in flight wait in its own queue with only the first in the
-    /// heap, and still run in (time, sequence) order among other events: an event queued for the
-    /// same time before a packet departed runs before its arrival, one queued after runs after,
-    /// and a continuation may send on its own direction.
+    /// A direction's packets in flight wait in its own queue with only the first in the heap, and
+    /// still run in (time, sequence) order among other events: an event queued for the same time
+    /// before a packet departed runs before its arrival, one queued after runs after, and a
+    /// continuation may send on its own direction.
     #[test]
     fn arrivals_keep_event_order() {
         let p = Profile { delay: 10 * MS, ..Profile::default() };
@@ -1082,7 +1081,7 @@ pub(crate) mod tests {
         assert_eq!(w.events(), 5);
     }
 
-    /// Not in Go: a drop-tail queue holds `buffer` at the rate, counted as queue drops.
+    /// A drop-tail queue holds `buffer` at the rate, counted as queue drops.
     #[test]
     fn drop_tail_limit() {
         let p = Profile { rate: 8e6, burst: 3000, buffer: 10 * MS, ..Profile::default() };

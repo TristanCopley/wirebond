@@ -1,42 +1,42 @@
-//! The scenario-building API the acceptance tests, the swarm, the fuzzer and the self-tests use
-//! (Go's env_test.go and the helpers of accept_test.go and accept2_test.go): the owner's topology,
-//! the link profiles of §17.3, the seed sets and their environment variables, the criteria
-//! collector, the parallel seed runner, and small scenario helpers. Owner: N5.
+//! The scenario-building API the acceptance tests, the swarm, the fuzzer and the self-tests use:
+//! the owner's topology, the link profiles (§23.3's setting among them), the seed sets and their
+//! environment variables, the criteria collector, the parallel seed runner, and small scenario
+//! helpers.
 //!
-//! Environment variables (Go's flags):
-//! - `WIREBOND_LONG=1`: the nightly set, 20 seeds × 5 simulated minutes (Go -long);
-//! - `WIREBOND_SEED=N`: run only seed N (Go -seed=N);
-//! - `WIREBOND_FAKE=1`: drive the acceptance scenarios with the fake instead of core (Go -fake);
-//! - `WIREBOND_JOBS=N`: [`accept`] runs at most N scenario runs at once in one test process, and
-//!   [`par_runs`] (the swarm, the fuzzer) runs on N threads (default: the machine's available
-//!   parallelism; Go's -parallel bounded its parallel subtests);
+//! Environment variables:
+//! - `WIREBOND_LONG=1`: the nightly set, 20 seeds × 5 simulated minutes;
+//! - `WIREBOND_SEED=N`: run only seed N;
+//! - `WIREBOND_FAKE=1`: drive the acceptance scenarios with the fake instead of core;
+//! - `WIREBOND_JOBS=N`: [`accept`] and [`par_runs`] (the swarm, the fuzzer and the smaller suites)
+//!   run at most N scenario runs at once in one test process, between them (default: the
+//!   machine's available parallelism);
 //! - `WIREBOND_HASHES=1`: [`accept`] and the swarm print every run's event-log hash, passed or
 //!   failed, as a `hash <run>: <hash>` line ([`show_hash`]), to compare two builds run by run (with
 //!   `--nocapture`: the harness shows a passing test's output only then).
 //!
-//! Default: the PR set, seeds 1–3, 60 simulated seconds per scenario (§17.3).
+//! Default: the PR set, seeds 1–3, 60 simulated seconds per scenario.
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 
-use wirebond_core::{LaneStatus, MODE_PERFORMANCE, SessionStatus, TYPE_DATA};
+use wirebond_core::{LaneStatus, MODE_BANDWIDTH, MODE_PERFORMANCE, SessionStatus, TYPE_DATA};
 
 use crate::apps::Moonlight;
 use crate::fake::{Evil, fake_maker};
 use crate::link::{LinkId, LinkSpec, Profile};
-use crate::metrics::{Recorder, pct, record};
+use crate::metrics::{Recorder, record};
 use crate::nat::NatKind;
 use crate::node::DevId;
-use crate::sim::{Dur, HookKind, MIN, MS, Maker, SEC, World, core_maker};
+use crate::sim::{Dur, MIN, MS, Maker, SEC, World, core_maker};
 
-/// Every stream starts at 1 s (Go start).
+/// Every stream starts at 1 s.
 pub const START: Dur = SEC;
 /// Criteria are measured from 5 s, when lanes have settled, to a second before the end, so frames
-/// in flight are not counted (Go warm).
+/// in flight are not counted.
 pub const WARM: Dur = 5 * SEC;
 
 // ---------------------------------------------------------------------------------------------
@@ -46,17 +46,17 @@ fn flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
-/// WIREBOND_LONG: the nightly set (Go -long).
+/// WIREBOND_LONG: the nightly set.
 pub fn long() -> bool {
     flag("WIREBOND_LONG")
 }
 
-/// WIREBOND_SEED: run only this seed (Go -seed); None when unset or 0.
+/// WIREBOND_SEED: run only this seed; None when unset or 0.
 pub fn seed_flag() -> Option<u64> {
     std::env::var("WIREBOND_SEED").ok().and_then(|v| v.parse().ok()).filter(|&s| s != 0)
 }
 
-/// WIREBOND_FAKE: drive the acceptance scenarios with the fake (Go -fake).
+/// WIREBOND_FAKE: drive the acceptance scenarios with the fake.
 pub fn fake_flag() -> bool {
     flag("WIREBOND_FAKE")
 }
@@ -76,7 +76,7 @@ pub fn show_hash(run: &str, w: &mut World) {
 }
 
 /// The PR seed set (1–3), the nightly set (1–20) with WIREBOND_LONG, or the one WIREBOND_SEED
-/// names (Go seeds).
+/// names.
 pub fn seeds() -> Vec<u64> {
     match seed_flag() {
         Some(s) => vec![s],
@@ -84,18 +84,21 @@ pub fn seeds() -> Vec<u64> {
     }
 }
 
-/// The simulated time per scenario: 60 s for the PR set, 5 minutes with WIREBOND_LONG (Go simTime).
+/// The simulated time per scenario: 60 s for the PR set, 5 minutes with WIREBOND_LONG.
 pub fn sim_time() -> Dur {
     if long() { 5 * MIN } else { 60 * SEC }
 }
 
-/// The one command that reproduces a failure of `test` in tests/`target`.rs on seed (Go repro).
-pub fn repro(target: &str, test: &str, seed: u64) -> String {
+/// The one command that reproduces a failure of `test` in the sim test binary's module `module`
+/// (tests/sim/`module`.rs) on seed.
+pub fn repro(module: &str, test: &str, seed: u64) -> String {
     let long = if long() { "WIREBOND_LONG=1 " } else { "" };
-    format!("{long}WIREBOND_SEED={seed} cargo test -p wirebond-netsim --test {target} -- --exact {test}")
+    format!(
+        "{long}WIREBOND_SEED={seed} cargo test -p wirebond-netsim --profile sim --test sim -- --exact {module}::{test}"
+    )
 }
 
-/// Real core Sessions, or the fake in direct mode with WIREBOND_FAKE (Go maker).
+/// Real core Sessions, or the fake in direct mode with WIREBOND_FAKE.
 pub fn maker() -> Maker {
     if fake_flag() { fake_maker(true, Evil::None) } else { core_maker() }
 }
@@ -116,8 +119,8 @@ pub const fn sock(a: [u8; 4], port: u16) -> SocketAddr {
     SocketAddr::V4(std::net::SocketAddrV4::new(Ipv4Addr::new(a[0], a[1], a[2], a[3]), port))
 }
 
-/// §17.3's Hotel-clean: the shaper (38 Mbps, 64 KB burst, 180 ms buffer), 30 ms one way, jitter
-/// uniform 0–2 ms.
+/// Hotel-clean: the shaper (38 Mbps, 64 KB burst, 180 ms buffer), 30 ms one way (§23.3's hotel),
+/// jitter uniform 0–2 ms.
 pub fn hotel_clean() -> Profile {
     Profile { rate: 38e6, burst: 64 << 10, buffer: 180 * MS, delay: 30 * MS, jitter: 2 * MS, ..Profile::default() }
 }
@@ -127,7 +130,7 @@ pub fn hotel() -> Profile {
     Profile { hotel: true, ..hotel_clean() }
 }
 
-/// §17.3's Cell: 80 Mbps, 45 ms ± 10 ms (35 ms + 0–20 ms redrawn every 10 ms), 0.5% loss.
+/// Cell: 80 Mbps, 45 ms ± 10 ms (35 ms + 0–20 ms redrawn every 10 ms), 0.5% loss.
 pub fn cell() -> Profile {
     Profile {
         rate: 80e6,
@@ -139,41 +142,6 @@ pub fn cell() -> Profile {
         loss: 0.005,
         ..Profile::default()
     }
-}
-
-/// The system harness's netem scenario (tests/system/run.sh, `shaped` with 30 ms), as tc builds
-/// it: the hotel and the cell each have their qdiscs on the client's interface and on the
-/// router's side of it, so both directions; the mesh's netem is on each device's tailscale0, so
-/// both directions too; the server's link and the router have none, and no NAT.
-///
-/// The hotel (run.sh's `shape_link`): `tbf rate 38mbit burst 64kb latency 180ms`, `netem delay
-/// 30ms` its child, and under that a bfifo of the size tbf gives its own queue, 38 Mbit/s × 180
-/// ms plus the burst (920,536 bytes): a packet waits out the 30 ms, then waits in the bfifo for
-/// tbf's tokens, and one that would overflow it is dropped. That is netsim's shaper with tbf's
-/// 180 ms buffer and the 30 ms in front: netsim delays a packet after its shaper, and a constant
-/// delay ahead of a FIFO shaper delays its output and its drops by as much. No jitter.
-pub fn hotel_netem() -> Profile {
-    Profile { rate: 38e6, burst: 64 << 10, buffer: 180 * MS, delay: 30 * MS, ..Profile::default() }
-}
-
-/// The netem scenario's cell: `netem delay 45ms rate 80mbit loss 0.5%`. Netem's rate is a plain
-/// rate, so the bucket is netsim's least (two packets); its 1,000-packet limit counts the packets
-/// still in their 45 ms, 306 of 1,471 bytes at 80 Mbit/s, which leaves about 100 ms of queue. No
-/// jitter, and no cold radio (the scenario clears the link's `cold`).
-pub fn cell_netem() -> Profile {
-    Profile { rate: 80e6, buffer: 100 * MS, delay: 45 * MS, loss: 0.005, ..Profile::default() }
-}
-
-/// The netem scenario's Tailscale lane: `netem delay 31ms` on its own interface, no rate
-/// ([`World::mesh_path`]).
-pub fn mesh_netem() -> Profile {
-    Profile { delay: 31 * MS, ..Profile::default() }
-}
-
-/// The netem scenario's options: [`hotel_netem`], [`cell_netem`], no NAT, `performance`. The scenario
-/// also gives the Tailscale lane [`mesh_netem`] and clears the cell's cold radio.
-pub fn netem() -> Opts {
-    Opts { hotel: hotel_netem(), cell: cell_netem(), client_nat: NatKind::OneToOne, ..defaults() }
 }
 
 /// SPEC §23.3's hotel Wi-Fi: 38 Mbit/s with a 64 KB burst and a 180 ms buffer, 30 ms one way.
@@ -192,8 +160,8 @@ pub fn spec(mode: &'static str) -> Opts {
     Opts { hotel: spec_hotel(), cell: spec_phone(), mode, ..defaults() }
 }
 
-/// The owner's topology (Go opts): the Mac's hotel Wi-Fi (default route) and iPhone (metered),
-/// xanth's Ethernet behind the home router with or without the UDP 7849 forward.
+/// The owner's topology: the Mac's hotel Wi-Fi (default route) and iPhone (metered), xanth's
+/// Ethernet behind the home router with or without the UDP 7849 forward.
 #[derive(Clone, Debug)]
 pub struct Opts {
     pub hotel: Profile,
@@ -208,11 +176,11 @@ pub struct Opts {
     pub client_nat: NatKind,
     pub home_nat: NatKind,
     pub mode: &'static str,
-    /// More client links (A4's four-link variant).
+    /// More client links (a four-link setting, with two phones).
     pub extra: Vec<LinkSpec>,
 }
 
-/// Hotel-clean and Cell behind easy NATs, xanth forwarding UDP 7849, `performance` (Go defaults).
+/// Hotel-clean and Cell behind easy NATs, xanth forwarding UDP 7849, `performance`.
 pub fn defaults() -> Opts {
     Opts {
         hotel: hotel_clean(),
@@ -229,7 +197,7 @@ pub fn defaults() -> Opts {
     }
 }
 
-/// One scenario's world and the links the criteria name (Go env); the Recorder is `w.rec`.
+/// One scenario's world and the links the criteria name; the Recorder is `w.rec`.
 pub struct Env {
     pub w: World,
     pub hotel: LinkId,
@@ -239,7 +207,7 @@ pub struct Env {
 }
 
 impl Env {
-    /// The owner's topology from o on a new world for seed, with a Recorder (Go newEnv).
+    /// The owner's topology from o on a new world for seed, with a Recorder.
     pub fn new(seed: u64, mk: Maker, o: &Opts) -> Env {
         let mut w = World::new(seed, mk);
         let hotel = w.add_link(
@@ -286,13 +254,13 @@ impl Env {
         Env { w, hotel, cell, eth, seed }
     }
 
-    /// The Recorder (Go e.rec).
+    /// The Recorder.
     pub fn rec(&self) -> &Recorder {
         self.w.rec.as_ref().expect("Env::new starts a Recorder")
     }
 
-    /// Starts the world if it has not run yet and runs it to d (Go env.run); Err carries the
-    /// seed and the safety failure, for the caller to print with its reproduce command.
+    /// Starts the world if it has not run yet and runs it to d; Err carries the seed and the
+    /// safety failure, for the caller to print with its reproduce command.
     pub fn run(&mut self, d: Dur) -> Result<(), String> {
         if self.w.now() == 0 {
             self.w.start();
@@ -304,8 +272,7 @@ impl Env {
 // ---------------------------------------------------------------------------------------------
 // Criteria
 
-/// Collects pass criteria: each is reported with its measured value next to its threshold (Go
-/// check).
+/// Collects pass criteria: each is reported with its measured value next to its threshold.
 #[derive(Clone, Debug, Default)]
 pub struct Check {
     pub seed: u64,
@@ -318,7 +285,7 @@ impl Check {
         Check { seed, ..Check::default() }
     }
 
-    /// Records one criterion's line; a failed one also goes to `bad` (Go is).
+    /// Records one criterion's line; a failed one also goes to `bad`.
     pub fn is(&mut self, ok: bool, line: impl Into<String>) {
         let line = line.into();
         if !ok {
@@ -327,8 +294,7 @@ impl Check {
         self.all.push(line);
     }
 
-    /// Ok with every criterion's line, or Err listing the failed ones and the reproduce command
-    /// (Go done, which failed the test once).
+    /// Ok with every criterion's line, or Err listing the failed ones and the reproduce command.
     pub fn done(&self, repro: &str) -> Result<String, String> {
         if self.bad.is_empty() {
             Ok(format!("seed {}: {}", self.seed, self.all.join("; ")))
@@ -344,22 +310,21 @@ impl Check {
     }
 }
 
-/// A scenario's evaluation of its pass criteria, called after the run (Go's third result).
+/// A scenario's evaluation of its pass criteria, called after the run.
 pub type Eval = Box<dyn FnOnce(&mut Env, &mut Check)>;
 
-/// Runs sc on every seed of the set (Go accept): one scoped thread per run (the World is built,
-/// run and dropped on its thread, so sc must be Sync), each running the scenario to its `until`
-/// and evaluating its criteria. On seed 1, and on every seed with WIREBOND_LONG (§17.3 limits the
-/// check to seed 1 for the PR set only), the scenario runs a second time, beside the other runs,
-/// and the criterion that the two event-log hashes match is added. Prints every passing seed's
-/// criteria line, then panics once listing each failed seed (a safety failure, a panic, or its
-/// failed criteria) with [`repro`]`("accept", test, seed)`. `sc(seed, sim_time())` gives (env,
-/// until, eval).
+/// Runs sc on every seed of the set: one scoped thread per run (the World is built, run and
+/// dropped on its thread, so sc must be Sync), each running the scenario to its `until` and
+/// evaluating its criteria. On seed 1, and on every seed with WIREBOND_LONG, the scenario runs a
+/// second time, beside the other runs, and the criterion that the two event-log hashes match is
+/// added. Prints every passing seed's criteria line, then panics once listing each failed seed (a
+/// safety failure, a panic, or its failed criteria) with [`repro`]`("accept", test, seed)`.
+/// `sc(seed, sim_time())` gives (env, until, eval).
 ///
 /// At most WIREBOND_JOBS runs (default: the available parallelism) run at once in the whole test
-/// process, whatever number of tests the harness runs at a time; a run builds its World when it
-/// gets its turn, so its wall-clock limit (`World::wall`) times the run, not the wait. A panic in
-/// a run fails that seed only.
+/// process, whatever number of tests the harness runs at a time, [`par_runs`]' runs included; a
+/// run builds its World when it gets its turn, so its wall-clock limit (`World::wall`) times the
+/// run, not the wait. A panic in a run fails that seed only.
 pub fn accept<F>(test: &str, sc: F)
 where
     F: Fn(u64, Dur) -> (Env, Dur, Eval) + Sync,
@@ -391,8 +356,8 @@ struct Job {
     hash: bool,
 }
 
-/// The runs for a seed set: seed 1 twice for the PR set (§17.3), every seed twice for the nightly
-/// set; each second run right after its first.
+/// The runs for a seed set: seed 1 twice for the PR set, every seed twice for the nightly set;
+/// each second run right after its first.
 fn plan(seeds: &[u64], long: bool) -> Vec<Job> {
     let mut jobs = Vec::with_capacity(2 * seeds.len());
     for &seed in seeds {
@@ -489,13 +454,13 @@ fn jobs_flag() -> usize {
 const STACK: usize = 16 << 20;
 
 /// A counting semaphore over the runs of one process, so the tests the harness runs at once
-/// share the limit (as Go's -parallel bounded every parallel subtest of the binary).
+/// share the limit.
 struct Pool {
     busy: Mutex<usize>,
     freed: Condvar,
 }
 
-/// The pool every accept call shares.
+/// The pool every accept and par_runs call shares.
 static POOL: Pool = Pool::new();
 
 impl Pool {
@@ -555,19 +520,25 @@ fn par_map<T: Sync, R: Send>(
 }
 
 /// f over items on WIREBOND_JOBS scoped threads (default: one per CPU), each with a seed thread's
-/// stack, in items' order: the swarm's and the fuzzer's runner. A World is not Send: each is
-/// built, run and dropped inside f. A panic in f is passed on once every thread has finished.
+/// stack, in items' order: the swarm's and the fuzzer's runner. Each item takes its turn in the
+/// pool accept uses, so the tests the harness runs at once share one limit, and f, which builds
+/// its World, runs once it has the turn (the fuzzer's wall-clock limit times the run, not the
+/// wait). A World is not Send: each is built, run and dropped inside f. A panic in f is passed on
+/// once every thread has finished.
 pub fn par_runs<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let next = AtomicUsize::new(0);
     let out: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
     let (f, next, slots) = (&f, &next, &out);
+    let cap = jobs_flag();
     std::thread::scope(|s| {
-        for k in 0..jobs_flag().min(items.len()) {
+        for k in 0..cap.min(items.len()) {
             let work = move || {
                 loop {
+                    let turn = POOL.take(cap);
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(x) = items.get(i) else { break };
                     let r = f(x);
+                    drop(turn);
                     *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
                 }
             };
@@ -578,17 +549,29 @@ pub fn par_runs<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Ve
     out.into_iter().map(|m| m.into_inner().unwrap_or_else(PoisonError::into_inner).expect("every item ran")).collect()
 }
 
-/// max(n, n × d ÷ per): a count allowed "per 5 min" over a run of d (Go allow).
+/// Every seed of the set in both modes, performance first.
+pub fn seeds_in_both_modes() -> Vec<(u64, &'static str)> {
+    seeds().into_iter().flat_map(|s| [(s, MODE_PERFORMANCE), (s, MODE_BANDWIDTH)]).collect()
+}
+
+/// Runs run on every job with [`par_runs`] and panics once, listing what each failed run returned
+/// (None: it passed).
+pub fn each_run<T: Sync>(jobs: &[T], run: impl Fn(&T) -> Option<String> + Sync) {
+    let bad: Vec<String> = par_runs(jobs, run).into_iter().flatten().collect();
+    assert!(bad.is_empty(), "{} of {} runs failed:\n{}", bad.len(), jobs.len(), bad.join("\n"));
+}
+
+/// max(n, n × d ÷ per): a count allowed "per 5 min" over a run of d.
 pub fn allow(n: usize, per: Dur, d: Dur) -> usize {
     n.max((n as f64 * d as f64 / per as f64) as usize)
 }
 
-/// A bulk data packet: TYPE_DATA without the small bit (Go isBulk).
+/// A bulk data packet: TYPE_DATA without the small bit.
 pub fn is_bulk(b: &[u8]) -> bool {
     b.first() == Some(&TYPE_DATA)
 }
 
-/// Blackholes l from at for dur, in the chosen directions (Go hole).
+/// Blackholes l from at for dur, in the chosen directions.
 pub fn hole(w: &mut World, l: LinkId, at: Dur, dur: Dur, up: bool, down: bool) {
     w.at(at, move |w| {
         let k = &mut w[l];
@@ -606,120 +589,47 @@ pub fn hole(w: &mut World, l: LinkId, at: Dur, dur: Dur, up: bool, down: bool) {
     });
 }
 
-/// Stall detection (A1b): for each time the hotel's down direction stalls (its OWD rises 50 ms
-/// above its delay) while it carries bulk, how long until bulk enters another lane. Installs a
-/// hook and a 10 ms sampler from WARM; the returned function reports the median and the maximum
-/// (Go stalls).
-pub fn stalls(e: &mut Env) -> Box<dyn Fn() -> String> {
-    let st = Rc::new(RefCell::new(Stalls::default()));
-    let hotel = e.hotel;
-    let s = Rc::clone(&st);
-    e.w.hook(move |w, a| {
-        if a.kind == HookKind::Inbound && is_bulk(a.data) {
-            s.borrow_mut().bulk(w.now(), a.link == Some(hotel));
+/// The first time, sampled every period from `from`, at which cond holds; None until then. The
+/// sampler stops once it has seen it.
+pub fn first_when(
+    w: &mut World,
+    from: Dur,
+    period: Dur,
+    cond: impl Fn(&World) -> bool + 'static,
+) -> Rc<Cell<Option<Dur>>> {
+    let at = Rc::new(Cell::new(None));
+    let a = Rc::clone(&at);
+    w.every(from, period, move |w| {
+        if a.get().is_none() && cond(w) {
+            a.set(Some(w.now()));
         }
+        a.get().is_none()
     });
-    let s = Rc::clone(&st);
-    e.w.every(WARM, STALL_SAMPLE, move |w| {
-        let d = hotel.down();
-        let excess = w.owd(d) - w[d].p.delay;
-        s.borrow_mut().sample(w.now(), excess);
-        true
-    });
-    Box::new(move || st.borrow().report())
-}
-
-/// The hotel's down OWD this far above its propagation delay is a stall (Go's 50 ms).
-const STALL_RISE: Dur = 50 * MS;
-/// A rise is a stall of bulk only if bulk entered the hotel this recently.
-const STALL_RECENT: Dur = 20 * MS;
-/// How often stall detection samples the hotel's OWD.
-const STALL_SAMPLE: Dur = 10 * MS;
-
-/// Stall detection's state (Go stalls' locals): the onset of the stall in progress, when bulk
-/// last entered the hotel, whether the last sample was high, and each stall's time until bulk
-/// entered another lane.
-#[derive(Debug, Default)]
-struct Stalls {
-    onset: Option<Dur>,
-    last_hotel: Option<Dur>,
-    high: bool,
-    times: Vec<Dur>,
-}
-
-impl Stalls {
-    /// Bulk entered a client lane at now, the hotel's or another (the Tailscale lane included).
-    fn bulk(&mut self, now: Dur, on_hotel: bool) {
-        if on_hotel {
-            self.last_hotel = Some(now);
-        } else if let Some(t) = self.onset.take() {
-            self.times.push(now - t);
-        }
-    }
-
-    /// The hotel's down OWD was excess above its delay at now: a rise above STALL_RISE while it
-    /// carried bulk starts a stall.
-    fn sample(&mut self, now: Dur, excess: Dur) {
-        let high = excess > STALL_RISE;
-        if high && !self.high && self.onset.is_none() && self.last_hotel.is_some_and(|t| now - t < STALL_RECENT) {
-            self.onset = Some(now);
-        }
-        self.high = high;
-    }
-
-    fn report(&self) -> String {
-        if self.times.is_empty() {
-            return "no stall moved bulk".into();
-        }
-        format!(
-            "{} stalls moved bulk after a median {}, at most {}",
-            self.times.len(),
-            ms(pct(&self.times, 0.5)),
-            ms(pct(&self.times, 1.0))
-        )
-    }
-}
-
-/// The Recorder's index of client link l (Go laneIdx).
-pub fn lane_idx(w: &World, l: LinkId) -> i8 {
-    w[l].id as i8 - 1
+    at
 }
 
 /// Checks that some frame sent in [from, to) became decodable, so no frame criterion passes on a
-/// stream that never ran (Go decoded).
+/// stream that never ran.
 pub fn decoded(c: &mut Check, m: &Moonlight, from: Dur, to: Dur) {
     let sent = m.frames.iter().filter(|f| f.sent >= from && f.sent < to);
     let (n, done) = sent.fold((0, 0), |(n, d), f| (n + 1, d + usize::from(f.done > 0)));
     c.is(done > 0, format!("{done} of {n} frames decoded (> 0)"));
 }
 
-/// Whether a Snapshot has an up direct lane on client link id (Go laneUp).
+/// Whether a Snapshot has an up direct lane on client link id.
 pub fn lane_up(s: &SessionStatus, id: u8) -> bool {
     s.lanes.iter().any(|l: &LaneStatus| l.id != 0 && (l.id >> 8) as u8 == id && l.state == "up")
 }
 
-/// The times in sorted ts before t (Go prefix).
-pub fn prefix(ts: &[Dur], t: Dur) -> &[Dur] {
-    &ts[..ts.partition_point(|&x| x < t)]
-}
-
-/// t − base, or "never" (Go after, which took −1 for never).
-pub fn after(t: Option<Dur>, base: Dur) -> String {
-    match t {
-        Some(t) => ms(t - base),
-        None => "never".into(),
-    }
-}
-
-/// A duration in milliseconds, "+Inf" for the empty-sample marker (≥ 2^62) (Go ms).
+/// A duration in milliseconds, "+Inf" for the empty-sample marker (≥ 2^62).
 pub fn ms(d: Dur) -> String {
     if d >= 1 << 62 { "+Inf".into() } else { format!("{:.1} ms", d as f64 / 1e6) }
 }
 
 #[cfg(test)]
 mod tests {
-    //! Go's env_test.go and the accept helpers had no tests of their own: these cover the parts
-    //! that need no world to run (the engine, the stand-in and the metrics are other modules').
+    //! The parts of the scenario API that need no world to run (the engine, the stand-in and the
+    //! metrics are other modules').
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -767,20 +677,14 @@ mod tests {
     }
 
     #[test]
-    fn formats_and_prefix() {
+    fn formats_and_repro() {
         assert_eq!(ms(12_345_678), "12.3 ms");
         assert_eq!(ms(-2 * MS), "-2.0 ms");
         assert_eq!(ms(Dur::MAX), "+Inf");
         assert_eq!(ms(1 << 62), "+Inf");
-        assert_eq!(after(None, SEC), "never");
-        assert_eq!(after(Some(1500 * MS), SEC), "500.0 ms");
-        assert_eq!(prefix(&[1, 2, 2, 5], 2), &[1]);
-        assert_eq!(prefix(&[1, 2, 2, 5], 6), &[1, 2, 2, 5]);
-        assert!(prefix(&[], 6).is_empty());
-        assert!(
-            repro("accept", "a9_paused", 3)
-                .ends_with("WIREBOND_SEED=3 cargo test -p wirebond-netsim --test accept -- --exact a9_paused")
-        );
+        assert!(repro("accept", "a9_paused", 3).ends_with(
+            "WIREBOND_SEED=3 cargo test -p wirebond-netsim --profile sim --test sim -- --exact accept::a9_paused"
+        ));
         assert!(is_bulk(&[TYPE_DATA, 0]) && !is_bulk(&[TYPE_DATA | 0x80]) && !is_bulk(&[]));
     }
 
@@ -797,36 +701,6 @@ mod tests {
         assert!(!lane_up(&s, 1), "the Tailscale lane and a punching lane are not up");
         assert!(lane_up(&s, 2));
         assert!(!lane_up(&s, 3));
-    }
-
-    #[test]
-    fn stall_detection_times_each_stall_of_bulk() {
-        let mut s = Stalls::default();
-        s.sample(10 * MS, 60 * MS);
-        assert_eq!(s.onset, None, "a rise while the hotel carried no bulk is no stall");
-        s.sample(20 * MS, 0);
-        s.bulk(25 * MS, true);
-        s.sample(30 * MS, 60 * MS);
-        assert_eq!(s.onset, Some(30 * MS), "a rise within 20 ms of bulk on the hotel");
-        s.sample(40 * MS, 70 * MS);
-        s.bulk(45 * MS, true);
-        assert_eq!(s.onset, Some(30 * MS), "bulk on the hotel does not end it");
-        s.bulk(80 * MS, false);
-        assert_eq!(s.times, [50 * MS], "bulk entered another lane 50 ms after the onset");
-        s.bulk(85 * MS, true);
-        s.sample(90 * MS, 70 * MS);
-        assert_eq!(s.onset, None, "still high: a new stall needs a new rise");
-        s.sample(100 * MS, 0);
-        s.bulk(105 * MS, true);
-        s.sample(130 * MS, 55 * MS);
-        assert_eq!(s.onset, None, "bulk last entered the hotel 25 ms before the rise");
-        s.sample(140 * MS, 0);
-        s.bulk(145 * MS, true);
-        s.sample(150 * MS, 51 * MS);
-        s.bulk(340 * MS, false);
-        s.bulk(350 * MS, false);
-        assert_eq!(s.times, [50 * MS, 190 * MS]);
-        assert_eq!(Stalls::default().report(), "no stall moved bulk");
     }
 
     fn passed(seed: u64, hash: Option<&str>) -> Outcome {

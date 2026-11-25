@@ -1,10 +1,10 @@
-//! Tests of bandwidth.rs. Owner: C6. Ports from core/combine_test.go: TestCombine. New: the blind
-//! sender: with every return path blackholed for 2 s in bandwidth, bulk stays paced on two lanes in
-//! different groups (never `send_all`), and the spread resumes when echoes return. And the spread's
-//! rules on hand-built sessions.
+//! Tests of bandwidth.rs. The blind sender: with every return path blackholed for 2 s in
+//! bandwidth, bulk stays paced on two lanes in different groups (never `send_all`), and the spread
+//! resumes when echoes return. And the spread's rules on hand-built sessions. tests/pair.rs spreads
+//! bulk over two lanes end to end (`combine_spreads_bulk_over_two_lanes_and_keeps_its_order`).
 //!
 //! The pair tests drive two whole sessions through the pair driver; the unit tests use bandwidth.rs
-//! and stable.rs alone.
+//! and performance.rs alone.
 
 use std::net::SocketAddr;
 
@@ -34,48 +34,11 @@ fn spread(p: &Pair) -> Vec<u16> {
     p.s.s.spread().iter().map(|&l| p.s.s.lanes[l].id).collect()
 }
 
-/// TestCombine: bulk larger than either lane spreads over both, at about the sum of their rates,
-/// and reaches the receiver in order (§11.2, §10.3).
-#[test]
-fn bandwidth() {
-    let mut p = hotel();
-    combine_mode(&mut p);
-    for (a, rate) in [(C_WIFI, 20e6), (C_PHONE, 40e6)] {
-        let pa = p.paths.get_mut(&(S_ETH, a)).unwrap();
-        (pa.rate, pa.buf) = (rate, 60 * MS);
-    }
-    let (mut video, mut audio, mut input) = p.moonlight(45.0);
-    p.play(2 * SEC, &mut [&mut video, &mut audio, &mut input]);
-    assert_eq!(p.s.s.mode, Mode::Bandwidth);
-    let (sent, got) = (p.s.count[&video.f], p.c.got[&video.f].len());
-    p.play(4 * SEC, &mut [&mut video, &mut audio, &mut input]);
-    p.run(200 * MS);
-    let steady = &p.c.got[&video.f][got..]; // after the rates' startup
-    let sent = p.s.count[&video.f] - sent;
-    assert!(steady.len() as f64 >= 0.9 * sent as f64, "delivered {} of {sent} datagrams in steady state", steady.len());
-    let (mut late, mut top) = (0, -1);
-    for d in steady {
-        let i = i64::from(d[0]) << 16 | i64::from(d[1]) << 8 | i64::from(d[2]);
-        if i < top {
-            late += 1;
-        } else {
-            top = i;
-        }
-    }
-    assert!(late <= steady.len() / 500, "{late} of {} delivered out of order in steady state", steady.len());
-    for id in [0x0101, 0x0201] {
-        let l = &p.s.s.lanes[p.s.s.lane_by_id(id).unwrap()];
-        assert!(l.sent_bytes >= 5_000_000, "lane {id:#x} carried only {} bytes", l.sent_bytes);
-    }
-    complete(&p.c, audio.f, p.s.count[&audio.f], 0);
-    complete(&p.s, input.f, p.c.count[&input.f], 0);
-}
-
 /// The blind sender: every lane's return direction is blackholed for 2 s in bandwidth, so the
-/// sender sees no echo. The lanes turn suspect and leave (§14.2), and bulk stays paced on the
-/// blind pair, two lanes in different groups (§11.4): none goes to every lane (`send_all`, the only way bulk reaches the Tailscale lane while the
-/// hotel lane is up or suspect); the video sent from then on arrives whole and in order; and the
-/// spread resumes when echoes return (§8.4).
+/// sender sees no echo. The lanes turn suspect and leave (§14.2), and bulk stays paced on the blind
+/// pair, two lanes in different groups (§11.4): none goes to every lane (`send_all`, the only way
+/// bulk reaches the Tailscale lane while the hotel lane is up or suspect); the video sent from then
+/// on arrives whole and in order; and the spread resumes when echoes return (§11.4).
 #[test]
 fn blind_sender() {
     let mut p = hotel();
@@ -121,7 +84,7 @@ fn blind_sender() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The spread's rules on hand-built sessions: bandwidth.rs and stable.rs alone
+// The spread's rules on hand-built sessions: bandwidth.rs and performance.rs alone
 
 /// A server session in bandwidth, active, with hand-built lanes `(id, group, base OWD ms)`, each up
 /// and validated, its OWD (and newest OWD) the base OWD + 2 ms and its RTT twice that; id 0 is the

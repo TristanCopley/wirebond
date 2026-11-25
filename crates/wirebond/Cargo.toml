@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 getrandom = "0.4.3"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["raw_value"] }
+serde_json = "1.0.154"
 sha2 = "0.11.0"
 socket2 = { version = "0.6.5", features = ["all"] } # TcpKeepalive::with_retries (KEEP_COUNT, §16)
 wirebond-core = { path = "../core" }

@@ -1,20 +1,16 @@
-//! Tests of status.rs. Owner: C2. Ports from core/status_test.go: TestSnapshot, TestDeterminism
-//! (compares `Pair::wire` of two runs, one of them reading snapshots). The Rust `Problem` has no
-//! `mbps`: TestSnapshot checks the number in the message instead.
+//! Tests of status.rs.
 //!
-//! The ports and the R2-06, R2-14 pair and problems tests drive whole sessions; the others need
-//! only status.rs. The new pair and problems tests were checked against Go's core with the same
-//! fixes: they fail without them.
+//! `snapshot` and the R2-06 and R2-14 pair tests drive whole sessions; the others need only
+//! status.rs. The R2-06 and R2-14 pair tests fail without their fixes.
 
 use std::collections::BTreeMap;
 
-use crate::lane::{Lane, LaneIx, State};
+use crate::lane::{Lane, State};
 use crate::pair::*;
 use crate::{BOND_BYTES, MS, Mono, Role, SEC, STATUS_EVENTS, Session};
 
-/// Go: TestSnapshot, in performance. After video outgrows the hotel Wi-Fi, status shows both
-/// groups' lanes carrying bulk, the flows' classes, the metered rate (every packet crosses the
-/// iPhone) and no problem (§14.2–§14.4).
+/// In performance: after video outgrows the hotel Wi-Fi, status shows both groups' lanes carrying
+/// bulk, the flows' classes, the metered rate (every packet crosses the iPhone) (§20.2).
 #[test]
 fn snapshot() {
     let mut p = hotel();
@@ -39,43 +35,18 @@ fn snapshot() {
     // 10 Mbps for 3 s and 30 Mbps for 3 s of the last minute on the iPhone: 2 Mbps over it, 0.9
     // GB/h, and a little more with the packets' overhead.
     assert!((0.85..=1.2).contains(&st.metered_gb_per_hour), "metered {:.2} GB/h", st.metered_gb_per_hour);
-    assert!(st.problems.is_empty(), "problems {:?}", st.problems);
     assert!(
         st.events.len() <= STATUS_EVENTS && st.bytes > 0 && st.bytes <= BOND_BYTES,
         "events {:?}, bytes {}",
         st.events,
         st.bytes
     );
-}
-
-/// Go: TestDeterminism. The same events, times and rand stream give the same packets, and reading
-/// a snapshot changes nothing (netsim compares two runs of a seed).
-#[test]
-fn determinism() {
-    let run = |snap: bool| {
-        let mut p = hotel();
-        let (mut video, mut audio, mut input) = p.moonlight(10.0);
-        for i in 0..60 {
-            if i == 20 || i == 40 {
-                p.paths.get_mut(&(S_ETH, C_WIFI)).expect("the hotel Wi-Fi path").down = i == 20;
-            }
-            p.play(50 * MS, &mut [&mut video, &mut audio, &mut input]);
-            if snap {
-                p.s.s.snapshot();
-                p.c.s.snapshot();
-            }
-        }
-        p.wire
-    };
-    let (a, b) = (run(false), run(true));
-    assert_eq!(a.len(), b.len(), "{} packets, then {}", a.len(), b.len());
-    let packet = |it: &Item| match &it.ev {
-        Ev::Packet { sock, data, .. } => Some((it.dst, *sock, data.clone())),
-        _ => None,
-    };
-    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
-        assert!(packet(x).is_some() && packet(x) == packet(y), "packet {i} differs");
-    }
+    // What a driver checks after every call is the snapshot's own, without the rest.
+    let path = |l: &crate::LaneStatus| (l.id, l.sock, l.peer, l.validated);
+    let cheap = p.s.s.paths();
+    assert_eq!(cheap.bytes, st.bytes);
+    assert_eq!(cheap.lanes.iter().map(path).collect::<Vec<_>>(), st.lanes.iter().map(path).collect::<Vec<_>>());
+    assert!(st.lanes.iter().any(|l| l.validated && l.peer.is_some()) && cheap.flows.is_empty());
 }
 
 /// R2-06: the client sends only small input, so none of its lanes is spread, although it has a
@@ -92,41 +63,10 @@ fn roles_follow_the_bulk() {
     assert!(s.iter().any(|r| r == "spread"), "server {s:?}");
 }
 
-/// A session with a spread, a bulk flow and these lanes (id, state, OWD), offering 30 Mbps of
-/// bulk on the first lane.
-fn bulk_on(lanes: &[(u16, State, Mono)]) -> Session {
-    let mut s = Session::new(Role::Anchor, 1, DetRand::rand(2));
-    s.now = 600 * SEC;
-    for &(id, state, owd) in lanes {
-        let mut l = Lane::new(id, 10);
-        (l.state, l.validated, l.remote) = (state, true, format!("L{id:x}"));
-        l.owd = owd;
-        s.lanes.live.push(l);
-    }
-    (s.spread[0], s.nspread) = (LaneIx(0), 1);
-    let o = &mut s.lanes.live[0].offered;
-    (o.at, o.cur, o.prev) = (s.now, 0.0, 30e6 / 8.0 / 10.0); // 30 Mbps over RATE_WINDOW
-    s.flows.push(crate::flow::Flow { used: true, mine: true, id: crate::FlowId(1), ..Default::default() });
-    s
-}
-
-/// The engine raises no problem: §17's are the daemon's, and 1.x's bulk_exceeds_every_lane is
-/// gone with fits learning (§25), whatever the lanes carry.
-#[test]
-fn problems() {
-    let codes = |s: &Session| s.problems(s.now).into_iter().map(|p| (p.code, p.message)).collect::<Vec<_>>();
-    let s = bulk_on(&[(0x0101, State::Down, 50 * MS), (0x0201, State::Dormant, 30 * MS)]);
-    assert_eq!(codes(&s), []);
-    let s = bulk_on(&[(0x0101, State::Up, 50 * MS), (0x0201, State::Suspect, 30 * MS)]);
-    assert_eq!(codes(&s), [], "bulk above every lane");
-    let s = bulk_on(&[(0x0101, State::Up, 50 * MS), (0x0201, State::Up, 30 * MS)]);
-    assert_eq!(codes(&s), [], "one lane carries the stream");
-}
-
 /// R2-14 end to end: the iPhone lane cannot punch, so it never has an OWD sample, and the others
 /// are relative to the faster of them (Wi-Fi, 32 ms), not to its OWD 0. The pair's two sides share
-/// one clock, so Go showed each lane's whole OWD here (33 and 32 ms); across two devices' clocks it
-/// showed their offset.
+/// one clock, so a base of OWD 0 would show each lane's whole OWD here (33 and 32 ms); across two
+/// devices' clocks it would show their offset.
 #[test]
 fn owd_relative_with_an_unpunched_lane() {
     let mut p = Pair::new(33 * MS);
