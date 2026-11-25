@@ -99,8 +99,8 @@ GitHub's CLI checks: `gh attestation verify wirebond-Linux-x86_64 --repo Tristan
 
 4. **Moonlight:** on the client, add the host at the anchor's bond address, **10.77.0.1**
    (**192.168.137.1** for a Windows anchor while its Internet Connection Sharing shares the uplink;
-   if the sharing starts later, the bond reconnects by itself and the address moves there, where
-   Moonlight's host is added again).
+   if the sharing starts or stops later, the bond reconnects by itself and the address moves,
+   and Moonlight's host is added again at the new one).
    `wirebond status` prints that line while the bond is up. Sunshine's ports need no forwarding.
    Not the anchor's mesh address: traffic to that stays on the mesh and is not bonded.
 
@@ -165,7 +165,7 @@ step. The daemon's log is `wirebond.log` in its state directory: `/var/lib/wireb
 | `captive_portal` on a link | The hotel's sign-in ran out | `sudo wirebond client off`, sign in, start the bond again |
 | `mesh_captured`, and capture is removed | The mesh's own packets entered the bond: an exit node is on, or Tailscale restarted | Exit node off, then start the bond again |
 | `no_egress` on the anchor | It could not open its device, share its uplink or start its DNS relay: the message says which | Mend what the message names, then `sudo wirebond anchor on` on the anchor, which tries again. If the sharing starts, a bonded client reconnects by itself within a few seconds and takes the new terms; a Windows anchor's address becomes 192.168.137.1, which the client's new `Moonlight:` line gives |
-| Moonlight cannot reach the host | It is aimed at another address, or a Windows anchor's sharing started since and moved its address | Use the address on status's `Moonlight:` line. On the client, `curl http://<that address>:47989/serverinfo` prints XML when Sunshine answers |
+| Moonlight cannot reach the host | It is aimed at another address, or a Windows anchor's sharing started or stopped since and moved its address | Use the address on status's `Moonlight:` line. On the client, `curl http://<that address>:47989/serverinfo` prints XML when Sunshine answers |
 | The stream stutters | A link is late or losing | `wirebond status --watch` shows each lane's delay, loss and share. Lower Moonlight's bitrate |
 | No internet after the bond ended | Capture is still in place | `sudo wirebond client off` |
 | The phone's link turned slow | Its hotspot allowance is used up | The carrier's app says |
