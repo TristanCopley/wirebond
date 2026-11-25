@@ -46,7 +46,7 @@ A bond runs in one of two modes. **Performance**, the default, sends every packe
 | Bottleneck group | Links that share a choke point: the same public address or the same gateway. A copy helps only when it goes through a different group. |
 | Lane | One encrypted UDP path from one client link to one anchor link, plus one lane over the mesh between the two mesh addresses. |
 | Bond | One client, one anchor, their lanes and a mode. |
-| Bond addresses | The private addresses the anchor gives the bond: the anchor is 10.77.0.1 and fd77:b0d::1; each client gets 10.77.0.N and fd77:b0d::N. A Windows anchor uses 192.168.137.0/24, which ICS sets (§6.2). |
+| Bond addresses | The private addresses the anchor gives the bond: the anchor is 10.77.0.1 and fd77:b0d::1; each client gets 10.77.0.N and fd77:b0d::N. A Windows anchor uses 192.168.137.0/24 while ICS shares its uplink, since ICS sets that subnet (§6.2). |
 | Route | The bond, plus the anchor's leg to the destination. |
 | Flow | One conversation, keyed by protocol, source and destination address, and source and destination port (§13). |
 | Small flow | A flow direction under 1 Mbps over 200 ms: input, voice, control. |
@@ -66,13 +66,13 @@ A node has exactly one role at a time: `client`, `anchor`, `support` or `none`. 
 
 1. The client resolves the anchor's name through the system resolver (MagicDNS) or takes a literal mesh address. It dials TCP `PORT` (7849) on the anchor's mesh address.
 2. Both sides send `hello` (§16). A major-version mismatch, or a client not on the allow-list, gets `error` and the channel closes.
-3. The client sends `bond` with `op: "open"` and its mode. The anchor answers `bond` with `op: "ok"`: the client's bond addresses, the MTU, the DNS address and the anchor's egress (`v4`, `v6`, both or none).
+3. The client sends `bond` with `op: "open"` and its mode. The anchor answers `bond` with `op: "ok"`: the client's bond addresses, the MTU, the DNS address and the anchor's egress (`v4`, `v6`, both or none). These are the bond's terms. If they change while the bond is open, the client gets the new ones from its next `bond open`: the anchor closes the bond, so that the client redials (§17, which also says what becomes of a bond whose channel is down then).
 4. Each side sends `key` for its sending direction (§10.2) and `links` with its candidates (§9).
 5. Punching and path validation (§9.4) bring lanes up. The mesh lane comes up first, because the mesh already connects the two addresses.
 6. Once at least one lane is validated, the client installs capture (§5.4) and traffic flows.
 7. Teardown (`wirebond client off`, a role change or daemon exit): the client removes capture first, then sends `bond` with `op: "close"`, then closes the channel. The anchor frees the bond's state within 1 s.
 
-An anchor keeps each client's bond addresses for as long as the client stays on its allow-list, so a reconnect keeps them. NAT state on the anchor does not survive a reconnect, and open connections through the internet break.
+An anchor keeps each client's bond addresses for as long as the client stays on its allow-list, so a reconnect keeps them, unless the bond subnet moved meanwhile (Windows' sharing, §6.2): then they keep their host number in the new subnet. NAT state on the anchor does not survive a reconnect, and open connections through the internet break.
 
 ## 4. Architecture
 
@@ -109,7 +109,7 @@ Per packet, the cost is one TUN read and one `sendto` per lane it goes out on; o
 | --- | --- |
 | Name | `wb0` on Linux, `utunN` on macOS, an adapter named `wirebond` on Windows |
 | MTU | `TUN_MTU` (1400). A lane packet then fits 1500 bytes over IPv4 (1400 + 33 + 28 = 1461) and over IPv6 (1481). TCP over it negotiates an MSS of 1360. |
-| Addresses | as given by the anchor in `bond ok`: 10.77.0.N/24 and fd77:b0d::N/64, or 192.168.137.N/24 from a Windows anchor |
+| Addresses | as given by the anchor in `bond ok`: 10.77.0.N/24 and fd77:b0d::N/64, or 192.168.137.N/24 from a Windows anchor while its Internet Connection Sharing shares the uplink (§6.2) |
 
 ### 5.2 What goes in, what stays out
 
@@ -163,9 +163,9 @@ When the anchor offers IPv4 egress only, the client still captures IPv6, so noth
 
 ### 6.1 Interface and local delivery
 
-The anchor's interface has 10.77.0.1/24 and fd77:b0d::1/64, or 192.168.137.1/24 on Windows (§6.2).
+The anchor's interface has 10.77.0.1/24 and fd77:b0d::1/64, or 192.168.137.1/24 on Windows while Internet Connection Sharing shares the uplink (§6.2).
 
-- **Delivered locally:** packets for these addresses go to the anchor's own services. Moonlight on the client adds the host at the anchor's bond address (`10.77.0.1`, or `192.168.137.1` for a Windows anchor), and status prints that line while the bond is up.
+- **Delivered locally:** packets for these addresses go to the anchor's own services. Moonlight on the client adds the host at the anchor's bond address (`10.77.0.1`, or `192.168.137.1` for a Windows anchor that shares its uplink), and status prints that line while the bond is up.
 - **Not routed through the bond:** the anchor's mesh address. Traffic to it, the control channel included, stays on the mesh.
 
 ### 6.2 Forwarding and NAT
@@ -176,7 +176,7 @@ The anchor's interface has 10.77.0.1/24 and fd77:b0d::1/64, or 192.168.137.1/24 
 | macOS | `net.inet.ip.forwarding=1`, `net.inet6.ip6.forwarding=1` | pf rules loaded into the anchor `com.apple/wirebond`, which the default `/etc/pf.conf` already includes through `nat-anchor "com.apple/*"`: `nat on <uplink> inet from 10.77.0.0/24 -> (<uplink>)` and the IPv6 equivalent; pf enabled with `pfctl -E`, and that reference released on exit | yes |
 | Windows | Internet Connection Sharing (ICS), through the `HNetCfg.HNetShare` COM object, shares the uplink to the `wirebond` adapter and readdresses it to 192.168.137.1/24 | ICS's own NAT. It works on Home and Pro; WinNAT's `New-NetNat` needs Hyper-V, which Home lacks | no |
 
-On Windows, ICS serves one shared adapter at a time. If it is already in use (Mobile Hotspot also uses it) or is refused, the anchor still delivers locally and offers no egress (§5.2). On Linux the daemon reports `missing_tool nft` if nftables is absent. The uplink is the interface of the anchor's default route; it is re-checked every `LINK_SCAN` (2 s) and the NAT rules follow it.
+On Windows, ICS serves one shared adapter at a time. If it is already in use (Mobile Hotspot also uses it) or is refused, the anchor still delivers locally and offers no egress (§5.2). Sharing is tried again on `wirebond anchor on` while the anchor reports a fault, and when the default route appears or moves. When it starts, the adapter becomes 192.168.137.1/24; when a later try fails, the adapter takes the first address of the bond's own subnet again. Either way the bond subnet moves, and the anchor closes its open bonds, which reopen in the new subnet (§17). On Linux the daemon reports `missing_tool nft` if nftables is absent. The uplink is the interface of the anchor's default route; it is re-checked every `LINK_SCAN` (2 s) and the NAT rules follow it.
 
 ### 6.3 Safety
 
@@ -511,6 +511,7 @@ Error codes: `version`, `not_allowed`, `too_many_bonds`, `busy` (a `pick` in pro
 | Captive portal | On link up, and at every link scan while the link is marked captive, the node fetches `http://captive.apple.com/hotspot-detect.html` over that link. Anything but `Success` marks the link captive, and it carries no lane. If the bond is up through another link, the login page would go through the anchor, so status shows `captive_portal <link>`: run `wirebond client off`, log in, then `wirebond client <anchor>`. |
 | Sleep and wake | Wake detection (§11.4): re-punch, fresh estimates, keys kept. |
 | A link appears or vanishes | Rescan within 2 s, re-punch, recompute groups. |
+| An anchor's terms change while bonds are open: its egress comes, goes or changes kind (`v4`, `v6`, `both`), or the bond subnet moves (Windows' sharing, §6.2) | The anchor sends `bond close` on each bond whose terms changed and whose channel is up. The client removes capture and redials after `REDIAL_MIN` (1 s), with `anchor_unreachable` in status meanwhile, and the bond that reopens carries the new terms (§3.2 step 3). Connections break as when capture returns after fail open: with egress newly there, the client's direct ones; with egress gone, those through the anchor. When the subnet moved, the anchor's bond address moved with it (10.77.0.1 to 192.168.137.1 on Windows): what was aimed at the old one must be aimed at the new one, which status prints on its `Moonlight:` line, and Moonlight's host is added again there. A bond whose channel is down at the time cannot be told. While the new egress carries every family the old one did (egress came, or gained a family), the anchor keeps the bond and the client its capture, by the old terms; when the channel returns, the anchor's `bond ok` gives the same bond the new egress, and a client to which egress is new installs capture again by it, keeping the session. If a family of the egress is gone, or the subnet moved, the anchor ends the bond, since its client would go on sending into nothing: the client stops hearing the anchor and fails open (bond lost), or takes a new bond if its channel returns first. |
 | Mesh down, lanes up | Direct lanes keep carrying the bond, idle or not: the client's probes (§11.1) tell each side the other is there. Keys ratchet by derivation. The channel redials. |
 | Every lane down, channel up for `ALL_LANES_DOWN` (2 s) | Redial the channel, then re-punch. |
 | Only the mesh lane after `MESH_ONLY_AFTER` (30 s) | Problem `mesh_only`: the bond gives no gain over the baseline. |
@@ -751,7 +752,7 @@ Every role runs as a system service:
  "bond_net4": "10.77.0.0/24", "bond_net6": "fd77:b0d::/64", "mesh": ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]}
 ```
 
-`bond_net4` and `bond_net6` can change if a local network already uses 10.77.0.0/24. A Windows anchor ignores `bond_net4`: ICS fixes 192.168.137.0/24. `mesh` lists the mesh's ranges for meshes other than Tailscale.
+`bond_net4` and `bond_net6` can change if a local network already uses 10.77.0.0/24. While a Windows anchor's ICS shares its uplink, it uses 192.168.137.0/24, which ICS fixes, in place of `bond_net4`. `mesh` lists the mesh's ranges for meshes other than Tailscale.
 
 ### 22.5 Build
 
