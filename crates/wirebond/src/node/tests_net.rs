@@ -520,6 +520,22 @@ fn sharing_that_moves_the_subnet_reopens_the_bond_there() {
     assert_eq!(c.calls(), ["capture on", "capture off", "capture on"], "the old capture went before the new one");
 }
 
+/// Sends a packet each way through the bond of anchor `a` and client `c` (in 10.77.0.0/24), and
+/// holds that the client hears the anchor meanwhile: the two sessions open each other's packets.
+fn carries_both_ways(a: &mut Node, c: &mut Node) {
+    let heard = |c: &Node| c.d.bonds[0].session.as_ref().and_then(|s| bond::heard(&s.snapshot(), true));
+    let was = heard(c);
+    let up = udp_to("1.1.1.1:53".parse().unwrap());
+    c.tun.inject(up.clone());
+    run(&mut [&mut *a, &mut *c], "client to anchor", |n| n[0].tun.written().contains(&up));
+    let mut down = up.clone();
+    down[12..16].copy_from_slice(&[1, 1, 1, 1]);
+    down[16..20].copy_from_slice(&[10, 77, 0, 2]);
+    a.tun.inject(down.clone());
+    run(&mut [&mut *a, &mut *c], "anchor to client", |n| n[1].tun.written().contains(&down));
+    assert!(heard(c) > was, "the client hears the anchor");
+}
+
 /// Windows' sharing starts on anchor `a`'s next try (§6.2): IPv4 only, and the adapter moves to
 /// 192.168.137.1/24.
 fn sharing_starts(a: &Node) {
@@ -636,12 +652,67 @@ fn egress_that_goes_while_the_channel_is_down_ends_the_bond() {
             && n[1].d.capture.as_ref().is_some_and(|cap| cap.routes == host::Routes::BondOnly)
     });
     assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::None, Egress::None));
+    carries_both_ways(&mut a, &mut c);
 }
 
-/// §5.5, §17: what holds for the whole egress holds for a family of it. An anchor that loses its
-/// IPv6 egress while a bond's channel is down ends the bond, whose client would go on sending
-/// IPv6 into it; one that gains IPv6 keeps the bond, which takes the wider egress when its
-/// channel returns, with the capture it has: the routes and the DNS are the same.
+/// §17: the channel of a bond the anchor ended untold may return before its client has failed
+/// open. The client then takes the anchor's `bond ok` for its own bond, keeps its session and
+/// installs capture again by the new terms, and that session and the anchor's new one carry
+/// packets both ways.
+#[test]
+fn a_bond_ended_untold_takes_the_new_terms_if_its_channel_returns_first() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(85, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(85, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(85, 2))], ip(85, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(85, 1))], ip(85, 10), ccfg);
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    let owners = (a.d.bonds[0].owner, c.d.bonds[0].owner);
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_err = Some("sharing stopped".into());
+    a.d.anchor_on();
+    assert!(a.d.bonds.is_empty(), "{:?}", a.d.logs);
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "the new terms", |n| {
+        n[1].d.bonds[0].state == BondState::Up
+            && n[1].d.capture.as_ref().is_some_and(|cap| cap.routes == host::Routes::BondOnly)
+    });
+    assert_eq!(c.d.bonds[0].owner, owners.1, "the client's own bond and session");
+    assert_ne!(a.d.bonds[0].owner, owners.0, "the anchor's new ones");
+    assert_eq!(c.calls(), ["capture on", "capture off", "capture on"], "never without the bond's routes for long");
+    carries_both_ways(&mut a, &mut c);
+}
+
+/// §5.5, §17: egress that comes with one family while a bond's channel is down keeps the bond;
+/// when the channel returns the same bond takes it, and its client captures everything.
+#[test]
+fn egress_of_one_family_that_appears_while_the_channel_is_down_comes_when_it_returns() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(84, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(84, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(84, 2))], ip(84, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(84, 1))], ip(84, 10), ccfg);
+    {
+        let mut k = a.knobs.lock().unwrap();
+        (k.egress_err, k.egress_v4_only) = (Some("no default route".into()), true);
+    }
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some() && n[1].d.bonds[0].state == BondState::Up);
+    let owner = c.d.bonds[0].owner;
+    channel_down(&mut a, &mut c);
+    a.knobs.lock().unwrap().egress_err = None;
+    a.d.anchor_on();
+    let said = "egress is now V4: the bond takes it when its channel returns";
+    assert!(a.d.bonds.len() == 1 && a.d.logs.iter().any(|l| l.ends_with(said)), "{:?}", a.d.logs);
+    c.d.redial_at = 0;
+    run(&mut [&mut a, &mut c], "capture by the new terms", |n| {
+        n[1].d.capture.as_ref().is_some_and(|cap| cap.routes == host::Routes::All)
+    });
+    assert_eq!((c.d.bonds[0].owner, c.d.bonds[0].egress, a.d.bonds[0].egress), (owner, Egress::V4, Egress::V4));
+    assert_eq!(c.calls(), ["capture on", "capture off", "capture on"]);
+}
+
+/// §5.5, §17: a bond whose channel is down stays while a family of its egress does. An anchor
+/// that gains IPv6 keeps the bond, and so does one that loses IPv6 and keeps IPv4, whose client
+/// would lose a working bond for the sake of one family. Either way the bond takes the new egress
+/// when its channel returns, with the capture it has: the routes and the DNS are the same.
 #[test]
 fn a_family_of_egress_that_goes_or_comes_while_the_channel_is_down() {
     let acfg = Config { role: Role::Anchor, allow: vec![ip(83, 10).to_string()], ..Config::default() };
@@ -661,22 +732,16 @@ fn a_family_of_egress_that_goes_or_comes_while_the_channel_is_down() {
     c.d.redial_at = 0;
     run(&mut [&mut a, &mut c], "the channel returns", |n| n[1].d.bonds[0].egress == Egress::Both);
     assert_eq!((c.d.bonds[0].owner, c.calls()), (owner, vec!["capture on".to_string()]), "the same bond and capture");
-    // IPv6 goes: the bond ends.
+    // IPv6 goes: the bond stays too, for the IPv4 it still carries.
     channel_down(&mut a, &mut c);
     a.knobs.lock().unwrap().egress_v4_only = true;
     a.d.anchor_on();
-    let said = "egress is now V4: ending the bond, whose channel is down";
-    assert!(a.d.bonds.is_empty() && a.d.logs.iter().any(|l| l.ends_with(said)), "{:?}", a.d.logs);
-    // The channel returns before the client has failed open: the bond it kept meets the anchor's
-    // new one, and each hears the other for longer than a silent lane lasts.
+    let said = "egress is now V4: the bond takes it when its channel returns";
+    assert!(a.d.bonds.len() == 1 && a.d.logs.iter().any(|l| l.ends_with(said)), "{:?}", a.d.logs);
     c.d.redial_at = 0;
-    run(&mut [&mut a, &mut c], "the channel returns", |n| {
-        n[0].d.bonds.first().is_some_and(|b| b.state == BondState::Up) && n[1].d.bonds[0].egress == Egress::V4
-    });
-    let until = Instant::now() + Duration::from_secs(3);
-    run(&mut [&mut a, &mut c], "a while", |_| Instant::now() >= until);
-    assert_eq!((c.d.bonds[0].state, a.d.bonds[0].state), (BondState::Up, BondState::Up), "{:#?}", c.d.status(false));
-    assert_eq!(c.calls(), ["capture on"], "an egress that stays keeps the capture");
+    run(&mut [&mut a, &mut c], "the channel returns", |n| n[1].d.bonds[0].egress == Egress::V4);
+    assert_eq!((c.d.bonds[0].owner, c.calls()), (owner, vec!["capture on".to_string()]), "the same bond and capture");
+    carries_both_ways(&mut a, &mut c);
 }
 
 /// §5.3, §17: a bond whose capture is off for `mesh_captured` keeps it off when new terms come

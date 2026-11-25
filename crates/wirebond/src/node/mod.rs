@@ -1949,15 +1949,20 @@ impl Daemon {
     /// closes them: each client removes capture and redials (§17), and the bond that reopens has
     /// the new terms.
     ///
-    /// A bond whose channel is down cannot be told. It is left alone while the new egress carries
-    /// every family the old one did: when the channel returns, `bond_open` keeps it and gives it
-    /// the new egress, and the client's `bond_ok` captures again by it. It ends where its client
-    /// would go on sending into nothing: a family of its egress is gone, or its addresses left
-    /// the subnet, so that the anchor's device no longer has the address its traffic goes to.
-    /// That client stops hearing the anchor and fails open (§17).
+    /// A bond whose channel is down cannot be told. It ends where its client would go on sending
+    /// into nothing: its addresses left the subnet, so that the anchor's device no longer has the
+    /// address its traffic goes to, or no family of its egress is left. That client stops hearing
+    /// the anchor and fails open (§17), or takes the new terms when its channel returns, if that
+    /// is sooner. Any other bond is left alone, with what a family of egress still carries: when
+    /// the channel returns, `bond_open` keeps it and gives it the new egress, and the client's
+    /// `bond_ok` installs capture again where egress came (another family changes neither routes
+    /// nor DNS, and a client answers the IPv6 its anchor lost itself, §5.5).
     fn terms_changed(&mut self) {
         let egress = self.egress_kind();
-        let keeps = |was: Egress| was == egress || was == Egress::None || egress == Egress::Both;
+        // Whether a bond told `was` can go on: it had no egress, or a family of it still leaves here.
+        let keeps = |was| {
+            matches!((was, egress), (Egress::None, _) | (_, Egress::Both) | (Egress::Both, Egress::V4 | Egress::V6))
+        };
         let mut bi = 0;
         while bi < self.bonds.len() {
             let b = &self.bonds[bi];
