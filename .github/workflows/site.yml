@@ -1,7 +1,8 @@
 # The website in site/: type and Svelte checks, the static build, and the Playwright smoke test
-# against that build, at the root and under GitHub Pages' /wirebond. On main, once the owner turns
-# GitHub Pages on (Settings, Pages, Source: GitHub Actions), it also publishes the site there;
-# until then the deploy says Pages is off and ends successfully.
+# against that build, at the root and under GitHub Pages' /wirebond. On main, once GitHub Pages'
+# source is GitHub Actions (Settings, Pages, Build and deployment, Source), it also publishes the
+# site there; until then the pages job says why nothing is deployed (Pages off, or publishing from
+# a branch), the deploy job is skipped and the run succeeds.
 name: site
 
 on:
@@ -10,7 +11,7 @@ on:
     paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
   pull_request:
     paths: ['site/**', 'README.md', 'SPEC.md', '.github/workflows/site.yml']
-  # To publish at once after turning Pages on, or to refresh the release a page lists without
+  # To publish at once after setting Pages' source, or to refresh the release a page lists without
   # JavaScript (the download page asks GitHub again in the browser).
   workflow_dispatch:
 

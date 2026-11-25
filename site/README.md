@@ -18,12 +18,14 @@ Node 22.17 or later. `npm run dev` serves it with reloads while you edit. CI
 to build and test for any host that serves the site below its root. Pages are written as
 `download.html` and so on, which most hosts serve at `/download`.
 
-**Publishing.** The site publishes itself to GitHub Pages once the owner turns Pages on: Settings,
-Pages, Source: GitHub Actions. From then on every push to `main` that changes the site, README.md
-or SPEC.md deploys it to <https://tristancopley.github.io/wirebond/>, and running the `site`
-workflow by hand (Actions, site, Run workflow) deploys at once. Until Pages is on, the deploy step
-says so in its log and summary and succeeds. A custom domain is the owner's choice to make, since
-it costs money; none is set up, and the workflow follows one if it is added in the same settings.
+**Publishing.** The site publishes itself to GitHub Pages once Pages' source is GitHub Actions:
+Settings, Pages, Build and deployment, Source. From then on every push to `main` that changes the
+site, README.md or SPEC.md deploys it to <https://tristancopley.github.io/wirebond/>, and running
+the `site` workflow by hand on `main` (Actions, site, Run workflow) deploys at once. Until then
+the workflow's `pages` job says why nothing is deployed (Pages off, or publishing from a branch)
+in its log and summary, and the run succeeds. A custom domain is the owner's choice to make,
+since it costs money; none is set up, and the workflow follows one if it is added in the same
+settings.
 
 **One source of truth.** The site holds no copy of README.md or SPEC.md. `src/lib/server/markdown.ts`
 imports both from the repository root when the site is built and renders them. The landing page

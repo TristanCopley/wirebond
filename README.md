@@ -117,8 +117,10 @@ laptop at a hotel, which is the client, with the hotel's Wi-Fi and a phone on US
 1. Pair Moonlight with the PC as you normally would. Sunshine needs no change: it listens on every
    address, the bond's included.
 2. Keep the mesh up on the PC with nobody signed in: in Tailscale, turn on "Run unattended" and turn
-   off the PC's key expiry. Note both devices' mesh addresses (`tailscale ip -4`): wirebond takes an
-   address wherever it takes a name, and an address needs no lookup from a hotel.
+   off the PC's key expiry. Keep the PC itself awake too (on Windows: Settings, System, Power,
+   sleep "Never" when plugged in): an anchor asleep is an anchor gone. Note both devices' mesh
+   addresses (`tailscale ip -4`): wirebond takes an address wherever it takes a name, and an
+   address needs no lookup from a hotel.
 3. Forward UDP port 7849 on the home router to the PC. Lanes are UDP between the client's links
    and the anchor, and a phone carrier's address translation is of the kind a home router does not
    let in unasked; with the port forwarded, the phone's lane reaches the anchor whatever the carrier
