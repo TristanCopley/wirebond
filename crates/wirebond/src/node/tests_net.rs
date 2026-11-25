@@ -416,6 +416,39 @@ fn a_client_of_an_anchor_without_egress_leaves_dns_alone() {
     assert!(st.problems.iter().all(|p| p.code != problem::DNS_LOCAL), "{st:?}");
 }
 
+/// §3.2, §6.2: a bond's terms are given when it opens. An anchor whose egress comes up later (its
+/// sharing worked on a later try) closes the bonds opened without it, so each reopens with the
+/// new terms: the client that had the bond's subnets only and its own DNS now captures everything
+/// and asks the anchor's relay. Bonds whose terms did not change are left alone.
+#[test]
+fn egress_that_appears_later_reopens_the_bonds_with_it() {
+    let acfg = Config { role: Role::Anchor, allow: vec![ip(75, 10).to_string()], ..Config::default() };
+    let ccfg = Config { role: Role::Client, anchor: Some(ip(75, 20).to_string()), ..Config::default() };
+    let mut a = node("xanth", &[("eth0", ip(75, 2))], ip(75, 20), acfg);
+    let mut c = node("mac", &[("lo-a", ip(75, 1))], ip(75, 10), ccfg);
+    a.knobs.lock().unwrap().egress_err = Some("sharing is off".into());
+    run(&mut [&mut a, &mut c], "bond up", |n| n[1].d.capture.is_some());
+    assert_eq!(c.d.capture.as_ref().map(|cap| cap.routes), Some(host::Routes::BondOnly));
+    assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::None, Egress::None));
+    // Egress tried again with nothing new: the bond stays as it is.
+    let (owner, oks) = (c.d.bonds[0].owner, |n: &Node| n.d.logs.iter().filter(|l| l.contains(": bond ok: ")).count());
+    a.d.anchor_on();
+    let until = Instant::now() + Duration::from_millis(300);
+    run(&mut [&mut a, &mut c], "a moment", |_| Instant::now() >= until);
+    assert_eq!((c.d.bonds[0].owner, oks(&c), a.d.bonds.len()), (owner, 1, 1), "nothing changed, nothing closed");
+    // Sharing works on the next try.
+    a.knobs.lock().unwrap().egress_err = None;
+    a.d.anchor_on();
+    run(&mut [&mut a, &mut c], "the bond reopens", |n| oks(n[1]) == 2 && n[1].d.capture.is_some());
+    let cap = c.d.capture.clone().unwrap();
+    assert_eq!((cap.routes, cap.dns), (host::Routes::All, Some("10.77.0.1".parse().unwrap())));
+    assert_eq!((c.d.bonds[0].egress, a.d.bonds[0].egress), (Egress::Both, Egress::Both));
+    let st = c.d.status(false);
+    assert!(st.problems.iter().all(|p| p.code != problem::NO_EGRESS), "{st:?}");
+    let calls = c.calls();
+    assert_eq!(calls, ["capture on", "capture off", "capture on"], "the old capture went before the new one");
+}
+
 #[test]
 fn the_anchor_follows_its_uplink() {
     let acfg = Config { role: Role::Anchor, ..Config::default() };
